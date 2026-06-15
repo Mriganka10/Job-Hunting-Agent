@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 venv/
 env/
+.idea/
 data/
 config.toml
 .DS_Store

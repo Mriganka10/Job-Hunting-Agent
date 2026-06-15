@@ -43,6 +43,8 @@ For PDF and DOCX resume support:
 pip install -e ".[dev,docs]"
 ```
 
+The web UI dependencies are included in the base package dependencies. The `dev` extra installs test tools.
+
 ## Configure the Agent
 
 ```bash
@@ -99,6 +101,34 @@ python -m job_hunting_agent run --resume /path/to/resume.pdf --config config.tom
 
 The scheduler uses the local machine time zone. For long-running daily automation, run this command under a process manager, cron, launchd, systemd, or a cloud scheduler.
 
+## Run Web UI
+
+```bash
+python -m job_hunting_agent serve --host 127.0.0.1 --port 8000
+```
+
+Open:
+
+```text
+http://127.0.0.1:8000
+```
+
+The UI supports:
+
+- Resume upload in PDF, DOCX, TXT, or MD format.
+- LinkedIn profile URL input.
+- Naukri profile URL input.
+- Target roles, locations, and skills.
+- Draft or email application mode.
+- Immediate agent run.
+- Daily schedule while the server process is running.
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
 ## Run Tests
 
 ```bash
@@ -141,4 +171,3 @@ Check SMTP host, port, username, password, and whether the email provider requir
 ### Duplicate applications
 
 The agent uses `data/applications.jsonl` as a local ledger. Delete that file only if you intentionally want the agent to treat all jobs as new again.
-

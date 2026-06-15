@@ -17,8 +17,9 @@ The system can:
 7. Optionally send recruiter emails through SMTP.
 8. Track application actions in a local ledger.
 9. Run once or daily from the CLI.
+10. Run from a local web UI with resume upload and profile URL fields.
 
-This is not yet a full production portal automation product. It is a working technical POC for the core intelligence and workflow layer.
+This is not yet a full production portal automation product. It is a working technical POC for the core intelligence, UI, and workflow layer.
 
 ## 2. How You Should Review the Repository
 
@@ -36,7 +37,7 @@ Purpose:
 
 What to understand:
 
-- The current project is a Python CLI.
+- The current project has a Python CLI and a local FastAPI web UI.
 - The resume is the main input.
 - Portal automation is adapter-based.
 - Draft mode is the safest default.
@@ -65,7 +66,7 @@ Purpose:
 Simple explanation:
 
 ```text
-Resume + Config -> CLI -> Agent -> ATS Score -> Portal Search -> Drafts/Emails -> Reports
+Resume + Config -> CLI/Web UI -> Agent -> ATS Score -> Portal Search -> Drafts/Emails -> Reports
 ```
 
 Use this document with the technical team.
@@ -89,6 +90,12 @@ source .venv/bin/activate
 pip install -e ".[dev,docs]"
 cp config.example.toml config.toml
 python -m job_hunting_agent run --resume /path/to/resume.pdf --config config.toml --once
+```
+
+Run the web UI:
+
+```bash
+python -m job_hunting_agent serve --host 127.0.0.1 --port 8000
 ```
 
 ### Step 5: CLI Reference
@@ -137,7 +144,7 @@ Purpose:
 
 Tell the technical team:
 
-"This is a Python CLI POC for a resume-driven job hunting assistant. The current system parses a resume, scores it for ATS readiness, searches LinkedIn and Naukri through adapters, creates application drafts, optionally sends recruiter emails through SMTP, and stores run outputs locally. The next major work is authenticated browser automation and a human approval workflow."
+"This is a Python POC for a resume-driven job hunting assistant. The current system has both CLI and local web UI entry points. It parses a resume, scores it for ATS readiness, searches LinkedIn and Naukri through adapters, creates application drafts, optionally sends recruiter emails through SMTP, and stores run outputs locally. The next major work is authenticated browser automation and a human approval workflow."
 
 ## 4. Technical Team Walkthrough
 
@@ -149,8 +156,9 @@ Ask the technical team to follow these steps:
 4. Run the ATS score command.
 5. Run the search command.
 6. Run the full agent once in draft mode.
-7. Inspect `data/reports`, `data/drafts`, and `data/applications.jsonl`.
-8. Run tests with `python -m pytest -q`.
+7. Start the web UI and run an upload-based workflow.
+8. Inspect `data/reports`, `data/drafts`, and `data/applications.jsonl`.
+9. Run tests with `python -m pytest -q`.
 
 ## 5. Business Demo Script
 
@@ -158,16 +166,17 @@ Use this flow for a demo:
 
 1. Show the resume as the only required file input.
 2. Show `config.toml` with target roles and locations.
-3. Run ATS scoring.
-4. Open the generated ATS report.
-5. Run job search.
-6. Run the full agent in draft mode.
-7. Show generated application drafts.
-8. Explain that actual portal submission is the next phase because LinkedIn and Naukri require account-specific authenticated flows.
+3. Open the web UI.
+4. Upload a resume and add LinkedIn/Naukri profile URLs.
+5. Run the agent and show the ATS score.
+6. Show resume suggestions and missing keywords.
+7. Show job leads and generated application drafts.
+8. Enable daily scheduling for the server session.
+9. Explain that actual portal submission is the next phase because LinkedIn and Naukri require account-specific authenticated flows.
 
 ## 6. Current Limitations
 
-- No web dashboard yet.
+- Web UI is local prototype only.
 - No database yet.
 - No authenticated portal browser automation yet.
 - No CAPTCHA or OTP handling.
@@ -180,6 +189,5 @@ Use this flow for a demo:
 2. Add human approval queue.
 3. Add browser automation spike for LinkedIn Easy Apply.
 4. Add browser automation spike for Naukri profile-based applications.
-5. Add a small web UI or FastAPI API.
+5. Add authenticated browser automation behind the current FastAPI UI.
 6. Add database-backed application history.
-

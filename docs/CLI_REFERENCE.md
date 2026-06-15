@@ -61,6 +61,20 @@ Purpose:
 - Keep the process alive.
 - Run the full job hunting workflow once per day at the configured local time.
 
+### Serve Web UI
+
+```bash
+python -m job_hunting_agent serve --host 127.0.0.1 --port 8000
+```
+
+Purpose:
+
+- Start the FastAPI web UI.
+- Upload resume files.
+- Submit LinkedIn and Naukri profile URLs.
+- Run the agent immediately.
+- Start or stop an in-process daily scheduler.
+
 ## Configuration Reference
 
 ### Profile
@@ -125,3 +139,9 @@ A future web version can expose:
 
 Portal submission endpoints should remain approval-gated.
 
+Current web endpoints:
+
+- `GET /`
+- `GET /health`
+- `POST /api/run`
+- `POST /api/scheduler/stop`

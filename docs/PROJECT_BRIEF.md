@@ -21,6 +21,7 @@ The current proof of concept focuses on these capabilities:
 6. Optional recruiter email sending through SMTP.
 7. Local application ledger to avoid duplicate applications.
 8. Daily CLI scheduler.
+9. Web UI for resume upload, portal profile URLs, immediate execution, and daily scheduling.
 
 The prototype does not yet perform authenticated one-click portal submissions. LinkedIn and Naukri often require login, CAPTCHA, changing application forms, and user-specific consent flows. Those flows should be implemented as authenticated browser adapters after account-specific testing.
 
@@ -42,7 +43,7 @@ The prototype does not yet perform authenticated one-click portal submissions. L
 
 ## Current Status
 
-The repository contains a working Python CLI proof of concept. It has a small agent orchestration layer, deterministic ATS scoring, public job-search adapters, draft/email application handling, reports, and tests.
+The repository contains a working Python proof of concept with both CLI and web UI entry points. It has a small agent orchestration layer, deterministic ATS scoring, public job-search adapters, draft/email application handling, reports, daily scheduling, and tests.
 
 Current portal support:
 
@@ -50,4 +51,3 @@ Current portal support:
 - Naukri: best-effort public job discovery with search URL fallback.
 
 Future production versions should add authenticated browser automation, explicit human approval, richer resume tailoring, and stronger job matching.
-
