@@ -11,6 +11,8 @@ Status: implemented.
 - Draft generation.
 - Optional SMTP email sending.
 - Local ledger and reports.
+- Web UI for resume upload and profile URLs.
+- In-process daily web scheduler.
 - Basic tests.
 
 ## Phase 2: Better Matching
@@ -29,6 +31,7 @@ Status: implemented.
 - Store approval status.
 - Add email preview before sending.
 - Add daily summary report.
+- Add UI controls to approve or reject each found job before submission.
 
 ## Phase 4: Authenticated Portal Automation
 
@@ -40,8 +43,7 @@ Status: implemented.
 
 ## Phase 5: Web Dashboard
 
-- Add a FastAPI backend.
-- Add a dashboard for resume upload, ATS score, job leads, drafts, approvals, and application history.
+- Expand the current FastAPI UI into a fuller dashboard for ATS score, job leads, drafts, approvals, and application history.
 - Add authentication.
 - Add database persistence.
 - Add scheduled background jobs.
@@ -62,4 +64,3 @@ Status: implemented.
 - Add screening question answer drafts.
 - Add embeddings-based job matching.
 - Add prompt and output evaluation tests.
-

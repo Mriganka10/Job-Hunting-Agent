@@ -23,6 +23,7 @@ It is intentionally deterministic in the current POC. This makes the behavior ea
 | Naukri adapter | Public page scan with search fallback | Find Naukri job leads. |
 | Application service | Draft writer, SMTP sender, local ledger | Prepare or send applications and avoid duplicates. |
 | Daily scheduler | CLI sleep loop | Run the same workflow daily. |
+| Web UI scheduler | In-process background thread | Run the uploaded resume workflow daily while the server is active. |
 
 ## Resume Parser
 
@@ -98,6 +99,21 @@ Human review recommendation:
 
 Keep `application.mode = "draft"` until the user has reviewed generated messages and tested SMTP behavior.
 
+Authenticated LinkedIn/Naukri submission is intentionally not hard-coded in the current POC. Those portals can require user-specific login, OTP, CAPTCHA, and screening-question answers. The current agent prepares drafts and email applications; portal submission should be added through account-specific browser adapters with human approval.
+
+## Web UI Agent
+
+File: `src/job_hunting_agent/web.py`
+
+Responsibilities:
+
+- Provide a first-screen upload experience.
+- Convert submitted form values into runtime `AppConfig`.
+- Save uploaded resumes under `data/uploads`.
+- Run the existing `JobHuntingAgent`.
+- Display ATS score, suggestions, missing keywords, job leads, and application actions.
+- Start or stop the daily scheduler.
+
 ## Report Writer
 
 File: `src/job_hunting_agent/reports.py`
@@ -126,4 +142,3 @@ Supervisor
 ```
 
 LangGraph becomes useful when the workflow needs retries, approvals, portal-specific state, and partial completion recovery.
-

@@ -6,7 +6,7 @@
 Resume File + Config
         |
         v
-CLI Entry Point
+CLI / Web UI Entry Point
         |
         v
 Job Hunting Agent
@@ -40,6 +40,21 @@ Responsibilities:
 - Accept resume path and config path.
 - Run once or on a daily schedule.
 - Print concise execution results.
+- Start the web UI through `serve`.
+
+### Web UI Layer
+
+File: `src/job_hunting_agent/web.py`
+
+Responsibilities:
+
+- Render the resume upload and profile URL screen.
+- Accept PDF, DOCX, TXT, and MD resume uploads.
+- Collect LinkedIn and Naukri profile URLs.
+- Collect target roles, locations, skills, and application mode.
+- Run the agent immediately.
+- Start or stop an in-process daily scheduler while the web server is active.
+- Expose `GET /health`, `POST /api/run`, and `POST /api/scheduler/stop`.
 
 ### Agent Orchestrator
 
@@ -131,8 +146,8 @@ The `data/` folder is ignored by Git because it can contain private candidate an
 
 ## Request Flow
 
-1. User provides resume path and config file.
-2. CLI loads TOML config.
+1. User provides resume path and config file through CLI, or uploads a resume through the web UI.
+2. CLI loads TOML config, or the web UI builds runtime config from submitted form fields.
 3. Resume parser extracts and normalizes text.
 4. ATS scorer creates the score and improvement list.
 5. Search intent is built from configured roles, skills, locations, and resume inference.
@@ -141,6 +156,7 @@ The `data/` folder is ignored by Git because it can contain private candidate an
 8. Application service checks the ledger.
 9. Drafts are written or emails are sent.
 10. Reports and application records are written under `data/`.
+11. Web UI returns ATS score, improvement suggestions, job leads, and application action details.
 
 ## Production Architecture Target
 
@@ -151,6 +167,6 @@ Future production architecture should add:
 - Database-backed job and application tracking.
 - Secrets manager for email and portal credentials.
 - Web dashboard for review and scheduling.
+- Persistent scheduler backed by a worker process or queue.
 - Stronger matching using embeddings and LLM-based job/resume comparison.
 - Audit trail for every search, draft, approval, and submission.
-

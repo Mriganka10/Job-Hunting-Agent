@@ -21,7 +21,15 @@ def main() -> None:
             subparser.add_argument("--once", action="store_true", help="Run once and exit")
             subparser.add_argument("--daily-at", help="Run daily at HH:MM local time")
 
+    serve_parser = subparsers.add_parser("serve")
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Host for the web UI")
+    serve_parser.add_argument("--port", type=int, default=8000, help="Port for the web UI")
+
     args = parser.parse_args()
+    if args.command == "serve":
+        _serve(args.host, args.port)
+        return
+
     config = load_config(args.config)
     agent = JobHuntingAgent(config)
 
@@ -77,3 +85,12 @@ def _parse_hhmm(value: str) -> tuple[int, int]:
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         raise SystemExit("--daily-at must be a valid 24-hour time")
     return hour, minute
+
+
+def _serve(host: str, port: int) -> None:
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise SystemExit("Install web dependencies with: pip install -e '.[dev,docs]'") from exc
+
+    uvicorn.run("job_hunting_agent.web:app", host=host, port=port, reload=False)

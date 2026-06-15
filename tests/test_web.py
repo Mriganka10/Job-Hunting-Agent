@@ -1,0 +1,59 @@
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from job_hunting_agent.web import app, build_config_from_form, save_resume_upload
+
+
+def test_web_health_returns_scheduler_status() -> None:
+    client = TestClient(app)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert "scheduler" in response.json()
+
+
+def test_home_page_contains_resume_and_profile_inputs() -> None:
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'name="resume"' in response.text
+    assert 'name="linkedin_profile_url"' in response.text
+    assert 'name="naukri_profile_url"' in response.text
+
+
+def test_build_config_from_form_keeps_portal_profiles() -> None:
+    config = build_config_from_form(
+        name="Mriganka Das",
+        email="mriganka@example.com",
+        phone="+91-0000000000",
+        linkedin_profile_url="https://www.linkedin.com/in/mriganka-das-b2ba3186/",
+        naukri_profile_url="https://www.naukri.com/mnjuser/profile?id=&altresid",
+        target_roles="Python Developer, Data Engineer",
+        locations="Remote, Bengaluru",
+        skills="Python, SQL",
+        application_mode="draft",
+        max_jobs_per_portal=5,
+    )
+
+    assert config.profile.linkedin_profile_url.endswith("mriganka-das-b2ba3186/")
+    assert config.profile.naukri_profile_url.startswith("https://www.naukri.com")
+    assert config.profile.target_roles == ("Python Developer", "Data Engineer")
+    assert config.search.max_jobs_per_portal == 5
+
+
+def test_run_endpoint_rejects_unsupported_resume_format(tmp_path: Path) -> None:
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/run",
+        data={"application_mode": "draft"},
+        files={"resume": ("resume.exe", b"not a resume", "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    assert "PDF, DOCX, TXT, or MD" in response.json()["detail"]

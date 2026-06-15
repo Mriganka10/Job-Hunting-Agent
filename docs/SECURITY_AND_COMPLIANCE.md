@@ -54,6 +54,8 @@ All such data should be treated as private.
 - Prefer official APIs or user-approved browser automation.
 - Keep an approval step before final submission.
 - Record what was submitted and when.
+- Treat uploaded profile URLs as user-provided personal data.
+- Do not store portal passwords in source code or browser-visible form fields.
 
 ### Data Protection
 
@@ -86,7 +88,18 @@ Track:
 
 The current implementation stores application records in `data/applications.jsonl`. A production version should use a database-backed audit log.
 
+## Web UI Security Notes
+
+The current web UI is a local prototype. Before exposing it beyond localhost:
+
+- Add authentication.
+- Add CSRF protection.
+- Restrict upload size.
+- Validate file content, not only extension.
+- Move the daily scheduler into a managed worker.
+- Store secrets in a secret manager.
+- Protect `data/uploads`, `data/drafts`, and `data/reports`.
+
 ## Legal and Ethical Disclaimer
 
 The POC is for productivity assistance. The candidate remains responsible for verifying resume accuracy, application content, portal compliance, and recruiter communications.
-

@@ -10,6 +10,7 @@ Daily job-search assistant that takes a resume as the main input, evaluates ATS 
 - Searches configured portals such as LinkedIn and Naukri.
 - Keeps a local ledger so the same job is not applied twice.
 - Creates email-ready applications and can send them through SMTP.
+- Provides a web UI for resume upload, LinkedIn URL, Naukri URL, immediate runs, and daily scheduling.
 - Runs once or on a daily schedule from the CLI.
 
 > Important: LinkedIn and Naukri frequently use login, CAPTCHA, anti-bot checks, and changing page layouts. This prototype keeps portal automation behind adapters. Search links work immediately; true one-click application should be enabled only for flows you are authorized to automate.
@@ -22,6 +23,18 @@ source .venv/bin/activate
 pip install -e ".[docs]"
 cp config.example.toml config.toml
 python -m job_hunting_agent run --resume /path/to/resume.pdf --config config.toml --once
+```
+
+To open the web UI:
+
+```bash
+python -m job_hunting_agent serve --host 127.0.0.1 --port 8000
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8000
 ```
 
 For daily execution:
@@ -53,6 +66,7 @@ Outputs are written under `data/` by default:
 python -m job_hunting_agent score --resume resume.pdf --config config.toml
 python -m job_hunting_agent search --resume resume.pdf --config config.toml
 python -m job_hunting_agent run --resume resume.pdf --config config.toml --once
+python -m job_hunting_agent serve --host 127.0.0.1 --port 8000
 ```
 
 ## Documentation
