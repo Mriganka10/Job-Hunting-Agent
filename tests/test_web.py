@@ -27,6 +27,9 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "/static/job-search-hero.png" in response.text
     assert "Schedule Daily Run" in response.text
     assert "scheduler-status" in response.text
+    assert "lastRenderedResultAt" in response.text
+    assert "payload.scheduler?.last_result" in response.text
+    assert "Showing latest scheduled run" in response.text
 
 
 def test_static_hero_asset_is_served() -> None:

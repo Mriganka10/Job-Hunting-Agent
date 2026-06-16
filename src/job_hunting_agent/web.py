@@ -517,6 +517,7 @@ def _page() -> str:
     const details = document.getElementById('details');
     const schedulerStatus = document.getElementById('scheduler-status');
     const statusPill = document.querySelector('.status-pill');
+    let lastRenderedResultAt = '';
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       summary.textContent = 'Running ATS scoring, portal search, and application drafting...';
@@ -529,7 +530,7 @@ def _page() -> str:
         summary.textContent = payload.detail || 'Run failed.';
         return;
       }
-      render(payload);
+      render(payload, 'manual');
       refreshScheduler();
     });
     document.getElementById('schedule-run').addEventListener('click', async () => {
@@ -558,6 +559,10 @@ def _page() -> str:
       if (!response.ok) return;
       const payload = await response.json();
       renderScheduler(payload.scheduler);
+      const scheduledResult = payload.scheduler?.last_result;
+      if (scheduledResult?.generated_at && scheduledResult.generated_at !== lastRenderedResultAt) {
+        render(scheduledResult, 'scheduled');
+      }
     }
     function renderScheduler(scheduler) {
       const running = scheduler && scheduler.running;
@@ -578,9 +583,13 @@ def _page() -> str:
         schedulerStatus.innerHTML += `<h3>Run History</h3><ul class="history-list">${history}</ul>`;
       }
     }
-    function render(payload) {
+    function render(payload, source = 'manual') {
+      lastRenderedResultAt = payload.generated_at || lastRenderedResultAt;
       const report = payload.ats_report;
       const appSummary = payload.application_summary || {};
+      const resultLabel = source === 'scheduled'
+        ? `<p class="muted">Showing latest scheduled run from ${escapeHtml(payload.generated_at || 'the scheduler')}.</p>`
+        : '';
       summary.className = '';
       summary.innerHTML = `
         <span class="metric"><strong>${report.score}</strong><span>/100 ATS</span></span>
@@ -592,6 +601,7 @@ def _page() -> str:
           <div class="audit-card"><strong>${appSummary.email_failed || 0}</strong><span>Email Failed</span></div>
           <div class="audit-card"><strong>${appSummary.skipped || 0}</strong><span>Skipped</span></div>
         </div>
+        ${resultLabel}
         <p class="muted">Outputs: ${payload.output_dir}</p>
         <p class="muted">${payload.portal_submission_note}</p>
       `;
