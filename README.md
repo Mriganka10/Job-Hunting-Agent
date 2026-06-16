@@ -10,7 +10,9 @@ Daily job-search assistant that takes a resume as the main input, evaluates ATS 
 - Searches configured portals such as LinkedIn and Naukri.
 - Keeps a local ledger so the same job is not applied twice.
 - Creates email-ready applications and can send them through SMTP.
-- Provides a web UI for resume upload, LinkedIn URL, Naukri URL, immediate runs, and daily scheduling.
+- Provides an OTP-protected web UI for resume upload, LinkedIn URL, Naukri URL, immediate runs, and daily scheduling.
+- Persists user, run, and application history in PostgreSQL for production deployments.
+- Includes Elastic Beanstalk/EC2 deployment scaffolding with RDS PostgreSQL as the production database target.
 - Runs once or on a daily schedule from the CLI.
 
 > Important: LinkedIn and Naukri frequently use login, CAPTCHA, anti-bot checks, and changing page layouts. This prototype keeps portal automation behind adapters. Search links work immediately; true one-click application should be enabled only for flows you are authorized to automate.
@@ -39,6 +41,8 @@ http://127.0.0.1:8000
 
 In the web UI, `Run Agent` runs immediately. `Schedule Daily Run` uploads the selected resume and starts the timer without running immediately. The scheduler only runs while the web server process is active. If a page is refreshed, the latest scheduled result can hydrate the dashboard; a new manual run stays active on the screen and is not overwritten by an older scheduled result.
 
+The web UI requires email OTP sign-in. In local development, if SMTP is not configured, the OTP is printed in the server logs and returned to the browser for testing. In production, set `JOB_AGENT_DEV_RETURN_OTP=false` and configure SMTP environment variables.
+
 Confirm scheduler state:
 
 ```bash
@@ -63,6 +67,8 @@ Edit `config.toml` after copying `config.example.toml`.
 - `profile.linkedin_profile_url` and `profile.naukri_profile_url`: profile links included in application drafts/emails and available to future authenticated portal adapters.
 - `application.mode`: `draft` or `email`.
 - `email`: SMTP settings used only when `application.mode = "email"`.
+- `JOB_AGENT_DATABASE_URL`: PostgreSQL connection string for production. Local development defaults to SQLite under `data/`.
+- `JOB_AGENT_SECRET_KEY`: long random secret used to sign sessions and OTP hashes.
 
 Outputs are written under `data/` by default:
 
@@ -91,6 +97,7 @@ python -m job_hunting_agent serve --host 127.0.0.1 --port 8000
 - [Security and Compliance](docs/SECURITY_AND_COMPLIANCE.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Owner Handoff Guide](docs/OWNER_HANDOFF_GUIDE.md)
+- [AWS Deployment Guide](docs/AWS_DEPLOYMENT.md)
 
 ## Current Prototype Boundaries
 

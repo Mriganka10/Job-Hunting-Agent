@@ -86,13 +86,17 @@ Track:
 - Portal submissions attempted.
 - Human approvals.
 
-The current implementation stores application records in `data/applications.jsonl`. A production version should use a database-backed audit log.
+The current web implementation stores user, run, and application records in the configured database. Use PostgreSQL for production deployments.
 
 ## Web UI Security Notes
 
-The current web UI is a local prototype. Before exposing it beyond localhost:
+The web UI now includes email OTP sign-in and a signed HTTP-only session cookie. Before exposing it to clients:
 
-- Add authentication.
+- Set `JOB_AGENT_SECRET_KEY` to a long random value.
+- Set `JOB_AGENT_COOKIE_SECURE=true`.
+- Set `JOB_AGENT_DEV_RETURN_OTP=false`.
+- Configure SMTP for OTP delivery.
+- Use PostgreSQL through `JOB_AGENT_DATABASE_URL`.
 - Add CSRF protection.
 - Restrict upload size.
 - Validate file content, not only extension.

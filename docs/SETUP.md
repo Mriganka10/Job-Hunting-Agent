@@ -115,6 +115,7 @@ http://127.0.0.1:8000
 
 The UI supports:
 
+- Email OTP sign-in.
 - Resume upload in PDF, DOCX, TXT, or MD format.
 - LinkedIn profile URL input.
 - Naukri profile URL input.
@@ -122,6 +123,21 @@ The UI supports:
 - Draft or email application mode.
 - Immediate agent run.
 - Daily schedule while the server process is running.
+
+Local OTP behavior:
+
+- If SMTP environment variables are not configured, the OTP is printed in the server logs.
+- With `JOB_AGENT_DEV_RETURN_OTP=true`, the local browser also shows the OTP for easier testing.
+- In production, set `JOB_AGENT_DEV_RETURN_OTP=false`, `JOB_AGENT_COOKIE_SECURE=true`, and configure SMTP.
+
+Production database:
+
+```bash
+export JOB_AGENT_DATABASE_URL="postgresql://user:password@host:5432/job_agent"
+export JOB_AGENT_SECRET_KEY="replace-with-a-long-random-secret"
+```
+
+If `JOB_AGENT_DATABASE_URL` is not set, the app uses a local SQLite database under `data/` for development.
 
 Important web UI behavior:
 
