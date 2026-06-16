@@ -98,6 +98,7 @@ python -m job_hunting_agent serve --host 127.0.0.1 --port 8000
 - [Roadmap](docs/ROADMAP.md)
 - [Owner Handoff Guide](docs/OWNER_HANDOFF_GUIDE.md)
 - [AWS Deployment Guide](docs/AWS_DEPLOYMENT.md)
+- [AWS Deployment Walkthrough](docs/AWS_DEPLOYMENT_WALKTHROUGH.md)
 
 ## Current Prototype Boundaries
 
