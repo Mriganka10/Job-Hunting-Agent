@@ -2,6 +2,8 @@
 
 This project is prepared for an Elastic Beanstalk deployment model similar to the Multi RAG Agentic AI repo:
 
+For a beginner-friendly explanation of the same flow, see [AWS_DEPLOYMENT_WALKTHROUGH.md](AWS_DEPLOYMENT_WALKTHROUGH.md).
+
 ```text
 Client Browser
   |
@@ -32,6 +34,24 @@ EC2 instance running FastAPI/Uvicorn
 - `requirements.txt` for Elastic Beanstalk Python dependency install.
 - `.ebextensions/01_environment.config` for non-secret runtime defaults.
 - Dockerfile remains available for optional local/container packaging, but Elastic Beanstalk is the recommended AWS path.
+- Job Hunt specific AWS scripts under `scripts/aws/` for preflight, S3, RDS, and Elastic Beanstalk deployment.
+
+## Target AWS Account And Resource Names
+
+| Resource | Value |
+| --- | --- |
+| AWS account ID | `453732174568` |
+| AWS account name | `Mriganka` |
+| AWS region | `us-east-1` |
+| Elastic Beanstalk application | `job-hunt-agent` |
+| Elastic Beanstalk environment | `job-hunt-agent-prod` |
+| RDS DB identifier | `job-hunt-agent-prod-db` |
+| RDS database name | `job_hunt_agent` |
+| RDS user | `job_agent_user` |
+| S3 upload bucket | `job-hunt-agent-prod-uploads-453732174568-us-east-1` |
+| EB EC2 role | `aws-elasticbeanstalk-ec2-role` |
+
+These are new Job Hunt Agent resources. They intentionally do not reuse Multi RAG Agentic AI resource names, databases, or buckets.
 
 ## Required Environment Variables
 
@@ -97,6 +117,25 @@ eb setenv \
 eb deploy
 eb open
 ```
+
+## Scripted Deployment Flow
+
+Install and configure the AWS CLI and EB CLI first. Then run from the repository root:
+
+```bash
+export AWS_PROFILE=<your-profile>
+export RDS_MASTER_PASSWORD='<new-rds-password>'
+export JOB_AGENT_SECRET_KEY='<long-random-secret>'
+export JOB_AGENT_SMTP_HOST='<smtp-host>'
+export JOB_AGENT_SMTP_PORT='587'
+export JOB_AGENT_SMTP_USERNAME='<smtp-user>'
+export JOB_AGENT_SMTP_PASSWORD='<smtp-password>'
+export JOB_AGENT_SMTP_FROM='<from-email>'
+
+scripts/aws/deploy_job_hunt_prod.sh
+```
+
+The script checks that the current AWS CLI identity is account `453732174568`, creates the Job Hunt S3 bucket, creates the Job Hunt RDS PostgreSQL database if missing, builds `JOB_AGENT_DATABASE_URL` from the RDS endpoint, creates/updates the Elastic Beanstalk environment, deploys the current branch, and prints EB status.
 
 ## AWS Runtime Notes
 
