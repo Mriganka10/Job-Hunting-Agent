@@ -24,3 +24,7 @@ export JOB_AGENT_COOKIE_SECURE="${JOB_AGENT_COOKIE_SECURE:-true}"
 export JOB_AGENT_DEV_RETURN_OTP="${JOB_AGENT_DEV_RETURN_OTP:-false}"
 export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-8000}"
+
+if [[ -d "/opt/homebrew/opt/expat/lib" ]]; then
+  export DYLD_LIBRARY_PATH="/opt/homebrew/opt/expat/lib:${DYLD_LIBRARY_PATH:-}"
+fi
