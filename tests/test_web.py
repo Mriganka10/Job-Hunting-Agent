@@ -2,7 +2,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from job_hunting_agent.web import app, build_config_from_form, scheduler
+from job_hunting_agent.models import ApplicationResult, JobLead
+from job_hunting_agent.web import _application_payload, app, build_config_from_form, scheduler
 
 
 def test_web_health_returns_scheduler_status() -> None:
@@ -27,9 +28,12 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "/static/job-search-hero.png" in response.text
     assert "Schedule Daily Run" in response.text
     assert "scheduler-status" in response.text
-    assert "lastRenderedResultAt" in response.text
+    assert "activeResult" in response.text
     assert "payload.scheduler?.last_result" in response.text
     assert "Showing latest scheduled run" in response.text
+    assert "shouldRenderScheduledResult" in response.text
+    assert "Draft Messages" in response.text
+    assert "copy-draft" in response.text
 
 
 def test_static_hero_asset_is_served() -> None:
@@ -39,6 +43,18 @@ def test_static_hero_asset_is_served() -> None:
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
+
+
+def test_application_payload_includes_draft_message(tmp_path: Path) -> None:
+    draft_path = tmp_path / "draft.md"
+    draft_path.write_text("Hello recruiter,\n\nI am interested.", encoding="utf-8")
+    job = JobLead("linkedin", "Data Engineer", "Example Corp", "Remote", "https://example.com/job")
+    result = ApplicationResult(job, "drafted", str(draft_path))
+
+    payload = _application_payload(result)
+
+    assert payload["draft_path"] == str(draft_path)
+    assert payload["draft_message"] == "Hello recruiter,\n\nI am interested."
 
 
 def test_build_config_from_form_keeps_portal_profiles() -> None:

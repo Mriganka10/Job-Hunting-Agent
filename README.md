@@ -37,7 +37,7 @@ Then open:
 http://127.0.0.1:8000
 ```
 
-In the web UI, `Run Agent` runs immediately. `Schedule Daily Run` uploads the selected resume and starts the timer without running immediately. The scheduler only runs while the web server process is active.
+In the web UI, `Run Agent` runs immediately. `Schedule Daily Run` uploads the selected resume and starts the timer without running immediately. The scheduler only runs while the web server process is active. If a page is refreshed, the latest scheduled result can hydrate the dashboard; a new manual run stays active on the screen and is not overwritten by an older scheduled result.
 
 Confirm scheduler state:
 
@@ -70,7 +70,7 @@ Outputs are written under `data/` by default:
 - `data/reports/latest_run.json`
 - `data/applications.jsonl`
 
-Email confirmation is recorded in `data/applications.jsonl` and in the web UI application audit. Look for `emailed`, `email_failed`, `drafted`, or `skipped`.
+Email confirmation is recorded in `data/applications.jsonl` and in the web UI application audit. Look for `emailed`, `email_failed`, `drafted`, or `skipped`. Generated draft messages are also shown in the web UI with copy actions so a user does not need to open files from `data/drafts/` manually.
 
 ## CLI Commands
 
