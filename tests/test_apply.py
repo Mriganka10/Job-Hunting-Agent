@@ -27,6 +27,7 @@ def test_application_draft_includes_portal_profile_links(tmp_path: Path) -> None
 
     assert "LinkedIn: https://www.linkedin.com/in/mriganka-das-b2ba3186/" in draft
     assert "Naukri: https://www.naukri.com/mnjuser/profile?id=&altresid" in draft
+    assert "ATS readiness score" not in draft
 
 
 def test_email_failure_is_recorded_and_draft_is_saved(tmp_path: Path) -> None:

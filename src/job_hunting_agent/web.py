@@ -210,7 +210,7 @@ def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual") -> d
     return {
         "ats_report": asdict(report),
         "jobs": [asdict(job) for job in jobs],
-        "applications": [asdict(result) for result in results],
+        "applications": [_application_payload(result) for result in results],
         "application_summary": application_summary,
         "output_dir": str(Path(config.application.data_dir).resolve()),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -220,6 +220,32 @@ def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual") -> d
             "Authenticated LinkedIn/Naukri submission remains adapter-gated because those portals can require login, CAPTCHA, OTP, and screening answers."
         ),
     }
+
+
+def _application_payload(result) -> dict:
+    payload = asdict(result)
+    draft_path = _draft_path_from_detail(result.status, result.detail)
+    if draft_path:
+        payload["draft_path"] = str(draft_path)
+        payload["draft_message"] = _read_draft_message(draft_path)
+    return payload
+
+
+def _draft_path_from_detail(status: str, detail: str) -> Path | None:
+    if status == "drafted":
+        return Path(detail)
+    if "Draft saved to " in detail:
+        return Path(detail.rsplit("Draft saved to ", 1)[1])
+    return None
+
+
+def _read_draft_message(path: Path) -> str:
+    try:
+        if path.exists() and path.is_file():
+            return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return ""
 
 
 def _application_summary(results) -> dict[str, int]:
@@ -330,7 +356,13 @@ def _page() -> str:
       --shadow: 0 18px 45px rgba(29, 41, 57, 0.12);
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--page); color: var(--ink); }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 8% 10%, rgba(23, 92, 211, 0.09), transparent 28%),
+        linear-gradient(180deg, #f7fafe 0%, #edf3f8 44%, #f8fafc 100%);
+      color: var(--ink);
+    }
     .hero {
       min-height: 330px;
       position: relative;
@@ -357,9 +389,9 @@ def _page() -> str:
     .stat-card strong { display: block; font-size: 28px; line-height: 1; }
     .stat-card span { display: block; margin-top: 5px; color: #5b6472; font-size: 13px; font-weight: 700; }
     main { width: min(1180px, calc(100% - 48px)); margin: -38px auto 44px; display: grid; grid-template-columns: minmax(340px, 500px) minmax(340px, 1fr); gap: 24px; position: relative; z-index: 2; }
-    form, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
+    form, .panel { background: rgba(255, 255, 255, 0.96); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
     form { padding: 8px 20px 20px; }
-    .panel { padding: 22px; min-height: 520px; }
+    .panel { padding: 22px; min-height: 520px; background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); }
     fieldset { border: 0; padding: 18px 0 2px; margin: 0; border-bottom: 1px solid #edf1f6; }
     fieldset:last-of-type { border-bottom: 0; }
     legend { display: flex; align-items: center; gap: 10px; width: 100%; font-size: 16px; font-weight: 850; margin-bottom: 2px; }
@@ -379,6 +411,15 @@ def _page() -> str:
     .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding-top: 16px; }
     .muted { color: var(--muted); font-size: 13px; line-height: 1.5; }
     .note { margin: 14px 0 0; padding: 12px; border-radius: 7px; background: #fff8eb; border: 1px solid #fedf89; color: #7a4a08; }
+    .workflow-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 14px 0 4px; }
+    .workflow-card { min-height: 86px; padding: 13px; border-radius: 8px; border: 1px solid #dfe7f2; background: linear-gradient(135deg, #ffffff 0%, #edf5ff 100%); }
+    .workflow-card:nth-child(2) { background: linear-gradient(135deg, #ffffff 0%, #ecfdf3 100%); }
+    .workflow-card:nth-child(3) { background: linear-gradient(135deg, #ffffff 0%, #fff7ed 100%); }
+    .workflow-card strong { display: block; font-size: 13px; margin-top: 9px; }
+    .workflow-card span { color: var(--muted); font-size: 12px; font-weight: 700; }
+    .workflow-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: #ffffff; font-size: 14px; font-weight: 900; background: var(--blue); }
+    .workflow-card:nth-child(2) .workflow-icon { background: var(--green); }
+    .workflow-card:nth-child(3) .workflow-icon { background: var(--gold); }
     .results-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
     .results-header h2 { margin: 0; font-size: 26px; letter-spacing: 0; }
     .status-pill { display: inline-flex; align-items: center; min-height: 30px; padding: 6px 10px; border-radius: 999px; background: #ecfdf3; color: var(--green); font-size: 12px; font-weight: 850; white-space: nowrap; }
@@ -399,6 +440,20 @@ def _page() -> str:
     .audit-card span { color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
     .history-list { margin: 10px 0 18px; padding: 0; list-style: none; }
     .history-list li { padding: 10px 0; border-bottom: 1px solid #edf1f6; }
+    .result-section { margin-top: 18px; padding: 16px; border: 1px solid #e1e8f2; border-radius: 8px; background: rgba(255, 255, 255, 0.86); }
+    .result-section h3 { margin: 0 0 12px; font-size: 18px; }
+    .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .insight-list { margin: 0; padding-left: 18px; }
+    .table-wrap { overflow-x: auto; border-radius: 8px; }
+    .draft-grid { display: grid; gap: 12px; }
+    .draft-card { border: 1px solid #dfe7f2; border-radius: 8px; background: #ffffff; overflow: hidden; }
+    .draft-card-header { display: flex; justify-content: space-between; gap: 12px; padding: 12px; background: #f8fafc; border-bottom: 1px solid #e6eaf1; }
+    .draft-card-header strong { display: block; }
+    .draft-card-header span { color: var(--muted); font-size: 12px; }
+    .draft-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .copy-draft { min-height: 34px; padding: 7px 10px; box-shadow: none; font-size: 12px; }
+    .draft-link { display: inline-flex; min-height: 34px; align-items: center; padding: 7px 10px; border-radius: 7px; background: #eef4ff; color: var(--blue); font-size: 12px; font-weight: 850; text-decoration: none; }
+    .draft-message { width: 100%; min-height: 180px; border: 0; border-radius: 0; border-top: 1px solid #eef2f7; background: #fbfcfe; font-size: 13px; line-height: 1.5; }
     ul { padding-left: 20px; }
     li { margin: 6px 0; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; overflow: hidden; border: 1px solid #e6eaf1; border-radius: 8px; }
@@ -421,7 +476,7 @@ def _page() -> str:
       .results-header { display: block; }
       .status-pill { margin-top: 10px; }
       .platform-chip { width: 100%; justify-content: flex-start; }
-      .scheduler-grid, .audit-grid { grid-template-columns: 1fr; }
+      .scheduler-grid, .audit-grid, .workflow-strip, .result-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -491,6 +546,11 @@ def _page() -> str:
         <button class="secondary" id="stop-scheduler" type="button">Stop Daily Run</button>
       </div>
       <p class="note">Portal submissions are prepared as drafts or recruiter emails. Authenticated LinkedIn/Naukri application submission needs account-specific browser adapters and user approval.</p>
+      <div class="workflow-strip" aria-label="Agent workflow">
+        <div class="workflow-card"><div class="workflow-icon">CV</div><strong>Resume</strong><span>ATS signals and profile fit</span></div>
+        <div class="workflow-card"><div class="workflow-icon">JP</div><strong>Jobs</strong><span>LinkedIn and Naukri leads</span></div>
+        <div class="workflow-card"><div class="workflow-icon">@</div><strong>Drafts</strong><span>Messages ready to copy</span></div>
+      </div>
     </form>
     <section class="panel">
       <div class="results-header">
@@ -517,7 +577,7 @@ def _page() -> str:
     const details = document.getElementById('details');
     const schedulerStatus = document.getElementById('scheduler-status');
     const statusPill = document.querySelector('.status-pill');
-    let lastRenderedResultAt = '';
+    let activeResult = { generatedAt: '', source: '' };
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       summary.textContent = 'Running ATS scoring, portal search, and application drafting...';
@@ -560,9 +620,13 @@ def _page() -> str:
       const payload = await response.json();
       renderScheduler(payload.scheduler);
       const scheduledResult = payload.scheduler?.last_result;
-      if (scheduledResult?.generated_at && scheduledResult.generated_at !== lastRenderedResultAt) {
+      if (shouldRenderScheduledResult(scheduledResult)) {
         render(scheduledResult, 'scheduled');
       }
+    }
+    function shouldRenderScheduledResult(scheduledResult) {
+      if (!scheduledResult?.generated_at || scheduledResult.generated_at === activeResult.generatedAt) return false;
+      return !activeResult.source || activeResult.source === 'scheduled';
     }
     function renderScheduler(scheduler) {
       const running = scheduler && scheduler.running;
@@ -584,7 +648,7 @@ def _page() -> str:
       }
     }
     function render(payload, source = 'manual') {
-      lastRenderedResultAt = payload.generated_at || lastRenderedResultAt;
+      activeResult = { generatedAt: payload.generated_at || activeResult.generatedAt, source };
       const report = payload.ats_report;
       const appSummary = payload.application_summary || {};
       const resultLabel = source === 'scheduled'
@@ -609,13 +673,63 @@ def _page() -> str:
       const missing = report.missing_keywords.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
       const jobs = payload.jobs.slice(0, 12).map((job) => `<tr><td>${escapeHtml(job.portal)}</td><td>${escapeHtml(job.title)}</td><td>${escapeHtml(job.company)}</td><td><a href="${job.url}" target="_blank" rel="noreferrer">Open</a></td></tr>`).join('');
       const applications = payload.applications.slice(0, 12).map((item) => `<tr><td>${escapeHtml(item.status)}</td><td>${escapeHtml(item.job.title)}</td><td>${escapeHtml(item.job.recruiter_email || 'Not available')}</td><td>${escapeHtml(item.detail)}</td></tr>`).join('');
+      const draftCards = payload.applications
+        .filter((item) => item.draft_message)
+        .slice(0, 8)
+        .map((item, index) => draftCard(item, index))
+        .join('');
       details.innerHTML = `
-        <h3>Resume Improvements</h3><ul>${improvements || '<li>No major improvements found.</li>'}</ul>
-        <h3>Missing Keywords</h3><ul>${missing || '<li>No configured keywords are missing.</li>'}</ul>
-        <h3>Job Leads</h3><table><thead><tr><th>Portal</th><th>Role</th><th>Company</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table>
-        <h3>Application and Email Audit</h3><table><thead><tr><th>Status</th><th>Role</th><th>Recruiter Email</th><th>Detail</th></tr></thead><tbody>${applications}</tbody></table>
+        <section class="result-section">
+          <h3>Resume Signals</h3>
+          <div class="result-grid">
+            <div><strong>Resume Improvements</strong><ul class="insight-list">${improvements || '<li>No major improvements found.</li>'}</ul></div>
+            <div><strong>Missing Keywords</strong><ul class="insight-list">${missing || '<li>No configured keywords are missing.</li>'}</ul></div>
+          </div>
+        </section>
+        <section class="result-section">
+          <h3>Job Leads</h3>
+          <div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role</th><th>Company</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>
+        </section>
+        <section class="result-section">
+          <h3>Draft Messages</h3>
+          <div class="draft-grid">${draftCards || '<p class="muted">No draft messages were generated for this run.</p>'}</div>
+        </section>
+        <section class="result-section">
+          <h3>Application and Email Audit</h3>
+          <div class="table-wrap"><table><thead><tr><th>Status</th><th>Role</th><th>Recruiter Email</th><th>Detail</th></tr></thead><tbody>${applications}</tbody></table></div>
+        </section>
       `;
     }
+    function draftCard(item, index) {
+      const email = item.job.recruiter_email || '';
+      const subject = `Application for ${item.job.title}`;
+      const mailto = email ? `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(item.draft_message)}` : '';
+      return `
+        <article class="draft-card">
+          <div class="draft-card-header">
+            <div>
+              <strong>${escapeHtml(item.job.title)}</strong>
+              <span>${escapeHtml(item.job.company)} · ${escapeHtml(item.job.recruiter_email || 'Recruiter email not available')}</span>
+            </div>
+            <div class="draft-actions">
+              <button class="copy-draft" type="button" data-draft-index="${index}">Copy</button>
+              ${email ? `<a class="draft-link" href="${mailto}">Email</a>` : ''}
+            </div>
+          </div>
+          <textarea class="draft-message" readonly>${escapeHtml(item.draft_message)}</textarea>
+        </article>
+      `;
+    }
+    document.addEventListener('click', async (event) => {
+      const button = event.target.closest('.copy-draft');
+      if (!button) return;
+      const card = button.closest('.draft-card');
+      const textarea = card?.querySelector('.draft-message');
+      if (!textarea) return;
+      await navigator.clipboard.writeText(textarea.value);
+      button.textContent = 'Copied';
+      setTimeout(() => { button.textContent = 'Copy'; }, 1600);
+    });
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
     }
