@@ -24,6 +24,16 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert 'name="resume"' in response.text
     assert 'name="linkedin_profile_url"' in response.text
     assert 'name="naukri_profile_url"' in response.text
+    assert "/static/job-search-hero.png" in response.text
+
+
+def test_static_hero_asset_is_served() -> None:
+    client = TestClient(app)
+
+    response = client.get("/static/job-search-hero.png")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
 
 
 def test_build_config_from_form_keeps_portal_profiles() -> None:
