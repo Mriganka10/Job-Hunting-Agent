@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 import shutil
+import hashlib
+import hmac
+import base64
+import json
+import os
+import secrets
+import smtplib
 import threading
 import time
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi import BackgroundTasks, Cookie, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .agent import JobHuntingAgent
 from .config import AppConfig, ApplicationConfig, EmailConfig, SearchConfig
+from .db import consume_valid_otp, init_db, latest_runs, normalize_email, record_run, save_otp
 from .models import CandidateProfile
 
 app = FastAPI(title="Job Hunting Agent")
@@ -21,8 +30,15 @@ app = FastAPI(title="Job Hunting Agent")
 DATA_DIR = Path("data")
 UPLOAD_DIR = DATA_DIR / "uploads"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+SESSION_COOKIE = "job_agent_session"
+SESSION_MAX_AGE_SECONDS = int(os.getenv("JOB_AGENT_SESSION_MAX_AGE_SECONDS", str(60 * 60 * 12)))
+OTP_TTL_MINUTES = int(os.getenv("JOB_AGENT_OTP_TTL_MINUTES", "10"))
+APP_SECRET = os.getenv("JOB_AGENT_SECRET_KEY", "local-dev-change-me")
+COOKIE_SECURE = os.getenv("JOB_AGENT_COOKIE_SECURE", "false").lower() == "true"
+DEV_RETURN_OTP = os.getenv("JOB_AGENT_DEV_RETURN_OTP", "true").lower() == "true"
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+init_db()
 
 
 class DailyScheduler:
@@ -38,15 +54,17 @@ class DailyScheduler:
         self.daily_at: str | None = None
         self.resume_path: str | None = None
         self.config: AppConfig | None = None
+        self.user_email: str | None = None
         self.history: list[dict] = []
 
-    def start(self, resume_path: str, config: AppConfig, daily_at: str) -> None:
+    def start(self, resume_path: str, config: AppConfig, daily_at: str, user_email: str) -> None:
         hour, minute = _parse_hhmm(daily_at)
         with self._lock:
             self.stop()
             self._stop_event = threading.Event()
             self.resume_path = resume_path
             self.config = config
+            self.user_email = normalize_email(user_email)
             self.daily_at = daily_at
             self.created_at = datetime.now().isoformat(timespec="seconds")
             self.last_result = None
@@ -84,6 +102,7 @@ class DailyScheduler:
         assert self.config is not None
         assert self.resume_path is not None
         assert self.daily_at is not None
+        assert self.user_email is not None
         hour, minute = _parse_hhmm(self.daily_at)
         while not self._stop_event.is_set():
             next_run = _next_run_time(hour, minute)
@@ -93,7 +112,7 @@ class DailyScheduler:
                 return
             started_at = datetime.now().isoformat(timespec="seconds")
             try:
-                self.last_result = run_agent(self.resume_path, self.config, trigger="scheduled")
+                self.last_result = run_agent(self.resume_path, self.config, trigger="scheduled", user_email=self.user_email)
                 self.last_run_at = self.last_result["generated_at"]
                 self.last_error = None
                 self.history.append(_history_item("scheduled", started_at, self.last_result))
@@ -113,9 +132,123 @@ class DailyScheduler:
 scheduler = DailyScheduler()
 
 
+def current_user_email(session_cookie: str | None) -> str | None:
+    if not session_cookie:
+        return None
+    try:
+        payload_b64, signature = session_cookie.split(".", 1)
+        expected = hmac.new(APP_SECRET.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        payload = json.loads(base64.urlsafe_b64decode(_pad_b64(payload_b64)).decode("utf-8"))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    issued_at = int(payload.get("iat", 0))
+    if issued_at + SESSION_MAX_AGE_SECONDS < int(time.time()):
+        return None
+    email = payload.get("email") if isinstance(payload, dict) else None
+    return normalize_email(email) if email else None
+
+
+def require_user(session_cookie: str | None) -> str:
+    user_email = current_user_email(session_cookie)
+    if not user_email:
+        raise HTTPException(status_code=401, detail="Sign in required.")
+    return user_email
+
+
+def _hash_otp(email: str, otp: str) -> str:
+    return hmac.new(APP_SECRET.encode("utf-8"), f"{normalize_email(email)}:{otp}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _session_token(email: str) -> str:
+    payload = json.dumps({"email": normalize_email(email), "iat": int(time.time())}, separators=(",", ":")).encode("utf-8")
+    payload_b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    signature = hmac.new(APP_SECRET.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{signature}"
+
+
+def _pad_b64(value: str) -> bytes:
+    return (value + "=" * (-len(value) % 4)).encode("ascii")
+
+
+def _send_otp_email(email: str, otp: str) -> bool:
+    smtp_host = os.getenv("JOB_AGENT_SMTP_HOST", "")
+    smtp_user = os.getenv("JOB_AGENT_SMTP_USERNAME", "")
+    smtp_password = os.getenv("JOB_AGENT_SMTP_PASSWORD", "")
+    from_email = os.getenv("JOB_AGENT_SMTP_FROM", smtp_user)
+    if not all((smtp_host, smtp_user, smtp_password, from_email)):
+        print(f"[job-agent] OTP for {email}: {otp}")
+        return False
+    message = EmailMessage()
+    message["Subject"] = "Your Job Hunting Agent sign-in code"
+    message["From"] = from_email
+    message["To"] = email
+    message.set_content(f"Your Job Hunting Agent OTP is {otp}. It expires in {OTP_TTL_MINUTES} minutes.")
+    with smtplib.SMTP(smtp_host, int(os.getenv("JOB_AGENT_SMTP_PORT", "587"))) as smtp:
+        smtp.starttls()
+        smtp.login(smtp_user, smtp_password)
+        smtp.send_message(message)
+    return True
+
+
 @app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    return _page()
+def index(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
+    user_email = current_user_email(job_agent_session)
+    if not user_email:
+        return RedirectResponse("/login", status_code=303)
+    return HTMLResponse(_page(user_email))
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
+    if current_user_email(job_agent_session):
+        return RedirectResponse("/", status_code=303)
+    return HTMLResponse(_login_page())
+
+
+@app.post("/api/auth/request-otp")
+def request_otp(email: Annotated[str, Form()]) -> dict:
+    normalized = normalize_email(email)
+    if "@" not in normalized or "." not in normalized.rsplit("@", 1)[-1]:
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    otp = f"{secrets.randbelow(1_000_000):06d}"
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_TTL_MINUTES)
+    save_otp(normalized, _hash_otp(normalized, otp), expires_at)
+    sent = _send_otp_email(normalized, otp)
+    response = {
+        "status": "sent",
+        "email": normalized,
+        "delivery": "email" if sent else "server-log",
+        "expires_in_minutes": OTP_TTL_MINUTES,
+    }
+    if DEV_RETURN_OTP and not sent:
+        response["dev_otp"] = otp
+    return response
+
+
+@app.post("/api/auth/verify")
+def verify_otp(email: Annotated[str, Form()], otp: Annotated[str, Form()]) -> HTMLResponse:
+    normalized = normalize_email(email)
+    if not consume_valid_otp(normalized, _hash_otp(normalized, otp.strip())):
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE,
+        _session_token(normalized),
+        max_age=SESSION_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout() -> RedirectResponse:
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE)
+    return response
 
 
 @app.get("/health")
@@ -123,10 +256,17 @@ def health() -> dict:
     return {"status": "ok", "scheduler": scheduler.snapshot()}
 
 
+@app.get("/api/runs")
+def runs(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    return {"runs": latest_runs(user_email)}
+
+
 @app.post("/api/run")
 async def run_now(
     background_tasks: BackgroundTasks,
     resume: Annotated[UploadFile, File()],
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     name: Annotated[str, Form()] = "",
     email: Annotated[str, Form()] = "",
     phone: Annotated[str, Form()] = "",
@@ -140,6 +280,7 @@ async def run_now(
     daily_at: Annotated[str, Form()] = "",
     start_daily: Annotated[bool, Form()] = False,
 ) -> dict:
+    user_email = require_user(job_agent_session)
     started_at = datetime.now().isoformat(timespec="seconds")
     resume_path = await save_resume_upload(resume)
     config = build_config_from_form(
@@ -154,12 +295,12 @@ async def run_now(
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
     )
-    result = run_agent(str(resume_path), config, trigger="manual")
+    result = run_agent(str(resume_path), config, trigger="manual", user_email=user_email)
     scheduler.history.append(_history_item("manual", started_at, result))
     if start_daily:
         if not daily_at:
             raise HTTPException(status_code=400, detail="Daily time is required when scheduling is enabled.")
-        background_tasks.add_task(scheduler.start, str(resume_path), config, daily_at)
+        background_tasks.add_task(scheduler.start, str(resume_path), config, daily_at, user_email)
         result["scheduler"] = {"running": True, "daily_at": daily_at}
     return result
 
@@ -167,6 +308,7 @@ async def run_now(
 @app.post("/api/scheduler/start")
 async def start_scheduler(
     resume: Annotated[UploadFile, File()],
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     name: Annotated[str, Form()] = "",
     email: Annotated[str, Form()] = "",
     phone: Annotated[str, Form()] = "",
@@ -179,6 +321,7 @@ async def start_scheduler(
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
 ) -> dict:
+    user_email = require_user(job_agent_session)
     if not daily_at:
         raise HTTPException(status_code=400, detail="Daily time is required to schedule the agent.")
     resume_path = await save_resume_upload(resume)
@@ -194,20 +337,21 @@ async def start_scheduler(
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
     )
-    scheduler.start(str(resume_path), config, daily_at)
+    scheduler.start(str(resume_path), config, daily_at, user_email)
     return {"status": "scheduled", "scheduler": scheduler.snapshot()}
 
 
 @app.post("/api/scheduler/stop")
-def stop_scheduler() -> dict:
+def stop_scheduler(job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> dict:
+    require_user(job_agent_session)
     scheduler.stop()
     return scheduler.snapshot()
 
 
-def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual") -> dict:
+def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user_email: str = "") -> dict:
     report, jobs, results = JobHuntingAgent(config).run(resume_path)
     application_summary = _application_summary(results)
-    return {
+    result = {
         "ats_report": asdict(report),
         "jobs": [asdict(job) for job in jobs],
         "applications": [_application_payload(result) for result in results],
@@ -220,6 +364,9 @@ def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual") -> d
             "Authenticated LinkedIn/Naukri submission remains adapter-gated because those portals can require login, CAPTCHA, OTP, and screening answers."
         ),
     }
+    if user_email:
+        result["run_id"] = record_run(user_email, result)
+    return result
 
 
 def _application_payload(result) -> dict:
@@ -334,7 +481,93 @@ def _next_run_time(hour: int, minute: int) -> datetime:
     return next_run
 
 
-def _page() -> str:
+def _escape_html(value: str) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#039;")
+    )
+
+
+def _login_page() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign In - Job Hunting Agent</title>
+  <style>
+    :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #142033; }
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: linear-gradient(90deg, rgba(9, 24, 47, 0.88), rgba(9, 24, 47, 0.58)), url('/static/job-search-hero.png'); background-size: cover; background-position: center; }
+    .shell { width: min(960px, calc(100% - 36px)); display: grid; grid-template-columns: minmax(260px, 1fr) 420px; gap: 28px; align-items: center; }
+    .copy { color: #ffffff; }
+    .eyebrow { display: inline-flex; padding: 7px 10px; border-radius: 999px; border: 1px solid rgba(255,255,255,.35); background: rgba(255,255,255,.14); font-size: 13px; font-weight: 800; }
+    h1 { margin: 18px 0 12px; font-size: clamp(34px, 6vw, 60px); line-height: 1; letter-spacing: 0; }
+    p { color: rgba(255,255,255,.82); line-height: 1.6; }
+    .card { border-radius: 8px; border: 1px solid rgba(255,255,255,.5); background: rgba(255,255,255,.94); padding: 24px; box-shadow: 0 24px 70px rgba(0,0,0,.28); backdrop-filter: blur(18px); }
+    .card h2 { margin: 0 0 8px; font-size: 24px; }
+    label { display: block; margin: 14px 0 6px; color: #344054; font-size: 13px; font-weight: 800; }
+    input { width: 100%; min-height: 44px; border: 1px solid #c9d4e5; border-radius: 7px; padding: 10px 12px; font: inherit; }
+    button { width: 100%; min-height: 44px; margin-top: 14px; border: 0; border-radius: 7px; color: #ffffff; background: #175cd3; font-weight: 900; cursor: pointer; }
+    .muted { color: #667085; font-size: 13px; line-height: 1.5; }
+    .status { min-height: 20px; color: #087443; font-size: 13px; font-weight: 750; }
+    @media (max-width: 800px) { .shell { grid-template-columns: 1fr; padding: 28px 0; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="copy">
+      <div class="eyebrow">Secure client workspace</div>
+      <h1>Job Hunting Agent</h1>
+      <p>Sign in with an email OTP to access resume scoring, job discovery, recruiter draft templates, and daily run history.</p>
+    </section>
+    <section class="card">
+      <h2>Email OTP Sign In</h2>
+      <p class="muted">Enter your email to receive a one-time sign-in code.</p>
+      <form id="request-form">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="email" required>
+        <button type="submit">Send OTP</button>
+      </form>
+      <form id="verify-form" method="post" action="/api/auth/verify">
+        <input id="verify-email" name="email" type="hidden">
+        <label for="otp">OTP</label>
+        <input id="otp" name="otp" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" required>
+        <button type="submit">Verify and Continue</button>
+      </form>
+      <p id="status" class="status"></p>
+    </section>
+  </main>
+  <script>
+    const requestForm = document.getElementById('request-form');
+    const verifyEmail = document.getElementById('verify-email');
+    const status = document.getElementById('status');
+    requestForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = new FormData(requestForm);
+      const response = await fetch('/api/auth/request-otp', { method: 'POST', body: data });
+      const payload = await response.json();
+      if (!response.ok) {
+        status.textContent = payload.detail || 'Unable to send OTP.';
+        status.style.color = '#b42318';
+        return;
+      }
+      verifyEmail.value = payload.email;
+      status.style.color = '#087443';
+      status.textContent = payload.dev_otp
+        ? `OTP generated for local testing: ${payload.dev_otp}`
+        : `OTP sent to ${payload.email}.`;
+    });
+  </script>
+</body>
+</html>"""
+
+
+def _page(user_email: str) -> str:
     return """<!doctype html>
 <html lang="en">
 <head>
@@ -390,6 +623,10 @@ def _page() -> str:
       color: #ffffff;
       border-bottom: 1px solid rgba(255, 255, 255, 0.2);
     }
+    .topbar { position: relative; z-index: 3; min-height: 56px; display: flex; justify-content: flex-end; align-items: center; gap: 12px; width: min(1180px, calc(100% - 48px)); margin: 0 auto -56px; color: #ffffff; }
+    .user-chip { display: inline-flex; align-items: center; min-height: 34px; padding: 7px 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.16); border: 1px solid rgba(255, 255, 255, 0.32); font-size: 13px; font-weight: 800; backdrop-filter: blur(12px); }
+    .logout-form { margin: 0; padding: 0; border: 0; background: transparent; box-shadow: none; backdrop-filter: none; }
+    .logout-form button { min-height: 34px; padding: 7px 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.92); color: #152238; box-shadow: none; font-size: 13px; }
     .hero-content { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 42px 0 34px; display: grid; grid-template-columns: minmax(300px, 620px) 1fr; gap: 28px; align-items: center; }
     .eyebrow { display: inline-flex; align-items: center; gap: 8px; width: fit-content; padding: 7px 10px; border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 999px; background: rgba(255, 255, 255, 0.14); font-size: 13px; font-weight: 750; }
     h1 { margin: 18px 0 12px; max-width: 620px; font-size: clamp(34px, 5vw, 58px); line-height: 1.02; letter-spacing: 0; }
@@ -492,6 +729,10 @@ def _page() -> str:
   </style>
 </head>
 <body>
+  <div class="topbar">
+    <span class="user-chip">Signed in as __USER_EMAIL__</span>
+    <form class="logout-form" method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
+  </div>
   <header class="hero">
     <div class="hero-content">
       <div>
@@ -743,4 +984,4 @@ def _page() -> str:
     setInterval(refreshScheduler, 15000);
   </script>
 </body>
-</html>"""
+</html>""".replace("__USER_EMAIL__", _escape_html(user_email))

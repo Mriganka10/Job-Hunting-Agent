@@ -6,6 +6,16 @@ from job_hunting_agent.models import ApplicationResult, JobLead
 from job_hunting_agent.web import _application_payload, app, build_config_from_form, scheduler
 
 
+def authenticated_client(email: str = "client@example.com") -> TestClient:
+    client = TestClient(app)
+    otp_response = client.post("/api/auth/request-otp", data={"email": email})
+    assert otp_response.status_code == 200
+    otp = otp_response.json()["dev_otp"]
+    verify_response = client.post("/api/auth/verify", data={"email": email, "otp": otp})
+    assert verify_response.status_code == 200
+    return client
+
+
 def test_web_health_returns_scheduler_status() -> None:
     client = TestClient(app)
 
@@ -16,8 +26,27 @@ def test_web_health_returns_scheduler_status() -> None:
     assert "scheduler" in response.json()
 
 
-def test_home_page_contains_resume_and_profile_inputs() -> None:
+def test_home_page_redirects_to_login_without_session() -> None:
     client = TestClient(app)
+
+    response = client.get("/", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_login_page_contains_email_otp_flow() -> None:
+    client = TestClient(app)
+
+    response = client.get("/login")
+
+    assert response.status_code == 200
+    assert "Email OTP Sign In" in response.text
+    assert "/api/auth/request-otp" in response.text
+
+
+def test_home_page_contains_resume_and_profile_inputs() -> None:
+    client = authenticated_client()
 
     response = client.get("/")
 
@@ -45,6 +74,23 @@ def test_static_hero_asset_is_served() -> None:
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
+
+
+def test_run_history_endpoint_requires_authenticated_user() -> None:
+    client = TestClient(app)
+
+    response = client.get("/api/runs")
+
+    assert response.status_code == 401
+
+
+def test_authenticated_run_history_endpoint_returns_runs() -> None:
+    client = authenticated_client("history@example.com")
+
+    response = client.get("/api/runs")
+
+    assert response.status_code == 200
+    assert "runs" in response.json()
 
 
 def test_application_payload_includes_draft_message(tmp_path: Path) -> None:
@@ -80,7 +126,7 @@ def test_build_config_from_form_keeps_portal_profiles() -> None:
 
 
 def test_run_endpoint_rejects_unsupported_resume_format(tmp_path: Path) -> None:
-    client = TestClient(app)
+    client = authenticated_client("runner@example.com")
 
     response = client.post(
         "/api/run",
@@ -93,7 +139,7 @@ def test_run_endpoint_rejects_unsupported_resume_format(tmp_path: Path) -> None:
 
 
 def test_scheduler_start_endpoint_starts_without_immediate_run() -> None:
-    client = TestClient(app)
+    client = authenticated_client("scheduler@example.com")
     scheduler.stop()
 
     response = client.post(
