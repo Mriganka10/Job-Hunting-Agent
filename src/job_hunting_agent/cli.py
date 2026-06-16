@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from datetime import datetime, timedelta
 
@@ -22,8 +23,8 @@ def main() -> None:
             subparser.add_argument("--daily-at", help="Run daily at HH:MM local time")
 
     serve_parser = subparsers.add_parser("serve")
-    serve_parser.add_argument("--host", default="127.0.0.1", help="Host for the web UI")
-    serve_parser.add_argument("--port", type=int, default=8000, help="Port for the web UI")
+    serve_parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"), help="Host for the web UI")
+    serve_parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Port for the web UI")
 
     args = parser.parse_args()
     if args.command == "serve":

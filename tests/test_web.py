@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from job_hunting_agent.models import ApplicationResult, JobLead
-from job_hunting_agent.web import _application_payload, app, build_config_from_form, scheduler
+from job_hunting_agent.web import APP_SECRET, COOKIE_SECURE, _application_payload, app, build_config_from_form, scheduler
 
 
 def authenticated_client(email: str = "client@example.com") -> TestClient:
@@ -24,6 +24,11 @@ def test_web_health_returns_scheduler_status() -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     assert "scheduler" in response.json()
+
+
+def test_local_test_environment_does_not_use_secure_cookie_default_secret() -> None:
+    assert COOKIE_SECURE is False
+    assert APP_SECRET == "local-dev-change-me"
 
 
 def test_home_page_redirects_to_login_without_session() -> None:

@@ -36,6 +36,8 @@ OTP_TTL_MINUTES = int(os.getenv("JOB_AGENT_OTP_TTL_MINUTES", "10"))
 APP_SECRET = os.getenv("JOB_AGENT_SECRET_KEY", "local-dev-change-me")
 COOKIE_SECURE = os.getenv("JOB_AGENT_COOKIE_SECURE", "false").lower() == "true"
 DEV_RETURN_OTP = os.getenv("JOB_AGENT_DEV_RETURN_OTP", "true").lower() == "true"
+if COOKIE_SECURE and APP_SECRET == "local-dev-change-me":
+    raise RuntimeError("Set JOB_AGENT_SECRET_KEY to a long random value before running with secure cookies.")
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 init_db()

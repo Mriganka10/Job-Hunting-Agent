@@ -13,6 +13,8 @@ This guide describes the production deployment target for the Job Hunting Agent 
   - application ledger/history
 - Local SQLite fallback for development and tests.
 - Dockerfile for container deployment.
+- `.dockerignore` to keep local resumes, reports, virtualenvs, and secrets out of ECR images.
+- `apprunner.yaml` for source-based App Runner deployments.
 - Environment-based configuration for secrets, database, cookies, and SMTP.
 
 ## Recommended AWS Architecture
@@ -45,7 +47,11 @@ JOB_AGENT_SMTP_PORT=587
 JOB_AGENT_SMTP_USERNAME=agent@example.com
 JOB_AGENT_SMTP_PASSWORD=secret
 JOB_AGENT_SMTP_FROM=agent@example.com
+HOST=0.0.0.0
+PORT=8000
 ```
+
+The container defaults `JOB_AGENT_COOKIE_SECURE=true` and `JOB_AGENT_DEV_RETURN_OTP=false`. Startup fails when secure cookies are enabled and `JOB_AGENT_SECRET_KEY` is still the local development default.
 
 ## App Runner Deployment
 
@@ -66,6 +72,18 @@ docker push <account-id>.dkr.ecr.<region>.amazonaws.com/job-hunting-agent:latest
 7. Configure port `8000`.
 8. Add runtime secrets/environment variables.
 9. Open the App Runner URL and sign in through email OTP.
+
+Alternative source deployment:
+
+- Use the repository with `apprunner.yaml`.
+- Store sensitive values such as `JOB_AGENT_SECRET_KEY`, `JOB_AGENT_DATABASE_URL`, and SMTP credentials as App Runner secrets or environment secrets.
+- Keep non-secret runtime values such as `HOST`, `PORT`, `JOB_AGENT_COOKIE_SECURE`, and `JOB_AGENT_DEV_RETURN_OTP` in the App Runner configuration.
+
+## AWS Runtime Notes
+
+- App Runner instances have ephemeral local storage. The current app still writes uploads and generated draft/report files under `data/`; use S3-backed storage before relying on file retention across deploys, restarts, or scaling events.
+- App Runner can restart or scale instances. The in-process scheduler is useful for demos but should be replaced with EventBridge Scheduler plus an SQS/ECS worker for production daily runs.
+- Use HTTPS only. App Runner provides HTTPS on its default domain; use Route 53/custom domains when exposing a client-facing URL.
 
 ## Current Boundaries Before Client Rollout
 

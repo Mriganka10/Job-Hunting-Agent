@@ -1,0 +1,20 @@
+version: 1.0
+runtime: python312
+build:
+  commands:
+    build:
+      - pip install --upgrade pip
+      - pip install -e ".[docs]"
+run:
+  command: python -m job_hunting_agent serve
+  network:
+    port: 8000
+  env:
+    - name: HOST
+      value: "0.0.0.0"
+    - name: PORT
+      value: "8000"
+    - name: JOB_AGENT_COOKIE_SECURE
+      value: "true"
+    - name: JOB_AGENT_DEV_RETURN_OTP
+      value: "false"
