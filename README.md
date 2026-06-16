@@ -12,6 +12,7 @@ Daily job-search assistant that takes a resume as the main input, evaluates ATS 
 - Creates email-ready applications and can send them through SMTP.
 - Provides an OTP-protected web UI for resume upload, LinkedIn URL, Naukri URL, immediate runs, and daily scheduling.
 - Persists user, run, and application history in PostgreSQL for production deployments.
+- Includes Elastic Beanstalk/EC2 deployment scaffolding with RDS PostgreSQL as the production database target.
 - Runs once or on a daily schedule from the CLI.
 
 > Important: LinkedIn and Naukri frequently use login, CAPTCHA, anti-bot checks, and changing page layouts. This prototype keeps portal automation behind adapters. Search links work immediately; true one-click application should be enabled only for flows you are authorized to automate.

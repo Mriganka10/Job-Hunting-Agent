@@ -1,6 +1,22 @@
 # AWS Production Deployment Guide
 
-This guide describes the production deployment target for the Job Hunting Agent web application.
+This project is prepared for an Elastic Beanstalk deployment model similar to the Multi RAG Agentic AI repo:
+
+```text
+Client Browser
+  |
+  v
+Elastic Beanstalk Environment
+  |
+  v
+EC2 instance running FastAPI/Uvicorn
+  |
+  +-- Amazon RDS PostgreSQL - users, OTP, runs, application ledger
+  +-- AWS Secrets Manager / EB environment variables - app secret, DB URL, SMTP credentials
+  +-- Amazon S3 - future resume/report object storage
+  +-- Amazon EventBridge + worker - future durable daily runs
+  +-- Amazon CloudWatch - EB/EC2 logs, metrics, alarms
+```
 
 ## Implemented Production Foundations
 
@@ -12,34 +28,18 @@ This guide describes the production deployment target for the Job Hunting Agent 
   - run history
   - application ledger/history
 - Local SQLite fallback for development and tests.
-- Dockerfile for container deployment.
-- `.dockerignore` to keep local resumes, reports, virtualenvs, and secrets out of ECR images.
-- `apprunner.yaml` for source-based App Runner deployments.
-- Environment-based configuration for secrets, database, cookies, and SMTP.
-
-## Recommended AWS Architecture
-
-```text
-Client Browser
-  |
-  v
-AWS App Runner - FastAPI Web UI/API
-  |
-  +-- Amazon RDS PostgreSQL - users, OTP, runs, application ledger
-  +-- AWS Secrets Manager - DB URL, app secret, SMTP credentials
-  +-- Amazon S3 - future resume/report object storage
-  +-- Amazon EventBridge Scheduler - future durable daily schedules
-  +-- Amazon SQS/ECS Worker - future async agent execution
-  +-- Amazon CloudWatch - logs, metrics, alarms
-```
+- `Procfile` for Elastic Beanstalk process startup.
+- `requirements.txt` for Elastic Beanstalk Python dependency install.
+- `.ebextensions/01_environment.config` for non-secret runtime defaults.
+- Dockerfile remains available for optional local/container packaging, but Elastic Beanstalk is the recommended AWS path.
 
 ## Required Environment Variables
 
-Use AWS Secrets Manager or App Runner runtime environment secrets for these values:
+Configure these in Elastic Beanstalk environment properties or inject them from AWS Secrets Manager:
 
 ```bash
 JOB_AGENT_SECRET_KEY=long-random-secret
-JOB_AGENT_DATABASE_URL=postgresql://user:password@host:5432/job_agent
+JOB_AGENT_DATABASE_URL=postgresql://user:password@rds-endpoint:5432/job_agent
 JOB_AGENT_COOKIE_SECURE=true
 JOB_AGENT_DEV_RETURN_OTP=false
 JOB_AGENT_SMTP_HOST=smtp.example.com
@@ -51,50 +51,70 @@ HOST=0.0.0.0
 PORT=8000
 ```
 
-The container defaults `JOB_AGENT_COOKIE_SECURE=true` and `JOB_AGENT_DEV_RETURN_OTP=false`. Startup fails when secure cookies are enabled and `JOB_AGENT_SECRET_KEY` is still the local development default.
+Do not commit real values for `JOB_AGENT_SECRET_KEY`, `JOB_AGENT_DATABASE_URL`, SMTP credentials, or portal credentials.
 
-## App Runner Deployment
+The application fails startup when secure cookies are enabled and `JOB_AGENT_SECRET_KEY` is still the local development default.
 
-1. Create an Amazon RDS PostgreSQL database.
+## Elastic Beanstalk Deployment
+
+1. Create an RDS PostgreSQL database.
 2. Create a database user and database named `job_agent`.
-3. Store `JOB_AGENT_DATABASE_URL`, `JOB_AGENT_SECRET_KEY`, and SMTP settings in AWS Secrets Manager.
-4. Create an Amazon ECR repository.
-5. Build and push the image:
+3. Configure the RDS security group to allow inbound PostgreSQL traffic from the Elastic Beanstalk EC2 security group only.
+4. Create an Elastic Beanstalk Python environment.
+5. Ensure EB uses the repository root as the application bundle.
+6. Set EB environment properties:
+   - `JOB_AGENT_SECRET_KEY`
+   - `JOB_AGENT_DATABASE_URL`
+   - `JOB_AGENT_COOKIE_SECURE=true`
+   - `JOB_AGENT_DEV_RETURN_OTP=false`
+   - SMTP variables
+7. Deploy the application bundle.
+8. Open the Elastic Beanstalk URL and sign in with email OTP.
+
+The included `Procfile` starts the app with:
 
 ```bash
-aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <account-id>.dkr.ecr.<region>.amazonaws.com
-docker build -t job-hunting-agent .
-docker tag job-hunting-agent:latest <account-id>.dkr.ecr.<region>.amazonaws.com/job-hunting-agent:latest
-docker push <account-id>.dkr.ecr.<region>.amazonaws.com/job-hunting-agent:latest
+python -m job_hunting_agent serve --host 0.0.0.0 --port 8000
 ```
 
-6. Create an App Runner service from the ECR image.
-7. Configure port `8000`.
-8. Add runtime secrets/environment variables.
-9. Open the App Runner URL and sign in through email OTP.
+Elastic Beanstalk installs dependencies from `requirements.txt`, which points to this package with the `docs` extra so PDF/DOCX parsing remains available.
 
-Alternative source deployment:
+## Suggested EB CLI Flow
 
-- Use the repository with `apprunner.yaml`.
-- Store sensitive values such as `JOB_AGENT_SECRET_KEY`, `JOB_AGENT_DATABASE_URL`, and SMTP credentials as App Runner secrets or environment secrets.
-- Keep non-secret runtime values such as `HOST`, `PORT`, `JOB_AGENT_COOKIE_SECURE`, and `JOB_AGENT_DEV_RETURN_OTP` in the App Runner configuration.
+```bash
+eb init job-hunting-agent --platform python --region <region>
+eb create job-hunting-agent-prod --single
+eb setenv \
+  JOB_AGENT_SECRET_KEY=<long-random-secret> \
+  JOB_AGENT_DATABASE_URL=<postgres-url> \
+  JOB_AGENT_COOKIE_SECURE=true \
+  JOB_AGENT_DEV_RETURN_OTP=false \
+  JOB_AGENT_SMTP_HOST=<smtp-host> \
+  JOB_AGENT_SMTP_PORT=587 \
+  JOB_AGENT_SMTP_USERNAME=<smtp-user> \
+  JOB_AGENT_SMTP_PASSWORD=<smtp-password> \
+  JOB_AGENT_SMTP_FROM=<from-email>
+eb deploy
+eb open
+```
 
 ## AWS Runtime Notes
 
-- App Runner instances have ephemeral local storage. The current app still writes uploads and generated draft/report files under `data/`; use S3-backed storage before relying on file retention across deploys, restarts, or scaling events.
-- App Runner can restart or scale instances. The in-process scheduler is useful for demos but should be replaced with EventBridge Scheduler plus an SQS/ECS worker for production daily runs.
-- Use HTTPS only. App Runner provides HTTPS on its default domain; use Route 53/custom domains when exposing a client-facing URL.
+- Elastic Beanstalk EC2 local disk is not durable across rebuilds, deployments, or scaling. The current app still writes uploaded resumes and generated draft/report files under `data/`; move those artifacts to S3 before relying on file retention.
+- The current in-process scheduler is acceptable for controlled demos. For production daily automation, move schedules to EventBridge and execute runs through an SQS/ECS worker or another managed worker process.
+- Use HTTPS for client URLs. Configure an Application Load Balancer listener certificate through ACM for production domains.
+- Use CloudWatch logs for EB/EC2 application troubleshooting.
+- Keep the RDS database private inside the VPC.
 
 ## Current Boundaries Before Client Rollout
 
-The current branch makes the app much closer to production, but a public client rollout should still add:
+This branch makes the app production-oriented for authentication and database-backed history, but a public client rollout should still add:
 
 - S3 object storage for uploaded resumes and generated reports.
 - Durable scheduled jobs through EventBridge/SQS/ECS instead of the in-process scheduler.
 - Per-user schedule persistence and worker execution.
 - Admin controls for disabling users and reviewing run activity.
 - Rate limiting for OTP requests.
+- CSRF protection for state-changing form actions.
 - CAPTCHA or abuse protection on the login page.
 - Formal privacy policy and data retention controls.
-
-The in-process scheduler is acceptable for prototype demos. It is not a durable production scheduler because App Runner instances can restart or scale.
