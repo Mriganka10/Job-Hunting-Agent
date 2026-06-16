@@ -60,8 +60,13 @@ def apply_to_jobs(
             continue
 
         if config.application.mode == "email" and job.recruiter_email:
-            detail = send_email_application(job, resume, ats_report, config)
-            result = ApplicationResult(job, "emailed", detail)
+            try:
+                detail = send_email_application(job, resume, ats_report, config)
+                result = ApplicationResult(job, "emailed", detail)
+            except Exception as exc:
+                draft_detail = write_application_draft(job, resume, ats_report, config)
+                detail = f"Email failed: {exc}. Draft saved to {draft_detail}"
+                result = ApplicationResult(job, "email_failed", detail)
         else:
             detail = write_application_draft(job, resume, ats_report, config)
             result = ApplicationResult(job, "drafted", detail)

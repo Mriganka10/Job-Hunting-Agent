@@ -112,7 +112,9 @@ Responsibilities:
 - Save uploaded resumes under `data/uploads`.
 - Run the existing `JobHuntingAgent`.
 - Display ATS score, suggestions, missing keywords, job leads, and application actions.
-- Start or stop the daily scheduler.
+- Start or stop the daily scheduler through explicit buttons.
+- Show scheduler status including next run, last run, errors, and short run history.
+- Show application and email audit counts.
 
 ## Report Writer
 

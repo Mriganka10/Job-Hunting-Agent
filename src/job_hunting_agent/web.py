@@ -31,19 +31,28 @@ class DailyScheduler:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self.last_result: dict | None = None
+        self.last_run_at: str | None = None
+        self.last_error: str | None = None
+        self.created_at: str | None = None
         self.next_run_at: str | None = None
         self.daily_at: str | None = None
         self.resume_path: str | None = None
         self.config: AppConfig | None = None
+        self.history: list[dict] = []
 
     def start(self, resume_path: str, config: AppConfig, daily_at: str) -> None:
-        _parse_hhmm(daily_at)
+        hour, minute = _parse_hhmm(daily_at)
         with self._lock:
             self.stop()
             self._stop_event = threading.Event()
             self.resume_path = resume_path
             self.config = config
             self.daily_at = daily_at
+            self.created_at = datetime.now().isoformat(timespec="seconds")
+            self.last_result = None
+            self.last_run_at = None
+            self.last_error = None
+            self.next_run_at = _next_run_time(hour, minute).isoformat(timespec="minutes")
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
 
@@ -63,8 +72,12 @@ class DailyScheduler:
             "running": self.is_running,
             "daily_at": self.daily_at,
             "next_run_at": self.next_run_at,
+            "created_at": self.created_at,
+            "last_run_at": self.last_run_at,
+            "last_error": self.last_error,
             "resume_path": self.resume_path,
             "last_result": self.last_result,
+            "history": self.history[-10:],
         }
 
     def _loop(self) -> None:
@@ -78,7 +91,23 @@ class DailyScheduler:
             wait_seconds = max(1, (next_run - datetime.now()).total_seconds())
             if self._stop_event.wait(wait_seconds):
                 return
-            self.last_result = run_agent(self.resume_path, self.config)
+            started_at = datetime.now().isoformat(timespec="seconds")
+            try:
+                self.last_result = run_agent(self.resume_path, self.config, trigger="scheduled")
+                self.last_run_at = self.last_result["generated_at"]
+                self.last_error = None
+                self.history.append(_history_item("scheduled", started_at, self.last_result))
+            except Exception as exc:
+                self.last_error = str(exc)
+                self.history.append(
+                    {
+                        "trigger": "scheduled",
+                        "started_at": started_at,
+                        "finished_at": datetime.now().isoformat(timespec="seconds"),
+                        "status": "failed",
+                        "error": str(exc),
+                    }
+                )
 
 
 scheduler = DailyScheduler()
@@ -111,6 +140,7 @@ async def run_now(
     daily_at: Annotated[str, Form()] = "",
     start_daily: Annotated[bool, Form()] = False,
 ) -> dict:
+    started_at = datetime.now().isoformat(timespec="seconds")
     resume_path = await save_resume_upload(resume)
     config = build_config_from_form(
         name=name,
@@ -124,7 +154,8 @@ async def run_now(
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
     )
-    result = run_agent(str(resume_path), config)
+    result = run_agent(str(resume_path), config, trigger="manual")
+    scheduler.history.append(_history_item("manual", started_at, result))
     if start_daily:
         if not daily_at:
             raise HTTPException(status_code=400, detail="Daily time is required when scheduling is enabled.")
@@ -133,24 +164,80 @@ async def run_now(
     return result
 
 
+@app.post("/api/scheduler/start")
+async def start_scheduler(
+    resume: Annotated[UploadFile, File()],
+    name: Annotated[str, Form()] = "",
+    email: Annotated[str, Form()] = "",
+    phone: Annotated[str, Form()] = "",
+    linkedin_profile_url: Annotated[str, Form()] = "",
+    naukri_profile_url: Annotated[str, Form()] = "",
+    target_roles: Annotated[str, Form()] = "Python Developer, Machine Learning Engineer, Data Engineer",
+    locations: Annotated[str, Form()] = "Bengaluru, Hyderabad, Remote",
+    skills: Annotated[str, Form()] = "Python, SQL, FastAPI, AWS, Machine Learning",
+    application_mode: Annotated[str, Form()] = "draft",
+    max_jobs_per_portal: Annotated[int, Form()] = 10,
+    daily_at: Annotated[str, Form()] = "",
+) -> dict:
+    if not daily_at:
+        raise HTTPException(status_code=400, detail="Daily time is required to schedule the agent.")
+    resume_path = await save_resume_upload(resume)
+    config = build_config_from_form(
+        name=name,
+        email=email,
+        phone=phone,
+        linkedin_profile_url=linkedin_profile_url,
+        naukri_profile_url=naukri_profile_url,
+        target_roles=target_roles,
+        locations=locations,
+        skills=skills,
+        application_mode=application_mode,
+        max_jobs_per_portal=max_jobs_per_portal,
+    )
+    scheduler.start(str(resume_path), config, daily_at)
+    return {"status": "scheduled", "scheduler": scheduler.snapshot()}
+
+
 @app.post("/api/scheduler/stop")
 def stop_scheduler() -> dict:
     scheduler.stop()
     return scheduler.snapshot()
 
 
-def run_agent(resume_path: str, config: AppConfig) -> dict:
+def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual") -> dict:
     report, jobs, results = JobHuntingAgent(config).run(resume_path)
+    application_summary = _application_summary(results)
     return {
         "ats_report": asdict(report),
         "jobs": [asdict(job) for job in jobs],
         "applications": [asdict(result) for result in results],
+        "application_summary": application_summary,
         "output_dir": str(Path(config.application.data_dir).resolve()),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "trigger": trigger,
         "portal_submission_note": (
             "Portal applications are prepared as drafts or recruiter emails. "
             "Authenticated LinkedIn/Naukri submission remains adapter-gated because those portals can require login, CAPTCHA, OTP, and screening answers."
         ),
+    }
+
+
+def _application_summary(results) -> dict[str, int]:
+    summary = {"drafted": 0, "emailed": 0, "email_failed": 0, "skipped": 0}
+    for result in results:
+        summary[result.status] = summary.get(result.status, 0) + 1
+    return summary
+
+
+def _history_item(trigger: str, started_at: str, result: dict) -> dict:
+    return {
+        "trigger": trigger,
+        "started_at": started_at,
+        "finished_at": result["generated_at"],
+        "status": "completed",
+        "ats_score": result["ats_report"]["score"],
+        "jobs": len(result["jobs"]),
+        "applications": result["application_summary"],
     }
 
 
@@ -285,6 +372,7 @@ def _page() -> str:
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .checkline { display: flex; gap: 10px; align-items: center; min-height: 42px; margin-top: 30px; padding: 10px 12px; border: 1px solid #d8e0ec; border-radius: 7px; background: #f8fafc; color: #344054; font-size: 13px; font-weight: 750; }
     .checkline input { width: 18px; min-height: 18px; accent-color: var(--blue); }
+    .schedule-help { min-height: 42px; margin-top: 30px; padding: 10px 12px; border: 1px solid #d8e0ec; border-radius: 7px; background: #f8fafc; color: #344054; font-size: 13px; font-weight: 750; line-height: 1.35; }
     button { min-height: 44px; border: 0; border-radius: 7px; padding: 10px 15px; font-weight: 850; cursor: pointer; background: var(--blue); color: white; box-shadow: 0 10px 24px rgba(23, 92, 211, 0.24); }
     button.secondary { background: #394150; box-shadow: none; }
     button:hover { filter: brightness(1.04); }
@@ -297,8 +385,20 @@ def _page() -> str:
     .empty-state { display: grid; place-items: center; min-height: 360px; border: 1px dashed #cbd5e1; border-radius: 8px; background: #f8fafc; text-align: center; padding: 24px; }
     .empty-visual { width: 118px; height: 90px; margin-bottom: 14px; border-radius: 8px; background: #ffffff; border: 1px solid #d8e0ec; box-shadow: 0 10px 24px rgba(29, 41, 57, 0.08); position: relative; }
     .empty-visual::before { content: ""; position: absolute; left: 18px; right: 18px; top: 22px; height: 8px; border-radius: 4px; background: #175cd3; box-shadow: 0 18px 0 #d8e0ec, 0 36px 0 #d8e0ec; }
+    .scheduler-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0 18px; }
+    .scheduler-card { padding: 12px; border: 1px solid #dfe4ee; border-radius: 7px; background: #fbfcfe; }
+    .scheduler-card strong { display: block; font-size: 12px; color: #5b6472; text-transform: uppercase; }
+    .scheduler-card span { display: block; margin-top: 5px; font-size: 14px; font-weight: 800; color: var(--ink); overflow-wrap: anywhere; }
+    .status-pill.off { background: #f2f4f7; color: #5b6472; }
+    .status-pill.error { background: #fef3f2; color: #b42318; }
     .metric { display: inline-flex; align-items: baseline; gap: 7px; padding: 10px 12px; border: 1px solid #dfe4ee; border-radius: 7px; margin: 0 8px 8px 0; background: #fbfcfe; }
     .metric strong { font-size: 26px; }
+    .audit-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0 16px; }
+    .audit-card { padding: 10px; border-radius: 7px; background: #f8fafc; border: 1px solid #e6eaf1; }
+    .audit-card strong { display: block; font-size: 20px; }
+    .audit-card span { color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
+    .history-list { margin: 10px 0 18px; padding: 0; list-style: none; }
+    .history-list li { padding: 10px 0; border-bottom: 1px solid #edf1f6; }
     ul { padding-left: 20px; }
     li { margin: 6px 0; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; overflow: hidden; border: 1px solid #e6eaf1; border-radius: 8px; }
@@ -321,6 +421,7 @@ def _page() -> str:
       .results-header { display: block; }
       .status-pill { margin-top: 10px; }
       .platform-chip { width: 100%; justify-content: flex-start; }
+      .scheduler-grid, .audit-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -381,11 +482,12 @@ def _page() -> str:
         <legend><span class="section-badge">4</span>Daily Automation</legend>
         <div class="row">
           <div><label for="daily_at">Daily Time</label><input id="daily_at" name="daily_at" type="time" value="09:30"></div>
-          <label class="checkline"><input id="start_daily" name="start_daily" type="checkbox" value="true"> Run every day while server is active</label>
+          <div class="schedule-help">Use Schedule Daily Run to upload this resume and start the timer. The scheduler runs only while this server is active.</div>
         </div>
       </fieldset>
       <div class="actions">
         <button type="submit">Run Agent</button>
+        <button class="secondary" id="schedule-run" type="button">Schedule Daily Run</button>
         <button class="secondary" id="stop-scheduler" type="button">Stop Daily Run</button>
       </div>
       <p class="note">Portal submissions are prepared as drafts or recruiter emails. Authenticated LinkedIn/Naukri application submission needs account-specific browser adapters and user approval.</p>
@@ -405,6 +507,7 @@ def _page() -> str:
           <p class="muted">Upload your resume and run the agent to build your daily job pipeline.</p>
         </div>
       </div>
+      <div id="scheduler-status" class="scheduler-grid"></div>
       <div id="details"></div>
     </section>
   </main>
@@ -412,13 +515,14 @@ def _page() -> str:
     const form = document.getElementById('agent-form');
     const summary = document.getElementById('summary');
     const details = document.getElementById('details');
+    const schedulerStatus = document.getElementById('scheduler-status');
+    const statusPill = document.querySelector('.status-pill');
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       summary.textContent = 'Running ATS scoring, portal search, and application drafting...';
       summary.className = 'muted';
       details.innerHTML = '';
       const data = new FormData(form);
-      if (!document.getElementById('start_daily').checked) data.delete('start_daily');
       const response = await fetch('/api/run', { method: 'POST', body: data });
       const payload = await response.json();
       if (!response.ok) {
@@ -426,35 +530,87 @@ def _page() -> str:
         return;
       }
       render(payload);
+      refreshScheduler();
+    });
+    document.getElementById('schedule-run').addEventListener('click', async () => {
+      summary.className = 'muted';
+      summary.textContent = 'Uploading resume and scheduling the daily agent run...';
+      details.innerHTML = '';
+      const data = new FormData(form);
+      const response = await fetch('/api/scheduler/start', { method: 'POST', body: data });
+      const payload = await response.json();
+      if (!response.ok) {
+        summary.textContent = payload.detail || 'Schedule failed.';
+        return;
+      }
+      renderScheduler(payload.scheduler);
+      summary.innerHTML = `<p class="muted">Daily run scheduled. The agent will run at the configured time while this server process is active.</p>`;
     });
     document.getElementById('stop-scheduler').addEventListener('click', async () => {
       const response = await fetch('/api/scheduler/stop', { method: 'POST' });
       const payload = await response.json();
       summary.className = 'muted';
       summary.textContent = payload.running ? 'Scheduler is still running.' : 'Daily run stopped.';
+      renderScheduler(payload);
     });
+    async function refreshScheduler() {
+      const response = await fetch('/health');
+      if (!response.ok) return;
+      const payload = await response.json();
+      renderScheduler(payload.scheduler);
+    }
+    function renderScheduler(scheduler) {
+      const running = scheduler && scheduler.running;
+      const error = scheduler && scheduler.last_error;
+      statusPill.className = `status-pill ${error ? 'error' : running ? '' : 'off'}`;
+      statusPill.textContent = error ? 'Error' : running ? 'Scheduled' : 'Ready';
+      schedulerStatus.innerHTML = `
+        <div class="scheduler-card"><strong>Scheduler</strong><span>${running ? 'Running' : 'Not running'}</span></div>
+        <div class="scheduler-card"><strong>Daily time</strong><span>${escapeHtml(scheduler?.daily_at || 'Not set')}</span></div>
+        <div class="scheduler-card"><strong>Next run</strong><span>${escapeHtml(scheduler?.next_run_at || 'Not scheduled')}</span></div>
+        <div class="scheduler-card"><strong>Last run</strong><span>${escapeHtml(scheduler?.last_run_at || 'No run yet')}</span></div>
+      `;
+      if (error) {
+        schedulerStatus.innerHTML += `<p class="note">Last scheduled run failed: ${escapeHtml(error)}</p>`;
+      }
+      if (scheduler?.history?.length) {
+        const history = scheduler.history.slice().reverse().map((item) => `<li><strong>${escapeHtml(item.status)}</strong> ${escapeHtml(item.trigger)} run finished at ${escapeHtml(item.finished_at || item.started_at || '')} - jobs: ${escapeHtml(item.jobs ?? 'n/a')}</li>`).join('');
+        schedulerStatus.innerHTML += `<h3>Run History</h3><ul class="history-list">${history}</ul>`;
+      }
+    }
     function render(payload) {
       const report = payload.ats_report;
+      const appSummary = payload.application_summary || {};
       summary.className = '';
       summary.innerHTML = `
         <span class="metric"><strong>${report.score}</strong><span>/100 ATS</span></span>
         <span class="metric"><strong>${payload.jobs.length}</strong><span>jobs</span></span>
         <span class="metric"><strong>${payload.applications.length}</strong><span>actions</span></span>
+        <div class="audit-grid">
+          <div class="audit-card"><strong>${appSummary.drafted || 0}</strong><span>Drafted</span></div>
+          <div class="audit-card"><strong>${appSummary.emailed || 0}</strong><span>Emailed</span></div>
+          <div class="audit-card"><strong>${appSummary.email_failed || 0}</strong><span>Email Failed</span></div>
+          <div class="audit-card"><strong>${appSummary.skipped || 0}</strong><span>Skipped</span></div>
+        </div>
         <p class="muted">Outputs: ${payload.output_dir}</p>
         <p class="muted">${payload.portal_submission_note}</p>
       `;
       const improvements = report.improvements.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
       const missing = report.missing_keywords.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
       const jobs = payload.jobs.slice(0, 12).map((job) => `<tr><td>${escapeHtml(job.portal)}</td><td>${escapeHtml(job.title)}</td><td>${escapeHtml(job.company)}</td><td><a href="${job.url}" target="_blank" rel="noreferrer">Open</a></td></tr>`).join('');
+      const applications = payload.applications.slice(0, 12).map((item) => `<tr><td>${escapeHtml(item.status)}</td><td>${escapeHtml(item.job.title)}</td><td>${escapeHtml(item.job.recruiter_email || 'Not available')}</td><td>${escapeHtml(item.detail)}</td></tr>`).join('');
       details.innerHTML = `
         <h3>Resume Improvements</h3><ul>${improvements || '<li>No major improvements found.</li>'}</ul>
         <h3>Missing Keywords</h3><ul>${missing || '<li>No configured keywords are missing.</li>'}</ul>
         <h3>Job Leads</h3><table><thead><tr><th>Portal</th><th>Role</th><th>Company</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table>
+        <h3>Application and Email Audit</h3><table><thead><tr><th>Status</th><th>Role</th><th>Recruiter Email</th><th>Detail</th></tr></thead><tbody>${applications}</tbody></table>
       `;
     }
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
     }
+    refreshScheduler();
+    setInterval(refreshScheduler, 15000);
   </script>
 </body>
 </html>"""
