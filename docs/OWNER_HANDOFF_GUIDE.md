@@ -157,8 +157,10 @@ Ask the technical team to follow these steps:
 5. Run the search command.
 6. Run the full agent once in draft mode.
 7. Start the web UI and run an upload-based workflow.
-8. Inspect `data/reports`, `data/drafts`, and `data/applications.jsonl`.
-9. Run tests with `python -m pytest -q`.
+8. Use `Schedule Daily Run` to save a resume/config and start the daily timer.
+9. Confirm schedule state through the UI or `GET /health`.
+10. Inspect `data/reports`, `data/drafts`, and `data/applications.jsonl`.
+11. Run tests with `python -m pytest -q`.
 
 ## 5. Business Demo Script
 
@@ -171,8 +173,9 @@ Use this flow for a demo:
 5. Run the agent and show the ATS score.
 6. Show resume suggestions and missing keywords.
 7. Show job leads and generated application drafts.
-8. Enable daily scheduling for the server session.
-9. Explain that actual portal submission is the next phase because LinkedIn and Naukri require account-specific authenticated flows.
+8. Use `Schedule Daily Run` and show `next_run_at` and `last_run_at`.
+9. Show the application/email audit statuses.
+10. Explain that actual portal submission is the next phase because LinkedIn and Naukri require account-specific authenticated flows.
 
 ## 6. Current Limitations
 

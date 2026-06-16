@@ -115,6 +115,7 @@ http://127.0.0.1:8000
 
 The UI supports:
 
+- Email OTP sign-in.
 - Resume upload in PDF, DOCX, TXT, or MD format.
 - LinkedIn profile URL input.
 - Naukri profile URL input.
@@ -123,11 +124,41 @@ The UI supports:
 - Immediate agent run.
 - Daily schedule while the server process is running.
 
+Local OTP behavior:
+
+- If SMTP environment variables are not configured, the OTP is printed in the server logs.
+- With `JOB_AGENT_DEV_RETURN_OTP=true`, the local browser also shows the OTP for easier testing.
+- In production, set `JOB_AGENT_DEV_RETURN_OTP=false`, `JOB_AGENT_COOKIE_SECURE=true`, and configure SMTP.
+
+Production database:
+
+```bash
+export JOB_AGENT_DATABASE_URL="postgresql://user:password@host:5432/job_agent"
+export JOB_AGENT_SECRET_KEY="replace-with-a-long-random-secret"
+```
+
+If `JOB_AGENT_DATABASE_URL` is not set, the app uses a local SQLite database under `data/` for development.
+
+Important web UI behavior:
+
+- `Run Agent` runs immediately and writes output.
+- `Schedule Daily Run` uploads the selected resume and starts the timer without running immediately.
+- The scheduler runs only while the server process is active.
+- Closing the terminal, stopping Uvicorn, or putting the machine to sleep can prevent the scheduled run.
+
 Health check:
 
 ```bash
 curl http://127.0.0.1:8000/health
 ```
+
+Use the health response to confirm:
+
+- `scheduler.running`
+- `scheduler.daily_at`
+- `scheduler.next_run_at`
+- `scheduler.last_run_at`
+- `scheduler.history`
 
 ## Run Tests
 
@@ -167,6 +198,13 @@ This is expected when a portal blocks public scraping, changes page markup, or r
 ### Email mode fails
 
 Check SMTP host, port, username, password, and whether the email provider requires an app password.
+
+Email action statuses are written to `data/applications.jsonl`:
+
+- `emailed`: SMTP send completed.
+- `email_failed`: SMTP send failed and a draft was saved.
+- `drafted`: no email was sent; a draft was saved.
+- `skipped`: job was already in the local ledger.
 
 ### Duplicate applications
 

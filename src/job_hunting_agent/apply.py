@@ -60,8 +60,13 @@ def apply_to_jobs(
             continue
 
         if config.application.mode == "email" and job.recruiter_email:
-            detail = send_email_application(job, resume, ats_report, config)
-            result = ApplicationResult(job, "emailed", detail)
+            try:
+                detail = send_email_application(job, resume, ats_report, config)
+                result = ApplicationResult(job, "emailed", detail)
+            except Exception as exc:
+                draft_detail = write_application_draft(job, resume, ats_report, config)
+                detail = f"Email failed: {exc}. Draft saved to {draft_detail}"
+                result = ApplicationResult(job, "email_failed", detail)
         else:
             detail = write_application_draft(job, resume, ats_report, config)
             result = ApplicationResult(job, "drafted", detail)
@@ -120,7 +125,6 @@ def _message_body(
         f"I am interested in the {job.title} opportunity at {job.company}.\n"
         f"My background aligns with this role through experience in {skills}.\n"
         f"I have attached my resume for your review.\n\n"
-        f"ATS readiness score from my latest resume check: {ats_report.score}/100.\n\n"
         f"Regards,\n{profile.name or 'Candidate'}\n{profile.email}\n{profile.phone}\n"
         f"{_profile_links(profile)}\n"
         f"Job link: {job.url}\n"
