@@ -74,6 +74,7 @@ Purpose:
 - Submit LinkedIn and Naukri profile URLs.
 - Run the agent immediately.
 - Start or stop an in-process daily scheduler.
+- Confirm schedule state through visible status cards and `/health`.
 
 ## Configuration Reference
 
@@ -144,4 +145,7 @@ Current web endpoints:
 - `GET /`
 - `GET /health`
 - `POST /api/run`
+- `POST /api/scheduler/start`
 - `POST /api/scheduler/stop`
+
+`POST /api/run` runs immediately. `POST /api/scheduler/start` saves the uploaded resume/config and schedules the future daily run without running immediately.

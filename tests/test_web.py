@@ -2,7 +2,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from job_hunting_agent.web import app, build_config_from_form, save_resume_upload
+from job_hunting_agent.web import app, build_config_from_form, scheduler
 
 
 def test_web_health_returns_scheduler_status() -> None:
@@ -25,6 +25,8 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert 'name="linkedin_profile_url"' in response.text
     assert 'name="naukri_profile_url"' in response.text
     assert "/static/job-search-hero.png" in response.text
+    assert "Schedule Daily Run" in response.text
+    assert "scheduler-status" in response.text
 
 
 def test_static_hero_asset_is_served() -> None:
@@ -67,3 +69,30 @@ def test_run_endpoint_rejects_unsupported_resume_format(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert "PDF, DOCX, TXT, or MD" in response.json()["detail"]
+
+
+def test_scheduler_start_endpoint_starts_without_immediate_run() -> None:
+    client = TestClient(app)
+    scheduler.stop()
+
+    response = client.post(
+        "/api/scheduler/start",
+        data={
+            "daily_at": "23:59",
+            "application_mode": "draft",
+            "target_roles": "Python Developer",
+            "locations": "Remote",
+            "skills": "Python, SQL",
+        },
+        files={"resume": ("resume.txt", b"Summary Python Developer. Skills Python SQL.", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "scheduled"
+    assert payload["scheduler"]["running"] is True
+    assert payload["scheduler"]["daily_at"] == "23:59"
+    assert payload["scheduler"]["last_run_at"] is None
+    assert payload["scheduler"]["next_run_at"]
+
+    scheduler.stop()

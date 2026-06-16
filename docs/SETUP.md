@@ -123,11 +123,26 @@ The UI supports:
 - Immediate agent run.
 - Daily schedule while the server process is running.
 
+Important web UI behavior:
+
+- `Run Agent` runs immediately and writes output.
+- `Schedule Daily Run` uploads the selected resume and starts the timer without running immediately.
+- The scheduler runs only while the server process is active.
+- Closing the terminal, stopping Uvicorn, or putting the machine to sleep can prevent the scheduled run.
+
 Health check:
 
 ```bash
 curl http://127.0.0.1:8000/health
 ```
+
+Use the health response to confirm:
+
+- `scheduler.running`
+- `scheduler.daily_at`
+- `scheduler.next_run_at`
+- `scheduler.last_run_at`
+- `scheduler.history`
 
 ## Run Tests
 
@@ -167,6 +182,13 @@ This is expected when a portal blocks public scraping, changes page markup, or r
 ### Email mode fails
 
 Check SMTP host, port, username, password, and whether the email provider requires an app password.
+
+Email action statuses are written to `data/applications.jsonl`:
+
+- `emailed`: SMTP send completed.
+- `email_failed`: SMTP send failed and a draft was saved.
+- `drafted`: no email was sent; a draft was saved.
+- `skipped`: job was already in the local ledger.
 
 ### Duplicate applications
 

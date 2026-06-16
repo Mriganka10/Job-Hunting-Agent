@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from job_hunting_agent.apply import write_application_draft
+from job_hunting_agent.apply import apply_to_jobs, write_application_draft
 from job_hunting_agent.config import AppConfig, ApplicationConfig, EmailConfig, SearchConfig
 from job_hunting_agent.models import AtsReport, CandidateProfile, JobLead, Resume
 
@@ -27,3 +27,30 @@ def test_application_draft_includes_portal_profile_links(tmp_path: Path) -> None
 
     assert "LinkedIn: https://www.linkedin.com/in/mriganka-das-b2ba3186/" in draft
     assert "Naukri: https://www.naukri.com/mnjuser/profile?id=&altresid" in draft
+
+
+def test_email_failure_is_recorded_and_draft_is_saved(tmp_path: Path) -> None:
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text("Python SQL", encoding="utf-8")
+    config = AppConfig(
+        profile=CandidateProfile(name="Mriganka Das", email="mriganka@example.com"),
+        search=SearchConfig(),
+        application=ApplicationConfig(mode="email", data_dir=str(tmp_path)),
+        email=EmailConfig(),
+    )
+    resume = Resume(str(resume_path), "Python SQL", ("Python", "Sql"), ("Python Developer",))
+    report = AtsReport(80, (), (), ())
+    job = JobLead(
+        "linkedin",
+        "Python Developer",
+        "Example Corp",
+        "Remote",
+        "https://example.com/job",
+        recruiter_email="recruiter@example.com",
+    )
+
+    results = apply_to_jobs([job], resume, report, config)
+
+    assert results[0].status == "email_failed"
+    assert "Email failed:" in results[0].detail
+    assert "Draft saved" in results[0].detail

@@ -37,6 +37,16 @@ Then open:
 http://127.0.0.1:8000
 ```
 
+In the web UI, `Run Agent` runs immediately. `Schedule Daily Run` uploads the selected resume and starts the timer without running immediately. The scheduler only runs while the web server process is active.
+
+Confirm scheduler state:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Check `scheduler.running`, `scheduler.next_run_at`, `scheduler.last_run_at`, and `scheduler.history`.
+
 For daily execution:
 
 ```bash
@@ -59,6 +69,8 @@ Outputs are written under `data/` by default:
 - `data/reports/ats_report.md`
 - `data/reports/latest_run.json`
 - `data/applications.jsonl`
+
+Email confirmation is recorded in `data/applications.jsonl` and in the web UI application audit. Look for `emailed`, `email_failed`, `drafted`, or `skipped`.
 
 ## CLI Commands
 
