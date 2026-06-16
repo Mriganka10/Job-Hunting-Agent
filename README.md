@@ -70,7 +70,7 @@ Outputs are written under `data/` by default:
 - `data/reports/latest_run.json`
 - `data/applications.jsonl`
 
-Email confirmation is recorded in `data/applications.jsonl` and in the web UI application audit. Look for `emailed`, `email_failed`, `drafted`, or `skipped`. Generated draft messages are also shown in the web UI with copy actions so a user does not need to open files from `data/drafts/` manually.
+Email confirmation is recorded in `data/applications.jsonl`. Look for `emailed`, `email_failed`, `drafted`, or `skipped`. The web UI shows one reusable recruiter draft template with a `[Company Name]` placeholder and a copy action, so a user does not need to open files from `data/drafts/` manually.
 
 ## CLI Commands
 
