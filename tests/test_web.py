@@ -32,8 +32,10 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "payload.scheduler?.last_result" in response.text
     assert "Showing latest scheduled run" in response.text
     assert "shouldRenderScheduledResult" in response.text
-    assert "Draft Messages" in response.text
+    assert "Reusable Draft Message" in response.text
+    assert "[Company Name]" in response.text
     assert "copy-draft" in response.text
+    assert "Application and Email Audit" not in response.text
 
 
 def test_static_hero_asset_is_served() -> None:

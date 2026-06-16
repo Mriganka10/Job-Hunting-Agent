@@ -359,9 +359,25 @@ def _page() -> str:
     body {
       margin: 0;
       background:
-        radial-gradient(circle at 8% 10%, rgba(23, 92, 211, 0.09), transparent 28%),
-        linear-gradient(180deg, #f7fafe 0%, #edf3f8 44%, #f8fafc 100%);
+        linear-gradient(180deg, rgba(245, 248, 252, 0.82) 0%, rgba(232, 239, 248, 0.9) 42%, rgba(247, 250, 252, 0.96) 100%),
+        url('/static/job-search-hero.png');
+      background-attachment: fixed;
+      background-position: center top;
+      background-size: cover;
       color: var(--ink);
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 300px 0 0;
+      pointer-events: none;
+      background:
+        linear-gradient(120deg, rgba(7, 19, 38, 0.08), rgba(255, 255, 255, 0.72) 48%, rgba(23, 92, 211, 0.1)),
+        url('/static/job-search-hero.png');
+      background-size: cover;
+      background-position: center;
+      opacity: 0.22;
+      filter: saturate(0.9);
     }
     .hero {
       min-height: 330px;
@@ -389,9 +405,9 @@ def _page() -> str:
     .stat-card strong { display: block; font-size: 28px; line-height: 1; }
     .stat-card span { display: block; margin-top: 5px; color: #5b6472; font-size: 13px; font-weight: 700; }
     main { width: min(1180px, calc(100% - 48px)); margin: -38px auto 44px; display: grid; grid-template-columns: minmax(340px, 500px) minmax(340px, 1fr); gap: 24px; position: relative; z-index: 2; }
-    form, .panel { background: rgba(255, 255, 255, 0.96); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
+    form, .panel { background: rgba(255, 255, 255, 0.9); border: 1px solid rgba(216, 224, 236, 0.86); border-radius: 8px; box-shadow: 0 22px 60px rgba(22, 34, 51, 0.16); backdrop-filter: blur(18px); }
     form { padding: 8px 20px 20px; }
-    .panel { padding: 22px; min-height: 520px; background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); }
+    .panel { padding: 22px; min-height: 520px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(244, 248, 253, 0.9) 100%); }
     fieldset { border: 0; padding: 18px 0 2px; margin: 0; border-bottom: 1px solid #edf1f6; }
     fieldset:last-of-type { border-bottom: 0; }
     legend { display: flex; align-items: center; gap: 10px; width: 100%; font-size: 16px; font-weight: 850; margin-bottom: 2px; }
@@ -412,7 +428,7 @@ def _page() -> str:
     .muted { color: var(--muted); font-size: 13px; line-height: 1.5; }
     .note { margin: 14px 0 0; padding: 12px; border-radius: 7px; background: #fff8eb; border: 1px solid #fedf89; color: #7a4a08; }
     .workflow-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 14px 0 4px; }
-    .workflow-card { min-height: 86px; padding: 13px; border-radius: 8px; border: 1px solid #dfe7f2; background: linear-gradient(135deg, #ffffff 0%, #edf5ff 100%); }
+    .workflow-card { min-height: 86px; padding: 13px; border-radius: 8px; border: 1px solid rgba(223, 231, 242, 0.9); background: linear-gradient(135deg, rgba(255, 255, 255, 0.96) 0%, rgba(237, 245, 255, 0.94) 100%); box-shadow: 0 12px 30px rgba(29, 41, 57, 0.08); }
     .workflow-card:nth-child(2) { background: linear-gradient(135deg, #ffffff 0%, #ecfdf3 100%); }
     .workflow-card:nth-child(3) { background: linear-gradient(135deg, #ffffff 0%, #fff7ed 100%); }
     .workflow-card strong { display: block; font-size: 13px; margin-top: 9px; }
@@ -434,13 +450,9 @@ def _page() -> str:
     .status-pill.error { background: #fef3f2; color: #b42318; }
     .metric { display: inline-flex; align-items: baseline; gap: 7px; padding: 10px 12px; border: 1px solid #dfe4ee; border-radius: 7px; margin: 0 8px 8px 0; background: #fbfcfe; }
     .metric strong { font-size: 26px; }
-    .audit-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0 16px; }
-    .audit-card { padding: 10px; border-radius: 7px; background: #f8fafc; border: 1px solid #e6eaf1; }
-    .audit-card strong { display: block; font-size: 20px; }
-    .audit-card span { color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
     .history-list { margin: 10px 0 18px; padding: 0; list-style: none; }
     .history-list li { padding: 10px 0; border-bottom: 1px solid #edf1f6; }
-    .result-section { margin-top: 18px; padding: 16px; border: 1px solid #e1e8f2; border-radius: 8px; background: rgba(255, 255, 255, 0.86); }
+    .result-section { margin-top: 18px; padding: 16px; border: 1px solid rgba(225, 232, 242, 0.92); border-radius: 8px; background: rgba(255, 255, 255, 0.84); box-shadow: 0 12px 32px rgba(29, 41, 57, 0.07); }
     .result-section h3 { margin: 0 0 12px; font-size: 18px; }
     .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .insight-list { margin: 0; padding-left: 18px; }
@@ -452,7 +464,6 @@ def _page() -> str:
     .draft-card-header span { color: var(--muted); font-size: 12px; }
     .draft-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .copy-draft { min-height: 34px; padding: 7px 10px; box-shadow: none; font-size: 12px; }
-    .draft-link { display: inline-flex; min-height: 34px; align-items: center; padding: 7px 10px; border-radius: 7px; background: #eef4ff; color: var(--blue); font-size: 12px; font-weight: 850; text-decoration: none; }
     .draft-message { width: 100%; min-height: 180px; border: 0; border-radius: 0; border-top: 1px solid #eef2f7; background: #fbfcfe; font-size: 13px; line-height: 1.5; }
     ul { padding-left: 20px; }
     li { margin: 6px 0; }
@@ -476,7 +487,7 @@ def _page() -> str:
       .results-header { display: block; }
       .status-pill { margin-top: 10px; }
       .platform-chip { width: 100%; justify-content: flex-start; }
-      .scheduler-grid, .audit-grid, .workflow-strip, .result-grid { grid-template-columns: 1fr; }
+      .scheduler-grid, .workflow-strip, .result-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -658,13 +669,7 @@ def _page() -> str:
       summary.innerHTML = `
         <span class="metric"><strong>${report.score}</strong><span>/100 ATS</span></span>
         <span class="metric"><strong>${payload.jobs.length}</strong><span>jobs</span></span>
-        <span class="metric"><strong>${payload.applications.length}</strong><span>actions</span></span>
-        <div class="audit-grid">
-          <div class="audit-card"><strong>${appSummary.drafted || 0}</strong><span>Drafted</span></div>
-          <div class="audit-card"><strong>${appSummary.emailed || 0}</strong><span>Emailed</span></div>
-          <div class="audit-card"><strong>${appSummary.email_failed || 0}</strong><span>Email Failed</span></div>
-          <div class="audit-card"><strong>${appSummary.skipped || 0}</strong><span>Skipped</span></div>
-        </div>
+        <span class="metric"><strong>${appSummary.drafted || 0}</strong><span>drafts ready</span></span>
         ${resultLabel}
         <p class="muted">Outputs: ${payload.output_dir}</p>
         <p class="muted">${payload.portal_submission_note}</p>
@@ -672,12 +677,7 @@ def _page() -> str:
       const improvements = report.improvements.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
       const missing = report.missing_keywords.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
       const jobs = payload.jobs.slice(0, 12).map((job) => `<tr><td>${escapeHtml(job.portal)}</td><td>${escapeHtml(job.title)}</td><td>${escapeHtml(job.company)}</td><td><a href="${job.url}" target="_blank" rel="noreferrer">Open</a></td></tr>`).join('');
-      const applications = payload.applications.slice(0, 12).map((item) => `<tr><td>${escapeHtml(item.status)}</td><td>${escapeHtml(item.job.title)}</td><td>${escapeHtml(item.job.recruiter_email || 'Not available')}</td><td>${escapeHtml(item.detail)}</td></tr>`).join('');
-      const draftCards = payload.applications
-        .filter((item) => item.draft_message)
-        .slice(0, 8)
-        .map((item, index) => draftCard(item, index))
-        .join('');
+      const draftTemplate = buildDraftTemplate(payload.applications);
       details.innerHTML = `
         <section class="result-section">
           <h3>Resume Signals</h3>
@@ -691,32 +691,38 @@ def _page() -> str:
           <div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role</th><th>Company</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>
         </section>
         <section class="result-section">
-          <h3>Draft Messages</h3>
-          <div class="draft-grid">${draftCards || '<p class="muted">No draft messages were generated for this run.</p>'}</div>
-        </section>
-        <section class="result-section">
-          <h3>Application and Email Audit</h3>
-          <div class="table-wrap"><table><thead><tr><th>Status</th><th>Role</th><th>Recruiter Email</th><th>Detail</th></tr></thead><tbody>${applications}</tbody></table></div>
+          <h3>Reusable Draft Message</h3>
+          <div class="draft-grid">${draftTemplate ? draftCard(draftTemplate) : '<p class="muted">No draft message was generated for this run.</p>'}</div>
         </section>
       `;
     }
-    function draftCard(item, index) {
-      const email = item.job.recruiter_email || '';
-      const subject = `Application for ${item.job.title}`;
-      const mailto = email ? `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(item.draft_message)}` : '';
+    function buildDraftTemplate(applications) {
+      const firstDraft = applications.find((item) => item.draft_message);
+      if (!firstDraft) return '';
+      const company = firstDraft.job.company || '';
+      let message = firstDraft.draft_message
+        .split('\\n')
+        .filter((line) => !line.toLowerCase().startsWith('job link:'))
+        .join('\\n')
+        .trim();
+      if (company) {
+        message = message.split(company).join('[Company Name]');
+      }
+      return message;
+    }
+    function draftCard(message) {
       return `
         <article class="draft-card">
           <div class="draft-card-header">
             <div>
-              <strong>${escapeHtml(item.job.title)}</strong>
-              <span>${escapeHtml(item.job.company)} · ${escapeHtml(item.job.recruiter_email || 'Recruiter email not available')}</span>
+              <strong>Reusable recruiter message</strong>
+              <span>Replace [Company Name] before applying to a selected job.</span>
             </div>
             <div class="draft-actions">
-              <button class="copy-draft" type="button" data-draft-index="${index}">Copy</button>
-              ${email ? `<a class="draft-link" href="${mailto}">Email</a>` : ''}
+              <button class="copy-draft" type="button">Copy Template</button>
             </div>
           </div>
-          <textarea class="draft-message" readonly>${escapeHtml(item.draft_message)}</textarea>
+          <textarea class="draft-message" readonly>${escapeHtml(message)}</textarea>
         </article>
       `;
     }
