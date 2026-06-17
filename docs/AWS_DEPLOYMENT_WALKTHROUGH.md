@@ -16,9 +16,9 @@ EC2 instance managed by Elastic Beanstalk
     v
 FastAPI application on port 8000
     |
-    +-- RDS PostgreSQL for users, OTPs, runs, and application history
-    +-- Private S3 bucket for future resume/report object storage
-    +-- SMTP provider for email OTP delivery
+    +-- RDS PostgreSQL for users, OTPs, runs, schedules, and application history
+    +-- Private S3 bucket for uploaded resumes, reports, and drafts
+    +-- SES SMTP provider for real email OTP delivery
 ```
 
 ## Job Hunt AWS Resources
@@ -58,6 +58,7 @@ The app stores production records in PostgreSQL:
 - OTP requests.
 - Manual and scheduled run history.
 - Application action history.
+- Active daily schedule configuration, including the browser timezone.
 
 Local development falls back to SQLite under `data/`, but production should always use RDS PostgreSQL through `JOB_AGENT_DATABASE_URL`.
 
@@ -80,6 +81,7 @@ JOB_AGENT_SMTP_PORT='587'
 JOB_AGENT_SMTP_USERNAME='<smtp-user>'
 JOB_AGENT_SMTP_PASSWORD='<smtp-password>'
 JOB_AGENT_SMTP_FROM='<from-email>'
+JOB_AGENT_S3_BUCKET='job-hunt-agent-prod-uploads-453732174568-us-east-1'
 ```
 
 Then run:
@@ -96,6 +98,15 @@ For client-facing usage, add:
 
 - HTTPS certificate through ACM.
 - Custom domain through Route 53.
-- S3-backed resume/report storage.
-- Durable scheduled worker through EventBridge/SQS/ECS.
+- EventBridge/SQS/ECS worker execution if the app needs multiple EB instances or many concurrent client schedules.
 - Rate limiting and CSRF protection.
+
+## Daily Schedule Behavior On AWS
+
+The browser sends its IANA timezone, for example `Asia/Kolkata`, along with the selected `HH:MM` time. The server stores that timezone in PostgreSQL and computes the next run in that timezone. This prevents the old AWS issue where EC2 UTC time caused an India-time schedule to run several hours later than expected.
+
+The current EB web process restores the latest active schedule on startup. This is suitable for a single-instance production environment. For a larger public rollout, use EventBridge plus a worker so schedule execution is durable across scaling and deployments.
+
+## SES And HTTPS Inputs Still Needed
+
+SES/SMTP can be enabled once a sender address or domain is verified in SES. A custom HTTPS URL can be enabled once the target domain, DNS access, and ACM certificate are available. Until then, keep `JOB_AGENT_COOKIE_SECURE=false` for the plain Elastic Beanstalk HTTP URL.

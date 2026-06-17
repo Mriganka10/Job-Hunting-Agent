@@ -15,8 +15,8 @@ EC2 instance running FastAPI/Uvicorn
   |
   +-- Amazon RDS PostgreSQL - users, OTP, runs, application ledger
   +-- AWS Secrets Manager / EB environment variables - app secret, DB URL, SMTP credentials
-  +-- Amazon S3 - future resume/report object storage
-  +-- Amazon EventBridge + worker - future durable daily runs
+  +-- Amazon S3 - uploaded resumes, generated reports, and drafts
+  +-- Browser-timezone daily scheduler - persisted in PostgreSQL and restored on app startup
   +-- Amazon CloudWatch - EB/EC2 logs, metrics, alarms
 ```
 
@@ -29,6 +29,10 @@ EC2 instance running FastAPI/Uvicorn
   - OTP records
   - run history
   - application ledger/history
+  - active daily schedule configuration
+- Browser-timezone-aware daily scheduling so AWS UTC server time does not shift an India-time schedule.
+- Active schedule restore on application startup.
+- Private S3 mirroring for uploaded resumes, reports, drafts, and run artifacts.
 - Local SQLite fallback for development and tests.
 - `Procfile` for Elastic Beanstalk process startup.
 - `requirements.txt` for Elastic Beanstalk Python dependency install.
@@ -67,6 +71,8 @@ JOB_AGENT_SMTP_PORT=587
 JOB_AGENT_SMTP_USERNAME=agent@example.com
 JOB_AGENT_SMTP_PASSWORD=secret
 JOB_AGENT_SMTP_FROM=agent@example.com
+JOB_AGENT_S3_BUCKET=job-hunt-agent-prod-uploads-453732174568-us-east-1
+AWS_REGION=us-east-1
 HOST=0.0.0.0
 PORT=8000
 ```
@@ -88,6 +94,8 @@ The application fails startup when secure cookies are enabled and `JOB_AGENT_SEC
    - `JOB_AGENT_COOKIE_SECURE=true`
    - `JOB_AGENT_DEV_RETURN_OTP=false`
    - SMTP variables
+   - `JOB_AGENT_S3_BUCKET`
+   - `AWS_REGION`
 7. Deploy the application bundle.
 8. Open the Elastic Beanstalk URL and sign in with email OTP.
 
@@ -131,16 +139,50 @@ export JOB_AGENT_SMTP_PORT='587'
 export JOB_AGENT_SMTP_USERNAME='<smtp-user>'
 export JOB_AGENT_SMTP_PASSWORD='<smtp-password>'
 export JOB_AGENT_SMTP_FROM='<from-email>'
+export JOB_AGENT_S3_BUCKET='job-hunt-agent-prod-uploads-453732174568-us-east-1'
 
 scripts/aws/deploy_job_hunt_prod.sh
 ```
 
-The script checks that the current AWS CLI identity is account `453732174568`, creates the Job Hunt S3 bucket, creates the Job Hunt RDS PostgreSQL database if missing, builds `JOB_AGENT_DATABASE_URL` from the RDS endpoint, creates/updates the Elastic Beanstalk environment, deploys the current branch, and prints EB status.
+The script checks that the current AWS CLI identity is account `453732174568`, creates or verifies the Job Hunt S3 bucket, attaches S3 object permissions to the EB EC2 role, creates the Job Hunt RDS PostgreSQL database if missing, builds `JOB_AGENT_DATABASE_URL` from the RDS endpoint, creates/updates the Elastic Beanstalk environment, deploys the current branch, and prints EB status.
+
+## SES/SMTP OTP Delivery
+
+The app sends OTP emails through SMTP environment variables. For Amazon SES in `us-east-1`, use:
+
+```bash
+JOB_AGENT_SMTP_HOST=email-smtp.us-east-1.amazonaws.com
+JOB_AGENT_SMTP_PORT=587
+JOB_AGENT_SMTP_USERNAME=<ses-smtp-username>
+JOB_AGENT_SMTP_PASSWORD=<ses-smtp-password>
+JOB_AGENT_SMTP_FROM=<verified-sender-email-or-domain>
+JOB_AGENT_DEV_RETURN_OTP=false
+```
+
+Before switching production to this mode, verify the sender email or domain in SES. If the SES account is still in sandbox mode, verify recipient addresses too or request production access.
+
+## HTTPS And Custom Domain
+
+The app is ready for secure cookies through:
+
+```bash
+JOB_AGENT_COOKIE_SECURE=true
+JOB_AGENT_PUBLIC_BASE_URL=https://<your-domain>
+```
+
+Attaching the actual HTTPS custom domain requires information outside the repository:
+
+- the final domain name, for example `jobs.example.com`
+- Route 53 hosted zone access or DNS provider access
+- an ACM certificate in `us-east-1` covering that domain
+- a load-balanced EB environment or a CloudFront distribution in front of the current EB URL
+
+Do not set `JOB_AGENT_COOKIE_SECURE=true` on the plain `http://*.elasticbeanstalk.com` URL because browsers will not store secure cookies over HTTP.
 
 ## AWS Runtime Notes
 
-- Elastic Beanstalk EC2 local disk is not durable across rebuilds, deployments, or scaling. The current app still writes uploaded resumes and generated draft/report files under `data/`; move those artifacts to S3 before relying on file retention.
-- The current in-process scheduler is acceptable for controlled demos. For production daily automation, move schedules to EventBridge and execute runs through an SQS/ECS worker or another managed worker process.
+- Elastic Beanstalk EC2 local disk is not durable across rebuilds, deployments, or scaling. The app now mirrors uploaded resumes and generated artifacts to S3 when `JOB_AGENT_S3_BUCKET` is set. It still keeps a local working copy because the resume parsers and generators operate on files.
+- The current in-process scheduler now stores active schedule state in PostgreSQL and restores it after app startup. For multi-instance or high-volume client production, move execution to EventBridge and an SQS/ECS worker so each schedule is triggered once across the fleet.
 - Use HTTPS for client URLs. Configure an Application Load Balancer listener certificate through ACM for production domains.
 - Use CloudWatch logs for EB/EC2 application troubleshooting.
 - Keep the RDS database private inside the VPC.
@@ -149,9 +191,8 @@ The script checks that the current AWS CLI identity is account `453732174568`, c
 
 This branch makes the app production-oriented for authentication and database-backed history, but a public client rollout should still add:
 
-- S3 object storage for uploaded resumes and generated reports.
-- Durable scheduled jobs through EventBridge/SQS/ECS instead of the in-process scheduler.
-- Per-user schedule persistence and worker execution.
+- Load-balanced HTTPS custom domain after a domain and ACM certificate are selected.
+- EventBridge/SQS/ECS worker execution for multi-user or multi-instance scheduling.
 - Admin controls for disabling users and reviewing run activity.
 - Rate limiting for OTP requests.
 - CSRF protection for state-changing form actions.
