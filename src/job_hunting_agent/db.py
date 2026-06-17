@@ -420,7 +420,9 @@ def _sql(sql: str) -> str:
 
 def _params(params: tuple[Any, ...]) -> tuple[Any, ...]:
     if IS_POSTGRES:
-        return tuple(json.loads(value) if _looks_like_json(value) else value for value in params)
+        from psycopg.types.json import Jsonb
+
+        return tuple(Jsonb(json.loads(value)) if _looks_like_json(value) else value for value in params)
     return tuple(int(value) if isinstance(value, bool) else value for value in params)
 
 
