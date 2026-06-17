@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import BackgroundTasks, Cookie, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -22,8 +23,20 @@ from fastapi.staticfiles import StaticFiles
 
 from .agent import JobHuntingAgent
 from .config import AppConfig, ApplicationConfig, EmailConfig, SearchConfig
-from .db import consume_valid_otp, init_db, latest_runs, normalize_email, record_run, save_otp
+from .db import (
+    active_schedules,
+    consume_valid_otp,
+    disable_schedule,
+    init_db,
+    latest_runs,
+    normalize_email,
+    record_run,
+    save_otp,
+    save_schedule,
+    update_schedule_status,
+)
 from .models import CandidateProfile
+from .storage import StoredObject, download_file, mirror_artifacts, upload_file
 
 app = FastAPI(title="Job Hunting Agent")
 
@@ -54,25 +67,49 @@ class DailyScheduler:
         self.created_at: str | None = None
         self.next_run_at: str | None = None
         self.daily_at: str | None = None
+        self.timezone_name: str = "UTC"
         self.resume_path: str | None = None
+        self.resume_uri: str = ""
         self.config: AppConfig | None = None
         self.user_email: str | None = None
         self.history: list[dict] = []
 
-    def start(self, resume_path: str, config: AppConfig, daily_at: str, user_email: str) -> None:
+    def start(
+        self,
+        resume_path: str,
+        config: AppConfig,
+        daily_at: str,
+        user_email: str,
+        timezone_name: str = "UTC",
+        resume_uri: str = "",
+        persist: bool = True,
+    ) -> None:
         hour, minute = _parse_hhmm(daily_at)
+        zone = _timezone(timezone_name)
         with self._lock:
             self.stop()
             self._stop_event = threading.Event()
             self.resume_path = resume_path
+            self.resume_uri = resume_uri
             self.config = config
             self.user_email = normalize_email(user_email)
             self.daily_at = daily_at
+            self.timezone_name = zone.key
             self.created_at = datetime.now().isoformat(timespec="seconds")
             self.last_result = None
             self.last_run_at = None
             self.last_error = None
-            self.next_run_at = _next_run_time(hour, minute).isoformat(timespec="minutes")
+            self.next_run_at = _next_run_time(hour, minute, zone).isoformat(timespec="minutes")
+            if persist:
+                save_schedule(
+                    self.user_email,
+                    daily_at=daily_at,
+                    timezone_name=self.timezone_name,
+                    resume_path=resume_path,
+                    resume_uri=resume_uri,
+                    config_payload=_config_payload(config),
+                    next_run_at=self.next_run_at,
+                )
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
 
@@ -91,6 +128,7 @@ class DailyScheduler:
         return {
             "running": self.is_running,
             "daily_at": self.daily_at,
+            "timezone": self.timezone_name,
             "next_run_at": self.next_run_at,
             "created_at": self.created_at,
             "last_run_at": self.last_run_at,
@@ -106,18 +144,27 @@ class DailyScheduler:
         assert self.daily_at is not None
         assert self.user_email is not None
         hour, minute = _parse_hhmm(self.daily_at)
+        zone = _timezone(self.timezone_name)
         while not self._stop_event.is_set():
-            next_run = _next_run_time(hour, minute)
+            next_run = _next_run_time(hour, minute, zone)
             self.next_run_at = next_run.isoformat(timespec="minutes")
-            wait_seconds = max(1, (next_run - datetime.now()).total_seconds())
+            update_schedule_status(self.user_email, next_run_at=self.next_run_at)
+            wait_seconds = max(1, (next_run - datetime.now(zone)).total_seconds())
             if self._stop_event.wait(wait_seconds):
                 return
             started_at = datetime.now().isoformat(timespec="seconds")
             try:
-                self.last_result = run_agent(self.resume_path, self.config, trigger="scheduled", user_email=self.user_email)
+                resume_path = self._resolved_resume_path()
+                self.last_result = run_agent(resume_path, self.config, trigger="scheduled", user_email=self.user_email)
                 self.last_run_at = self.last_result["generated_at"]
                 self.last_error = None
                 self.history.append(_history_item("scheduled", started_at, self.last_result))
+                update_schedule_status(
+                    self.user_email,
+                    last_run_at=self.last_run_at,
+                    last_error="",
+                    last_result=self.last_result,
+                )
             except Exception as exc:
                 self.last_error = str(exc)
                 self.history.append(
@@ -129,9 +176,38 @@ class DailyScheduler:
                         "error": str(exc),
                     }
                 )
+                update_schedule_status(self.user_email, last_error=str(exc))
+
+    def _resolved_resume_path(self) -> str:
+        assert self.resume_path is not None
+        path = Path(self.resume_path)
+        if path.exists():
+            return str(path)
+        if self.resume_uri:
+            restored = download_file(self.resume_uri, UPLOAD_DIR)
+            self.resume_path = str(restored)
+            return str(restored)
+        return str(path)
 
 
 scheduler = DailyScheduler()
+
+
+@app.on_event("startup")
+def restore_active_schedule() -> None:
+    for saved in active_schedules(limit=1):
+        try:
+            scheduler.start(
+                saved["resume_path"],
+                _config_from_payload(saved["config_payload"]),
+                saved["daily_at"],
+                saved["user_email"],
+                timezone_name=saved.get("timezone") or "UTC",
+                resume_uri=saved.get("resume_uri") or "",
+                persist=False,
+            )
+        except Exception as exc:
+            update_schedule_status(saved["user_email"], last_error=f"Schedule restore failed: {exc}")
 
 
 def current_user_email(session_cookie: str | None) -> str | None:
@@ -280,11 +356,12 @@ async def run_now(
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
+    daily_timezone: Annotated[str, Form()] = "UTC",
     start_daily: Annotated[bool, Form()] = False,
 ) -> dict:
     user_email = require_user(job_agent_session)
     started_at = datetime.now().isoformat(timespec="seconds")
-    resume_path = await save_resume_upload(resume)
+    stored_resume = await save_resume_upload(resume, user_email)
     config = build_config_from_form(
         name=name,
         email=email,
@@ -297,13 +374,23 @@ async def run_now(
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
     )
-    result = run_agent(str(resume_path), config, trigger="manual", user_email=user_email)
+    result = run_agent(str(stored_resume.local_path), config, trigger="manual", user_email=user_email)
+    if stored_resume.uri:
+        result["resume_uri"] = stored_resume.uri
     scheduler.history.append(_history_item("manual", started_at, result))
     if start_daily:
         if not daily_at:
             raise HTTPException(status_code=400, detail="Daily time is required when scheduling is enabled.")
-        background_tasks.add_task(scheduler.start, str(resume_path), config, daily_at, user_email)
-        result["scheduler"] = {"running": True, "daily_at": daily_at}
+        background_tasks.add_task(
+            scheduler.start,
+            str(stored_resume.local_path),
+            config,
+            daily_at,
+            user_email,
+            daily_timezone,
+            stored_resume.uri,
+        )
+        result["scheduler"] = {"running": True, "daily_at": daily_at, "timezone": daily_timezone}
     return result
 
 
@@ -322,11 +409,12 @@ async def start_scheduler(
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
+    daily_timezone: Annotated[str, Form()] = "UTC",
 ) -> dict:
     user_email = require_user(job_agent_session)
     if not daily_at:
         raise HTTPException(status_code=400, detail="Daily time is required to schedule the agent.")
-    resume_path = await save_resume_upload(resume)
+    stored_resume = await save_resume_upload(resume, user_email)
     config = build_config_from_form(
         name=name,
         email=email,
@@ -339,13 +427,21 @@ async def start_scheduler(
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
     )
-    scheduler.start(str(resume_path), config, daily_at, user_email)
+    scheduler.start(
+        str(stored_resume.local_path),
+        config,
+        daily_at,
+        user_email,
+        timezone_name=daily_timezone,
+        resume_uri=stored_resume.uri,
+    )
     return {"status": "scheduled", "scheduler": scheduler.snapshot()}
 
 
 @app.post("/api/scheduler/stop")
 def stop_scheduler(job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> dict:
-    require_user(job_agent_session)
+    user_email = require_user(job_agent_session)
+    disable_schedule(user_email)
     scheduler.stop()
     return scheduler.snapshot()
 
@@ -366,6 +462,9 @@ def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user
             "Authenticated LinkedIn/Naukri submission remains adapter-gated because those portals can require login, CAPTCHA, OTP, and screening answers."
         ),
     }
+    artifact_uris = mirror_artifacts(config.application.data_dir, user_email or config.profile.email or "anonymous", result["generated_at"])
+    if artifact_uris:
+        result["artifact_uris"] = artifact_uris
     if user_email:
         result["run_id"] = record_run(user_email, result)
     return result
@@ -416,7 +515,7 @@ def _history_item(trigger: str, started_at: str, result: dict) -> dict:
     }
 
 
-async def save_resume_upload(resume: UploadFile) -> Path:
+async def save_resume_upload(resume: UploadFile, user_email: str = "anonymous") -> StoredObject:
     suffix = Path(resume.filename or "").suffix.lower()
     if suffix not in {".pdf", ".docx", ".txt", ".md"}:
         raise HTTPException(status_code=400, detail="Upload a PDF, DOCX, TXT, or MD resume.")
@@ -424,7 +523,8 @@ async def save_resume_upload(resume: UploadFile) -> Path:
     target = UPLOAD_DIR / f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{Path(resume.filename or 'resume').name}"
     with target.open("wb") as handle:
         shutil.copyfileobj(resume.file, handle)
-    return target
+    uri = upload_file(target, f"uploads/{normalize_email(user_email)}/{target.stem}")
+    return StoredObject(local_path=target, uri=uri)
 
 
 def build_config_from_form(
@@ -455,7 +555,13 @@ def build_config_from_form(
         ),
         search=SearchConfig(max_jobs_per_portal=max(1, min(max_jobs_per_portal, 50))),
         application=ApplicationConfig(mode=application_mode, data_dir=str(DATA_DIR)),
-        email=EmailConfig(from_email=email.strip()),
+        email=EmailConfig(
+            smtp_host=os.getenv("JOB_AGENT_SMTP_HOST", ""),
+            smtp_port=int(os.getenv("JOB_AGENT_SMTP_PORT", "587")),
+            username=os.getenv("JOB_AGENT_SMTP_USERNAME", ""),
+            password=os.getenv("JOB_AGENT_SMTP_PASSWORD", ""),
+            from_email=os.getenv("JOB_AGENT_SMTP_FROM", email.strip()),
+        ),
     )
 
 
@@ -475,12 +581,70 @@ def _parse_hhmm(value: str) -> tuple[int, int]:
     return hour, minute
 
 
-def _next_run_time(hour: int, minute: int) -> datetime:
-    now = datetime.now()
+def _next_run_time(hour: int, minute: int, zone: ZoneInfo | None = None) -> datetime:
+    zone = zone or _timezone("UTC")
+    now = datetime.now(zone)
     next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if next_run <= now:
         next_run += timedelta(days=1)
     return next_run
+
+
+def _timezone(timezone_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(timezone_name or "UTC")
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
+def _config_payload(config: AppConfig) -> dict:
+    return {
+        "profile": asdict(config.profile),
+        "search": asdict(config.search),
+        "application": asdict(config.application),
+        "email": {
+            "smtp_host": config.email.smtp_host,
+            "smtp_port": config.email.smtp_port,
+            "username": config.email.username,
+            "from_email": config.email.from_email,
+        },
+    }
+
+
+def _config_from_payload(payload: dict) -> AppConfig:
+    profile = payload.get("profile", {})
+    search = payload.get("search", {})
+    application = payload.get("application", {})
+    return AppConfig(
+        profile=CandidateProfile(
+            name=profile.get("name", ""),
+            email=profile.get("email", ""),
+            phone=profile.get("phone", ""),
+            linkedin_profile_url=profile.get("linkedin_profile_url", ""),
+            naukri_profile_url=profile.get("naukri_profile_url", ""),
+            target_roles=tuple(profile.get("target_roles", ())),
+            locations=tuple(profile.get("locations", ())),
+            skills=tuple(profile.get("skills", ())),
+        ),
+        search=SearchConfig(
+            max_jobs_per_portal=int(search.get("max_jobs_per_portal", 10)),
+            freshness_days=int(search.get("freshness_days", 1)),
+            include_remote=bool(search.get("include_remote", True)),
+            portals=tuple(search.get("portals", ("linkedin", "naukri"))),
+        ),
+        application=ApplicationConfig(
+            mode=application.get("mode", "draft"),
+            cover_letter_tone=application.get("cover_letter_tone", "concise"),
+            data_dir=application.get("data_dir", str(DATA_DIR)),
+        ),
+        email=EmailConfig(
+            smtp_host=os.getenv("JOB_AGENT_SMTP_HOST", ""),
+            smtp_port=int(os.getenv("JOB_AGENT_SMTP_PORT", "587")),
+            username=os.getenv("JOB_AGENT_SMTP_USERNAME", ""),
+            password=os.getenv("JOB_AGENT_SMTP_PASSWORD", ""),
+            from_email=os.getenv("JOB_AGENT_SMTP_FROM", profile.get("email", "")),
+        ),
+    )
 
 
 def _escape_html(value: str) -> str:
@@ -791,8 +955,9 @@ def _page(user_email: str) -> str:
         <legend><span class="section-badge">4</span>Daily Automation</legend>
         <div class="row">
           <div><label for="daily_at">Daily Time</label><input id="daily_at" name="daily_at" type="time" value="09:30"></div>
-          <div class="schedule-help">Use Schedule Daily Run to upload this resume and start the timer. The scheduler runs only while this server is active.</div>
+          <div class="schedule-help">Use Schedule Daily Run to upload this resume and start the timer. The app uses your browser timezone and restores active schedules after server restarts.</div>
         </div>
+        <input id="daily_timezone" name="daily_timezone" type="hidden" value="UTC">
       </fieldset>
       <div class="actions">
         <button type="submit">Run Agent</button>
@@ -831,13 +996,20 @@ def _page(user_email: str) -> str:
     const details = document.getElementById('details');
     const schedulerStatus = document.getElementById('scheduler-status');
     const statusPill = document.querySelector('.status-pill');
+    const timezoneInput = document.getElementById('daily_timezone');
     let activeResult = { generatedAt: '', source: '' };
+    function enrichFormData() {
+      timezoneInput.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      const data = new FormData(form);
+      data.set('daily_timezone', timezoneInput.value);
+      return data;
+    }
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       summary.textContent = 'Running ATS scoring, portal search, and application drafting...';
       summary.className = 'muted';
       details.innerHTML = '';
-      const data = new FormData(form);
+      const data = enrichFormData();
       const response = await fetch('/api/run', { method: 'POST', body: data });
       const payload = await response.json();
       if (!response.ok) {
@@ -851,7 +1023,7 @@ def _page(user_email: str) -> str:
       summary.className = 'muted';
       summary.textContent = 'Uploading resume and scheduling the daily agent run...';
       details.innerHTML = '';
-      const data = new FormData(form);
+      const data = enrichFormData();
       const response = await fetch('/api/scheduler/start', { method: 'POST', body: data });
       const payload = await response.json();
       if (!response.ok) {
@@ -890,6 +1062,7 @@ def _page(user_email: str) -> str:
       schedulerStatus.innerHTML = `
         <div class="scheduler-card"><strong>Scheduler</strong><span>${running ? 'Running' : 'Not running'}</span></div>
         <div class="scheduler-card"><strong>Daily time</strong><span>${escapeHtml(scheduler?.daily_at || 'Not set')}</span></div>
+        <div class="scheduler-card"><strong>Timezone</strong><span>${escapeHtml(scheduler?.timezone || timezoneInput.value || 'UTC')}</span></div>
         <div class="scheduler-card"><strong>Next run</strong><span>${escapeHtml(scheduler?.next_run_at || 'Not scheduled')}</span></div>
         <div class="scheduler-card"><strong>Last run</strong><span>${escapeHtml(scheduler?.last_run_at || 'No run yet')}</span></div>
       `;

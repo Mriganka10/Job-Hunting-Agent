@@ -97,10 +97,12 @@ The web UI now includes email OTP sign-in and a signed HTTP-only session cookie.
 - Set `JOB_AGENT_DEV_RETURN_OTP=false`.
 - Configure SMTP for OTP delivery.
 - Use PostgreSQL through `JOB_AGENT_DATABASE_URL`.
+- Set `JOB_AGENT_S3_BUCKET` so uploaded resumes and generated artifacts are mirrored to private S3.
+- Use browser-timezone-aware scheduling and monitor schedule records in PostgreSQL.
 - Add CSRF protection.
 - Restrict upload size.
 - Validate file content, not only extension.
-- Move the daily scheduler into a managed worker.
+- Move schedule execution into EventBridge/SQS/ECS before running multiple EB instances or many client schedules.
 - Store secrets in a secret manager.
 - Protect `data/uploads`, `data/drafts`, and `data/reports`.
 

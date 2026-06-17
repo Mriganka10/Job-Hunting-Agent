@@ -3,7 +3,16 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from job_hunting_agent.models import ApplicationResult, JobLead
-from job_hunting_agent.web import APP_SECRET, COOKIE_SECURE, _application_payload, app, build_config_from_form, scheduler
+from job_hunting_agent.web import (
+    APP_SECRET,
+    COOKIE_SECURE,
+    _application_payload,
+    _next_run_time,
+    _timezone,
+    app,
+    build_config_from_form,
+    scheduler,
+)
 
 
 def authenticated_client(email: str = "client@example.com") -> TestClient:
@@ -69,6 +78,8 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "Reusable Draft Message" in response.text
     assert "[Company Name]" in response.text
     assert "copy-draft" in response.text
+    assert 'name="daily_timezone"' in response.text
+    assert "Intl.DateTimeFormat().resolvedOptions().timeZone" in response.text
     assert "Application and Email Audit" not in response.text
 
 
@@ -130,6 +141,40 @@ def test_build_config_from_form_keeps_portal_profiles() -> None:
     assert config.search.max_jobs_per_portal == 5
 
 
+def test_build_config_from_form_uses_smtp_environment(monkeypatch) -> None:
+    monkeypatch.setenv("JOB_AGENT_SMTP_HOST", "email-smtp.us-east-1.amazonaws.com")
+    monkeypatch.setenv("JOB_AGENT_SMTP_PORT", "587")
+    monkeypatch.setenv("JOB_AGENT_SMTP_USERNAME", "smtp-user")
+    monkeypatch.setenv("JOB_AGENT_SMTP_PASSWORD", "smtp-password")
+    monkeypatch.setenv("JOB_AGENT_SMTP_FROM", "agent@example.com")
+
+    config = build_config_from_form(
+        name="Mriganka Das",
+        email="mriganka@example.com",
+        phone="+91-0000000000",
+        linkedin_profile_url="",
+        naukri_profile_url="",
+        target_roles="Data Engineer",
+        locations="Remote",
+        skills="Python, SQL",
+        application_mode="email",
+        max_jobs_per_portal=5,
+    )
+
+    assert config.email.smtp_host == "email-smtp.us-east-1.amazonaws.com"
+    assert config.email.username == "smtp-user"
+    assert config.email.password == "smtp-password"
+    assert config.email.from_email == "agent@example.com"
+
+
+def test_next_run_time_uses_named_timezone() -> None:
+    next_run = _next_run_time(8, 20, _timezone("Asia/Kolkata"))
+
+    assert next_run.tzinfo is not None
+    assert next_run.hour == 8
+    assert next_run.minute == 20
+
+
 def test_run_endpoint_rejects_unsupported_resume_format(tmp_path: Path) -> None:
     client = authenticated_client("runner@example.com")
 
@@ -151,6 +196,7 @@ def test_scheduler_start_endpoint_starts_without_immediate_run() -> None:
         "/api/scheduler/start",
         data={
             "daily_at": "23:59",
+            "daily_timezone": "Asia/Kolkata",
             "application_mode": "draft",
             "target_roles": "Python Developer",
             "locations": "Remote",
@@ -164,6 +210,7 @@ def test_scheduler_start_endpoint_starts_without_immediate_run() -> None:
     assert payload["status"] == "scheduled"
     assert payload["scheduler"]["running"] is True
     assert payload["scheduler"]["daily_at"] == "23:59"
+    assert payload["scheduler"]["timezone"] == "Asia/Kolkata"
     assert payload["scheduler"]["last_run_at"] is None
     assert payload["scheduler"]["next_run_at"]
 
