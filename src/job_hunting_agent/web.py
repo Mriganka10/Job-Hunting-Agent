@@ -1022,7 +1022,7 @@ def _page(user_email: str) -> str:
         return;
       }
       render(payload, 'manual');
-      refreshScheduler();
+      refreshDashboard();
     });
     document.getElementById('schedule-run').addEventListener('click', async () => {
       summary.className = 'muted';
@@ -1037,6 +1037,7 @@ def _page(user_email: str) -> str:
       }
       renderScheduler(payload.scheduler);
       summary.innerHTML = `<p class="muted">Daily run scheduled. The agent will run at the configured time while this server process is active.</p>`;
+      refreshDashboard();
     });
     document.getElementById('stop-scheduler').addEventListener('click', async () => {
       const response = await fetch('/api/scheduler/stop', { method: 'POST' });
@@ -1045,20 +1046,32 @@ def _page(user_email: str) -> str:
       summary.textContent = payload.running ? 'Scheduler is still running.' : 'Daily run stopped.';
       renderScheduler(payload);
     });
-    async function refreshScheduler() {
+    async function refreshDashboard() {
+      let latestResult = null;
       const response = await fetch('/health');
-      if (!response.ok) return;
-      const payload = await response.json();
-      renderScheduler(payload.scheduler);
-      const scheduledResult = payload.scheduler?.last_result;
-      if (shouldRenderScheduledResult(scheduledResult)) {
-        render(scheduledResult, 'scheduled');
+      if (response.ok) {
+        const payload = await response.json();
+        renderScheduler(payload.scheduler);
+        latestResult = newerResult(latestResult, payload.scheduler?.last_result);
+      }
+      const runsResponse = await fetch('/api/runs');
+      if (runsResponse.ok) {
+        const payload = await runsResponse.json();
+        const latestStoredRun = payload.runs?.[0]?.payload;
+        latestResult = newerResult(latestResult, latestStoredRun);
+      }
+      if (shouldRenderResult(latestResult)) {
+        render(latestResult, latestResult.trigger || 'manual');
       }
     }
-    function shouldRenderScheduledResult(scheduledResult) {
-      if (!scheduledResult?.generated_at || scheduledResult.generated_at === activeResult.generatedAt) return false;
-      if (!activeResult.generatedAt || activeResult.source === 'scheduled') return true;
-      return scheduledResult.generated_at > activeResult.generatedAt;
+    function newerResult(current, candidate) {
+      if (!candidate?.generated_at) return current;
+      if (!current?.generated_at) return candidate;
+      return candidate.generated_at > current.generated_at ? candidate : current;
+    }
+    function shouldRenderResult(result) {
+      if (!result?.generated_at || result.generated_at === activeResult.generatedAt) return false;
+      return !activeResult.generatedAt || result.generated_at > activeResult.generatedAt;
     }
     function renderScheduler(scheduler) {
       const running = scheduler && scheduler.running;
@@ -1161,8 +1174,8 @@ def _page(user_email: str) -> str:
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
     }
-    refreshScheduler();
-    setInterval(refreshScheduler, 15000);
+    refreshDashboard();
+    setInterval(refreshDashboard, 15000);
   </script>
 </body>
 </html>""".replace("__USER_EMAIL__", _escape_html(user_email))
