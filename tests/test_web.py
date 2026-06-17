@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+import job_hunting_agent.web as web
 from job_hunting_agent.models import ApplicationResult, JobLead
 from job_hunting_agent.web import (
     APP_SECRET,
@@ -11,6 +12,7 @@ from job_hunting_agent.web import (
     _timezone,
     app,
     build_config_from_form,
+    restore_active_schedule,
     scheduler,
 )
 
@@ -214,5 +216,51 @@ def test_scheduler_start_endpoint_starts_without_immediate_run() -> None:
     assert payload["scheduler"]["timezone"] == "Asia/Kolkata"
     assert payload["scheduler"]["last_run_at"] is None
     assert payload["scheduler"]["next_run_at"]
+
+    scheduler.stop()
+
+
+def test_restore_active_schedule_keeps_last_result(monkeypatch) -> None:
+    scheduler.stop()
+    last_result = {
+        "ats_report": {"score": 77, "strengths": [], "improvements": [], "missing_keywords": []},
+        "jobs": [{"portal": "linkedin", "title": "Data Engineer", "company": "Example", "location": "Remote", "url": "https://example.com"}],
+        "applications": [],
+        "application_summary": {"drafted": 0, "emailed": 0, "email_failed": 0, "skipped": 0},
+        "output_dir": "data",
+        "generated_at": "2026-06-17T03:02:02",
+        "trigger": "scheduled",
+        "portal_submission_note": "",
+    }
+    monkeypatch.setattr(
+        web,
+        "active_schedules",
+        lambda limit=1: [
+            {
+                "resume_path": "data/uploads/resume.txt",
+                "resume_uri": "",
+                "daily_at": "23:59",
+                "timezone": "Asia/Kolkata",
+                "user_email": "restore@example.com",
+                "last_run_at": "2026-06-17T03:02:02",
+                "last_error": "",
+                "last_result": last_result,
+                "config_payload": {
+                    "profile": {"email": "restore@example.com"},
+                    "search": {},
+                    "application": {"mode": "draft", "data_dir": "data"},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(web, "update_schedule_status", lambda *args, **kwargs: None)
+
+    restore_active_schedule()
+
+    snapshot = scheduler.snapshot()
+    assert snapshot["running"] is True
+    assert snapshot["last_run_at"] == "2026-06-17T03:02:02"
+    assert snapshot["last_result"]["ats_report"]["score"] == 77
+    assert snapshot["history"][-1]["status"] == "completed"
 
     scheduler.stop()

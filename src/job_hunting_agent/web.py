@@ -206,6 +206,11 @@ def restore_active_schedule() -> None:
                 resume_uri=saved.get("resume_uri") or "",
                 persist=False,
             )
+            scheduler.last_run_at = saved.get("last_run_at")
+            scheduler.last_error = saved.get("last_error")
+            scheduler.last_result = saved.get("last_result")
+            if scheduler.last_result:
+                scheduler.history.append(_history_item("scheduled", scheduler.last_run_at or "", scheduler.last_result))
         except Exception as exc:
             update_schedule_status(saved["user_email"], last_error=f"Schedule restore failed: {exc}")
 
