@@ -75,6 +75,7 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "payload.scheduler?.last_result" in response.text
     assert "Showing latest scheduled run" in response.text
     assert "shouldRenderScheduledResult" in response.text
+    assert "scheduledResult.generated_at > activeResult.generatedAt" in response.text
     assert "Reusable Draft Message" in response.text
     assert "[Company Name]" in response.text
     assert "copy-draft" in response.text

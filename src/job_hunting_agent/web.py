@@ -1052,7 +1052,8 @@ def _page(user_email: str) -> str:
     }
     function shouldRenderScheduledResult(scheduledResult) {
       if (!scheduledResult?.generated_at || scheduledResult.generated_at === activeResult.generatedAt) return false;
-      return !activeResult.source || activeResult.source === 'scheduled';
+      if (!activeResult.generatedAt || activeResult.source === 'scheduled') return true;
+      return scheduledResult.generated_at > activeResult.generatedAt;
     }
     function renderScheduler(scheduler) {
       const running = scheduler && scheduler.running;
