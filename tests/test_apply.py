@@ -55,3 +55,24 @@ def test_email_failure_is_recorded_and_draft_is_saved(tmp_path: Path) -> None:
     assert results[0].status == "email_failed"
     assert "Email failed:" in results[0].detail
     assert "Draft saved" in results[0].detail
+
+
+def test_already_seen_job_still_produces_reusable_draft(tmp_path: Path) -> None:
+    config = AppConfig(
+        profile=CandidateProfile(name="Candidate", email="candidate@example.com"),
+        search=SearchConfig(),
+        application=ApplicationConfig(mode="draft", data_dir=str(tmp_path)),
+        email=EmailConfig(),
+    )
+    resume = Resume("resume.txt", "Python SQL", ("Python", "SQL"), ("Data Engineer",))
+    report = AtsReport(80, (), (), ())
+    job = JobLead("linkedin", "Data Engineer", "Example Corp", "Remote", "https://example.com/job")
+
+    first = apply_to_jobs([job], resume, report, config)
+    second = apply_to_jobs([job], resume, report, config)
+
+    assert first[0].status == "drafted"
+    assert second[0].status == "skipped"
+    assert "Draft saved to " in second[0].detail
+    draft_path = Path(second[0].detail.rsplit("Draft saved to ", 1)[1])
+    assert draft_path.read_text(encoding="utf-8").startswith("Hello,")

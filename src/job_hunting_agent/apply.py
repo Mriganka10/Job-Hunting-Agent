@@ -56,7 +56,14 @@ def apply_to_jobs(
     results: list[ApplicationResult] = []
     for job in jobs:
         if ledger.already_applied(job):
-            results.append(ApplicationResult(job, "skipped", "Already present in ledger."))
+            draft_detail = write_application_draft(job, resume, ats_report, config)
+            results.append(
+                ApplicationResult(
+                    job,
+                    "skipped",
+                    f"Already present in ledger. Draft saved to {draft_detail}",
+                )
+            )
             continue
 
         if config.application.mode == "email" and job.recruiter_email:

@@ -86,7 +86,7 @@ Track:
 - Portal submissions attempted.
 - Human approvals.
 
-The current web implementation stores user, run, and application records in the configured database. Use PostgreSQL for production deployments.
+The current web implementation stores user profiles, resume references, schedules, runs, and application records in the configured database. Every user-facing query is scoped by the normalized email from the signed session. Use PostgreSQL for production deployments.
 
 ## Web UI Security Notes
 
@@ -98,6 +98,9 @@ The web UI now includes email OTP sign-in and a signed HTTP-only session cookie.
 - Configure SMTP for OTP delivery.
 - Use PostgreSQL through `JOB_AGENT_DATABASE_URL`.
 - Set `JOB_AGENT_S3_BUCKET` so uploaded resumes and generated artifacts are mirrored to private S3.
+- Keep S3 objects and local working directories separated by authenticated user identity.
+- Do not return scheduler state, profile data, or run payloads from unauthenticated health endpoints.
+- Keep dashboard history limited to the signed-in user's latest run unless an explicit audited history view is added.
 - Use browser-timezone-aware scheduling and monitor schedule records in PostgreSQL.
 - Add CSRF protection.
 - Restrict upload size.

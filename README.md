@@ -39,19 +39,19 @@ Then open:
 http://127.0.0.1:8000
 ```
 
-In the web UI, `Run Agent` runs immediately. `Schedule Daily Run` uploads the selected resume and starts the timer without running immediately. The scheduler stores the browser timezone with the selected time, persists the active schedule in the database, and restores the schedule when the app starts. If a page is refreshed, the latest scheduled result can hydrate the dashboard; a new manual run stays active on the screen and is not overwritten by an older scheduled result.
+In the web UI, `Run Agent` runs immediately. `Schedule Daily Run` uploads the selected resume and starts the timer without running immediately. Profiles, resume references, schedules, and results are isolated by the authenticated email address. Returning users receive only their own saved form values, resume reference, schedule, and latest run. New users start with blank profile and search fields.
 
 The web UI requires email OTP sign-in. In local development, if SMTP is not configured, the OTP is printed in the server logs and returned to the browser for testing. In production, set `JOB_AGENT_DEV_RETURN_OTP=false` and configure SMTP environment variables.
 
-Confirm scheduler state:
+The public health check exposes service health only:
 
 ```bash
 curl http://127.0.0.1:8000/health
 ```
 
-Check `scheduler.running`, `scheduler.next_run_at`, `scheduler.last_run_at`, and `scheduler.history`.
+Authenticated UI polling uses `GET /api/dashboard`, which returns only the signed-in user's saved profile, scheduler state, and latest run.
 
-When `JOB_AGENT_S3_BUCKET` is set, uploaded resumes and generated artifacts are mirrored to private S3 while the app keeps a local working copy for parsing and draft generation.
+When `JOB_AGENT_S3_BUCKET` is set, uploaded resumes and generated artifacts are mirrored under user-specific private S3 prefixes. Local parsing, ledger, report, and draft files also use a user-specific working directory.
 
 For daily execution:
 
