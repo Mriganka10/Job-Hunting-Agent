@@ -53,8 +53,10 @@ Responsibilities:
 - Collect LinkedIn and Naukri profile URLs.
 - Collect target roles, locations, skills, and application mode.
 - Run the agent immediately.
-- Start or stop an in-process daily scheduler while the web server is active.
-- Expose `GET /health`, `POST /api/run`, and `POST /api/scheduler/stop`.
+- Persist and restore each authenticated user's profile and resume reference.
+- Start or stop an email-scoped in-process daily scheduler while the web server is active.
+- Expose public `GET /health` without user data and authenticated `GET /api/dashboard`, `POST /api/run`, and scheduler endpoints.
+- Render only the signed-in user's latest manual or scheduled run.
 
 ### Agent Orchestrator
 

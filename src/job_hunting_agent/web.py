@@ -10,7 +10,7 @@ import secrets
 import smtplib
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -31,9 +31,12 @@ from .db import (
     latest_runs,
     normalize_email,
     record_run,
+    save_user_profile,
     save_otp,
     save_schedule,
+    schedule_for_user,
     update_schedule_status,
+    user_profile,
 )
 from .models import CandidateProfile
 from .storage import StoredObject, download_file, mirror_artifacts, upload_file
@@ -135,7 +138,7 @@ class DailyScheduler:
             "last_error": self.last_error,
             "resume_path": self.resume_path,
             "last_result": self.last_result,
-            "history": self.history[-10:],
+            "history": self.history[-1:],
         }
 
     def _loop(self) -> None:
@@ -184,19 +187,49 @@ class DailyScheduler:
         if path.exists():
             return str(path)
         if self.resume_uri:
-            restored = download_file(self.resume_uri, UPLOAD_DIR)
+            assert self.user_email is not None
+            restored = download_file(self.resume_uri, _user_upload_dir(self.user_email))
             self.resume_path = str(restored)
             return str(restored)
         return str(path)
 
 
-scheduler = DailyScheduler()
+class SchedulerRegistry:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._schedulers: dict[str, DailyScheduler] = {}
+
+    def get(self, user_email: str) -> DailyScheduler | None:
+        with self._lock:
+            return self._schedulers.get(normalize_email(user_email))
+
+    def get_or_create(self, user_email: str) -> DailyScheduler:
+        normalized = normalize_email(user_email)
+        with self._lock:
+            return self._schedulers.setdefault(normalized, DailyScheduler())
+
+    def stop(self, user_email: str) -> dict:
+        scheduler = self.get(user_email)
+        if not scheduler:
+            return _empty_scheduler_snapshot()
+        scheduler.stop()
+        return scheduler.snapshot()
+
+    def stop_all(self) -> None:
+        with self._lock:
+            schedulers = list(self._schedulers.values())
+        for scheduler in schedulers:
+            scheduler.stop()
+
+
+schedulers = SchedulerRegistry()
 
 
 @app.on_event("startup")
 def restore_active_schedule() -> None:
-    for saved in active_schedules(limit=1):
+    for saved in active_schedules(limit=1000):
         try:
+            scheduler = schedulers.get_or_create(saved["user_email"])
             scheduler.start(
                 saved["resume_path"],
                 _config_from_payload(saved["config_payload"]),
@@ -213,6 +246,21 @@ def restore_active_schedule() -> None:
                 scheduler.history.append(_history_item("scheduled", scheduler.last_run_at or "", scheduler.last_result))
         except Exception as exc:
             update_schedule_status(saved["user_email"], last_error=f"Schedule restore failed: {exc}")
+
+
+def _empty_scheduler_snapshot() -> dict:
+    return {
+        "running": False,
+        "daily_at": None,
+        "timezone": "UTC",
+        "next_run_at": None,
+        "created_at": None,
+        "last_run_at": None,
+        "last_error": None,
+        "resume_path": None,
+        "last_result": None,
+        "history": [],
+    }
 
 
 def current_user_email(session_cookie: str | None) -> str | None:
@@ -280,7 +328,7 @@ def index(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COO
     user_email = current_user_email(job_agent_session)
     if not user_email:
         return RedirectResponse("/login", status_code=303)
-    return HTMLResponse(_page(user_email))
+    return HTMLResponse(_page(user_email, _profile_for_user(user_email)))
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -336,28 +384,43 @@ def logout() -> RedirectResponse:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "scheduler": scheduler.snapshot()}
+    return {"status": "ok"}
+
+
+@app.get("/api/dashboard")
+def dashboard(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    runs = latest_runs(user_email, limit=1)
+    latest_run = runs[0] if runs else None
+    scheduler = schedulers.get(user_email)
+    scheduler_snapshot = scheduler.snapshot() if scheduler else _persisted_scheduler_snapshot(user_email)
+    scheduler_snapshot["history"] = [_run_history_item(latest_run)] if latest_run else []
+    return {
+        "profile": _profile_for_user(user_email),
+        "latest_run": latest_run,
+        "scheduler": scheduler_snapshot,
+    }
 
 
 @app.get("/api/runs")
 def runs(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
     user_email = require_user(job_agent_session)
-    return {"runs": latest_runs(user_email)}
+    return {"runs": latest_runs(user_email, limit=1)}
 
 
 @app.post("/api/run")
 async def run_now(
     background_tasks: BackgroundTasks,
-    resume: Annotated[UploadFile, File()],
+    resume: Annotated[UploadFile | None, File()] = None,
     job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     name: Annotated[str, Form()] = "",
     email: Annotated[str, Form()] = "",
     phone: Annotated[str, Form()] = "",
     linkedin_profile_url: Annotated[str, Form()] = "",
     naukri_profile_url: Annotated[str, Form()] = "",
-    target_roles: Annotated[str, Form()] = "Python Developer, Machine Learning Engineer, Data Engineer",
-    locations: Annotated[str, Form()] = "Bengaluru, Hyderabad, Remote",
-    skills: Annotated[str, Form()] = "Python, SQL, FastAPI, AWS, Machine Learning",
+    target_roles: Annotated[str, Form()] = "",
+    locations: Annotated[str, Form()] = "",
+    skills: Annotated[str, Form()] = "",
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
@@ -365,11 +428,10 @@ async def run_now(
     start_daily: Annotated[bool, Form()] = False,
 ) -> dict:
     user_email = require_user(job_agent_session)
-    started_at = datetime.now().isoformat(timespec="seconds")
-    stored_resume = await save_resume_upload(resume, user_email)
-    config = build_config_from_form(
+    stored_resume = await resolve_resume(resume, user_email)
+    config = _config_for_user(user_email, build_config_from_form(
         name=name,
-        email=email,
+        email=user_email,
         phone=phone,
         linkedin_profile_url=linkedin_profile_url,
         naukri_profile_url=naukri_profile_url,
@@ -378,16 +440,17 @@ async def run_now(
         skills=skills,
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
-    )
+    ))
+    _save_profile(user_email, config, stored_resume)
     result = run_agent(str(stored_resume.local_path), config, trigger="manual", user_email=user_email)
     if stored_resume.uri:
         result["resume_uri"] = stored_resume.uri
-    scheduler.history.append(_history_item("manual", started_at, result))
     if start_daily:
         if not daily_at:
             raise HTTPException(status_code=400, detail="Daily time is required when scheduling is enabled.")
+        user_scheduler = schedulers.get_or_create(user_email)
         background_tasks.add_task(
-            scheduler.start,
+            user_scheduler.start,
             str(stored_resume.local_path),
             config,
             daily_at,
@@ -401,16 +464,16 @@ async def run_now(
 
 @app.post("/api/scheduler/start")
 async def start_scheduler(
-    resume: Annotated[UploadFile, File()],
+    resume: Annotated[UploadFile | None, File()] = None,
     job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     name: Annotated[str, Form()] = "",
     email: Annotated[str, Form()] = "",
     phone: Annotated[str, Form()] = "",
     linkedin_profile_url: Annotated[str, Form()] = "",
     naukri_profile_url: Annotated[str, Form()] = "",
-    target_roles: Annotated[str, Form()] = "Python Developer, Machine Learning Engineer, Data Engineer",
-    locations: Annotated[str, Form()] = "Bengaluru, Hyderabad, Remote",
-    skills: Annotated[str, Form()] = "Python, SQL, FastAPI, AWS, Machine Learning",
+    target_roles: Annotated[str, Form()] = "",
+    locations: Annotated[str, Form()] = "",
+    skills: Annotated[str, Form()] = "",
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
@@ -419,10 +482,10 @@ async def start_scheduler(
     user_email = require_user(job_agent_session)
     if not daily_at:
         raise HTTPException(status_code=400, detail="Daily time is required to schedule the agent.")
-    stored_resume = await save_resume_upload(resume, user_email)
-    config = build_config_from_form(
+    stored_resume = await resolve_resume(resume, user_email)
+    config = _config_for_user(user_email, build_config_from_form(
         name=name,
-        email=email,
+        email=user_email,
         phone=phone,
         linkedin_profile_url=linkedin_profile_url,
         naukri_profile_url=naukri_profile_url,
@@ -431,7 +494,9 @@ async def start_scheduler(
         skills=skills,
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
-    )
+    ))
+    _save_profile(user_email, config, stored_resume)
+    scheduler = schedulers.get_or_create(user_email)
     scheduler.start(
         str(stored_resume.local_path),
         config,
@@ -447,8 +512,7 @@ async def start_scheduler(
 def stop_scheduler(job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> dict:
     user_email = require_user(job_agent_session)
     disable_schedule(user_email)
-    scheduler.stop()
-    return scheduler.snapshot()
+    return schedulers.stop(user_email)
 
 
 def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user_email: str = "") -> dict:
@@ -524,12 +588,140 @@ async def save_resume_upload(resume: UploadFile, user_email: str = "anonymous") 
     suffix = Path(resume.filename or "").suffix.lower()
     if suffix not in {".pdf", ".docx", ".txt", ".md"}:
         raise HTTPException(status_code=400, detail="Upload a PDF, DOCX, TXT, or MD resume.")
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    target = UPLOAD_DIR / f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{Path(resume.filename or 'resume').name}"
+    upload_dir = _user_upload_dir(user_email)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    target = upload_dir / f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{Path(resume.filename or 'resume').name}"
     with target.open("wb") as handle:
         shutil.copyfileobj(resume.file, handle)
     uri = upload_file(target, f"uploads/{normalize_email(user_email)}/{target.stem}")
     return StoredObject(local_path=target, uri=uri)
+
+
+async def resolve_resume(resume: UploadFile | None, user_email: str) -> StoredObject:
+    if resume and resume.filename:
+        return await save_resume_upload(resume, user_email)
+    saved_profile = user_profile(user_email)
+    saved_schedule = schedule_for_user(user_email)
+    resume_path = (saved_profile or {}).get("resume_path") or (saved_schedule or {}).get("resume_path") or ""
+    resume_uri = (saved_profile or {}).get("resume_uri") or (saved_schedule or {}).get("resume_uri") or ""
+    path = Path(resume_path) if resume_path else Path()
+    if resume_path and path.exists():
+        return StoredObject(local_path=path, uri=resume_uri)
+    if resume_uri:
+        return StoredObject(local_path=download_file(resume_uri, _user_upload_dir(user_email)), uri=resume_uri)
+    raise HTTPException(status_code=400, detail="Upload a resume before running or scheduling the agent.")
+
+
+def _config_for_user(user_email: str, config: AppConfig) -> AppConfig:
+    return replace(
+        config,
+        application=replace(config.application, data_dir=str(_user_data_dir(user_email))),
+    )
+
+
+def _user_data_dir(user_email: str) -> Path:
+    user_key = hashlib.sha256(normalize_email(user_email).encode("utf-8")).hexdigest()[:20]
+    return DATA_DIR / "users" / user_key
+
+
+def _user_upload_dir(user_email: str) -> Path:
+    return _user_data_dir(user_email) / "uploads"
+
+
+def _save_profile(user_email: str, config: AppConfig, resume: StoredObject) -> None:
+    save_user_profile(
+        user_email,
+        _config_payload(config),
+        resume_path=str(resume.local_path),
+        resume_uri=resume.uri,
+        resume_name=resume.local_path.name,
+    )
+
+
+def _profile_for_user(user_email: str) -> dict:
+    saved = user_profile(user_email)
+    scheduled = schedule_for_user(user_email)
+    if saved:
+        payload = saved.get("profile_payload") or {}
+        view = _profile_view(payload, saved)
+        view["daily_at"] = (scheduled or {}).get("daily_at") or ""
+        return view
+    if scheduled:
+        view = _profile_view(
+            scheduled.get("config_payload") or {},
+            {
+                "resume_path": scheduled.get("resume_path") or "",
+                "resume_uri": scheduled.get("resume_uri") or "",
+                "resume_name": Path(scheduled.get("resume_path") or "").name,
+            },
+        )
+        view["daily_at"] = scheduled.get("daily_at") or ""
+        return view
+    return {
+        "name": "",
+        "email": normalize_email(user_email),
+        "phone": "",
+        "linkedin_profile_url": "",
+        "naukri_profile_url": "",
+        "target_roles": "",
+        "locations": "",
+        "skills": "",
+        "max_jobs_per_portal": 10,
+        "application_mode": "draft",
+        "daily_at": "",
+        "resume_name": "",
+        "resume_uri": "",
+    }
+
+
+def _profile_view(payload: dict, stored: dict) -> dict:
+    profile = payload.get("profile") or {}
+    search = payload.get("search") or {}
+    application = payload.get("application") or {}
+    return {
+        "name": profile.get("name", ""),
+        "email": profile.get("email", ""),
+        "phone": profile.get("phone", ""),
+        "linkedin_profile_url": profile.get("linkedin_profile_url", ""),
+        "naukri_profile_url": profile.get("naukri_profile_url", ""),
+        "target_roles": ", ".join(profile.get("target_roles") or ()),
+        "locations": ", ".join(profile.get("locations") or ()),
+        "skills": ", ".join(profile.get("skills") or ()),
+        "max_jobs_per_portal": int(search.get("max_jobs_per_portal", 10)),
+        "application_mode": application.get("mode", "draft"),
+        "resume_name": stored.get("resume_name") or Path(stored.get("resume_path") or "").name,
+        "resume_uri": stored.get("resume_uri") or "",
+    }
+
+
+def _persisted_scheduler_snapshot(user_email: str) -> dict:
+    saved = schedule_for_user(user_email)
+    if not saved:
+        return _empty_scheduler_snapshot()
+    return {
+        "running": bool(saved.get("active")),
+        "daily_at": saved.get("daily_at"),
+        "timezone": saved.get("timezone") or "UTC",
+        "next_run_at": saved.get("next_run_at"),
+        "created_at": saved.get("created_at"),
+        "last_run_at": saved.get("last_run_at"),
+        "last_error": saved.get("last_error"),
+        "resume_path": saved.get("resume_path"),
+        "last_result": saved.get("last_result"),
+        "history": [],
+    }
+
+
+def _run_history_item(run: dict) -> dict:
+    payload = run.get("payload") or {}
+    return {
+        "trigger": run.get("trigger") or payload.get("trigger") or "manual",
+        "finished_at": run.get("generated_at") or payload.get("generated_at") or "",
+        "status": "completed",
+        "ats_score": run.get("ats_score", 0),
+        "jobs": run.get("job_count", 0),
+        "applications": run.get("application_summary") or {},
+    }
 
 
 def build_config_from_form(
@@ -738,8 +930,8 @@ def _login_page() -> str:
 </html>"""
 
 
-def _page(user_email: str) -> str:
-    return """<!doctype html>
+def _page(user_email: str, profile: dict) -> str:
+    page = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -844,22 +1036,26 @@ def _page(user_email: str) -> str:
     .workflow-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: #ffffff; font-size: 14px; font-weight: 900; background: var(--blue); }
     .workflow-card:nth-child(2) .workflow-icon { background: var(--green); }
     .workflow-card:nth-child(3) .workflow-icon { background: var(--gold); }
-    .results-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+    .workspace-header { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(280px, 340px); gap: 16px; align-items: start; margin-bottom: 20px; }
+    .results-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
     .results-header h2 { margin: 0; font-size: 26px; letter-spacing: 0; }
     .status-pill { display: inline-flex; align-items: center; min-height: 30px; padding: 6px 10px; border-radius: 999px; background: #ecfdf3; color: var(--green); font-size: 12px; font-weight: 850; white-space: nowrap; }
     .empty-state { display: grid; place-items: center; min-height: 360px; border: 1px dashed #cbd5e1; border-radius: 8px; background: #f8fafc; text-align: center; padding: 24px; }
     .empty-visual { width: 118px; height: 90px; margin-bottom: 14px; border-radius: 8px; background: #ffffff; border: 1px solid #d8e0ec; box-shadow: 0 10px 24px rgba(29, 41, 57, 0.08); position: relative; }
     .empty-visual::before { content: ""; position: absolute; left: 18px; right: 18px; top: 22px; height: 8px; border-radius: 4px; background: #175cd3; box-shadow: 0 18px 0 #d8e0ec, 0 36px 0 #d8e0ec; }
-    .scheduler-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0 18px; }
-    .scheduler-card { padding: 12px; border: 1px solid #dfe4ee; border-radius: 7px; background: #fbfcfe; }
-    .scheduler-card strong { display: block; font-size: 12px; color: #5b6472; text-transform: uppercase; }
-    .scheduler-card span { display: block; margin-top: 5px; font-size: 14px; font-weight: 800; color: var(--ink); overflow-wrap: anywhere; }
+    .scheduler-panel { padding: 13px; border: 1px solid #d8e2f0; border-radius: 8px; background: linear-gradient(145deg, #f8fbff, #eef4fb); box-shadow: 0 10px 26px rgba(29, 41, 57, 0.08); }
+    .scheduler-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+    .scheduler-panel-head h3 { margin: 0; font-size: 14px; }
+    .scheduler-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+    .scheduler-card { padding: 8px; border: 1px solid #dfe6f0; border-radius: 6px; background: rgba(255, 255, 255, 0.82); }
+    .scheduler-card strong { display: block; font-size: 10px; color: #5b6472; text-transform: uppercase; }
+    .scheduler-card span { display: block; margin-top: 3px; font-size: 12px; font-weight: 800; color: var(--ink); overflow-wrap: anywhere; }
     .status-pill.off { background: #f2f4f7; color: #5b6472; }
     .status-pill.error { background: #fef3f2; color: #b42318; }
     .metric { display: inline-flex; align-items: baseline; gap: 7px; padding: 10px 12px; border: 1px solid #dfe4ee; border-radius: 7px; margin: 0 8px 8px 0; background: #fbfcfe; }
     .metric strong { font-size: 26px; }
-    .history-list { margin: 10px 0 18px; padding: 0; list-style: none; }
-    .history-list li { padding: 10px 0; border-bottom: 1px solid #edf1f6; }
+    .history-list { grid-column: 1 / -1; margin: 2px 0 0; padding: 8px; list-style: none; border: 1px solid #dfe6f0; border-radius: 6px; background: rgba(255, 255, 255, 0.82); }
+    .history-list li { margin: 0; font-size: 11px; line-height: 1.4; }
     .result-section { margin-top: 18px; padding: 16px; border: 1px solid rgba(225, 232, 242, 0.92); border-radius: 8px; background: rgba(255, 255, 255, 0.84); box-shadow: 0 12px 32px rgba(29, 41, 57, 0.07); }
     .result-section h3 { margin: 0 0 12px; font-size: 18px; }
     .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -884,6 +1080,7 @@ def _page(user_email: str) -> str:
       .hero-content { width: min(100% - 32px, 720px); grid-template-columns: 1fr; padding: 28px 0 70px; }
       .hero-stats { justify-self: stretch; grid-template-columns: 1fr 1fr; min-width: 0; }
       main { width: min(100% - 32px, 720px); grid-template-columns: 1fr; margin-top: -42px; }
+      .workspace-header { grid-template-columns: 1fr; }
       .row { grid-template-columns: 1fr; }
       .checkline { margin-top: 12px; }
       h1 { font-size: 38px; }
@@ -895,7 +1092,7 @@ def _page(user_email: str) -> str:
       .results-header { display: block; }
       .status-pill { margin-top: 10px; }
       .platform-chip { width: 100%; justify-content: flex-start; }
-      .scheduler-grid, .workflow-strip, .result-grid { grid-template-columns: 1fr; }
+      .workflow-strip, .result-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -928,38 +1125,39 @@ def _page(user_email: str) -> str:
       <fieldset>
         <legend><span class="section-badge">1</span>Resume and Profiles</legend>
         <label for="resume">Resume</label>
-        <input id="resume" name="resume" type="file" accept=".pdf,.docx,.txt,.md" required>
+        <input id="resume" name="resume" type="file" accept=".pdf,.docx,.txt,.md">
+        <p class="muted" id="saved-resume">__RESUME_STATUS__</p>
         <label for="linkedin_profile_url">LinkedIn Profile URL</label>
-        <input id="linkedin_profile_url" name="linkedin_profile_url" type="url" value="https://www.linkedin.com/in/mriganka-das-b2ba3186/">
+        <input id="linkedin_profile_url" name="linkedin_profile_url" type="url" value="__LINKEDIN_PROFILE_URL__">
         <label for="naukri_profile_url">Naukri Profile URL</label>
-        <input id="naukri_profile_url" name="naukri_profile_url" type="url" value="https://www.naukri.com/mnjuser/profile?id=&altresid">
+        <input id="naukri_profile_url" name="naukri_profile_url" type="url" value="__NAUKRI_PROFILE_URL__">
       </fieldset>
       <fieldset>
         <legend><span class="section-badge">2</span>Candidate</legend>
         <div class="row">
-          <div><label for="name">Name</label><input id="name" name="name"></div>
-          <div><label for="phone">Phone</label><input id="phone" name="phone"></div>
+          <div><label for="name">Name</label><input id="name" name="name" value="__NAME__"></div>
+          <div><label for="phone">Phone</label><input id="phone" name="phone" value="__PHONE__"></div>
         </div>
         <label for="email">Email</label>
-        <input id="email" name="email" type="email">
+        <input id="email" name="email" type="email" value="__PROFILE_EMAIL__" readonly>
       </fieldset>
       <fieldset>
         <legend><span class="section-badge">3</span>Search</legend>
         <label for="target_roles">Target Roles</label>
-        <textarea id="target_roles" name="target_roles">Python Developer, Machine Learning Engineer, Data Engineer</textarea>
+        <textarea id="target_roles" name="target_roles">__TARGET_ROLES__</textarea>
         <label for="locations">Locations</label>
-        <textarea id="locations" name="locations">Bengaluru, Hyderabad, Remote</textarea>
+        <textarea id="locations" name="locations">__LOCATIONS__</textarea>
         <label for="skills">Skills</label>
-        <textarea id="skills" name="skills">Python, SQL, FastAPI, AWS, Machine Learning</textarea>
+        <textarea id="skills" name="skills">__SKILLS__</textarea>
         <div class="row">
-          <div><label for="max_jobs_per_portal">Max Jobs Per Portal</label><input id="max_jobs_per_portal" name="max_jobs_per_portal" type="number" min="1" max="50" value="10"></div>
-          <div><label for="application_mode">Application Mode</label><select id="application_mode" name="application_mode"><option value="draft">Draft</option><option value="email">Email when recruiter email exists</option></select></div>
+          <div><label for="max_jobs_per_portal">Max Jobs Per Portal</label><input id="max_jobs_per_portal" name="max_jobs_per_portal" type="number" min="1" max="50" value="__MAX_JOBS__"></div>
+          <div><label for="application_mode">Application Mode</label><select id="application_mode" name="application_mode">__APPLICATION_OPTIONS__</select></div>
         </div>
       </fieldset>
       <fieldset>
         <legend><span class="section-badge">4</span>Daily Automation</legend>
         <div class="row">
-          <div><label for="daily_at">Daily Time</label><input id="daily_at" name="daily_at" type="time" value="09:30"></div>
+          <div><label for="daily_at">Daily Time</label><input id="daily_at" name="daily_at" type="time" value="__DAILY_AT__"></div>
           <div class="schedule-help">Use Schedule Daily Run to upload this resume and start the timer. The app uses your browser timezone and restores active schedules after server restarts.</div>
         </div>
         <input id="daily_timezone" name="daily_timezone" type="hidden" value="UTC">
@@ -977,12 +1175,17 @@ def _page(user_email: str) -> str:
       </div>
     </form>
     <section class="panel">
-      <div class="results-header">
-        <div>
-          <h2>Run Results</h2>
-          <p class="muted">ATS score, role matches, missing keywords, and draft actions appear here.</p>
+      <div class="workspace-header">
+        <div class="results-header">
+          <div>
+            <h2>Run Results</h2>
+            <p class="muted">ATS score, role matches, missing keywords, and draft actions appear here.</p>
+          </div>
         </div>
-        <span class="status-pill">Ready</span>
+        <aside class="scheduler-panel" aria-label="Daily scheduler status">
+          <div class="scheduler-panel-head"><h3>Daily Automation</h3><span class="status-pill">Ready</span></div>
+          <div id="scheduler-status" class="scheduler-grid"></div>
+        </aside>
       </div>
       <div id="summary" class="empty-state">
         <div>
@@ -991,7 +1194,6 @@ def _page(user_email: str) -> str:
           <p class="muted">Upload your resume and run the agent to build your daily job pipeline.</p>
         </div>
       </div>
-      <div id="scheduler-status" class="scheduler-grid"></div>
       <div id="details"></div>
     </section>
   </main>
@@ -1048,16 +1250,12 @@ def _page(user_email: str) -> str:
     });
     async function refreshDashboard() {
       let latestResult = null;
-      const response = await fetch('/health');
+      const response = await fetch('/api/dashboard');
       if (response.ok) {
         const payload = await response.json();
         renderScheduler(payload.scheduler);
         latestResult = newerResult(latestResult, payload.scheduler?.last_result);
-      }
-      const runsResponse = await fetch('/api/runs');
-      if (runsResponse.ok) {
-        const payload = await runsResponse.json();
-        const latestStoredRun = payload.runs?.[0]?.payload;
+        const latestStoredRun = payload.latest_run?.payload;
         latestResult = newerResult(latestResult, latestStoredRun);
       }
       if (shouldRenderResult(latestResult)) {
@@ -1089,8 +1287,8 @@ def _page(user_email: str) -> str:
         schedulerStatus.innerHTML += `<p class="note">Last scheduled run failed: ${escapeHtml(error)}</p>`;
       }
       if (scheduler?.history?.length) {
-        const history = scheduler.history.slice().reverse().map((item) => `<li><strong>${escapeHtml(item.status)}</strong> ${escapeHtml(item.trigger)} run finished at ${escapeHtml(item.finished_at || item.started_at || '')} - jobs: ${escapeHtml(item.jobs ?? 'n/a')}</li>`).join('');
-        schedulerStatus.innerHTML += `<h3>Run History</h3><ul class="history-list">${history}</ul>`;
+        const item = scheduler.history[0];
+        schedulerStatus.innerHTML += `<ul class="history-list"><li><strong>Latest ${escapeHtml(item.trigger)} run:</strong> ${escapeHtml(item.finished_at || '')} · ${escapeHtml(item.jobs ?? 'n/a')} jobs</li></ul>`;
       }
     }
     function render(payload, source = 'manual') {
@@ -1178,4 +1376,30 @@ def _page(user_email: str) -> str:
     setInterval(refreshDashboard, 15000);
   </script>
 </body>
-</html>""".replace("__USER_EMAIL__", _escape_html(user_email))
+</html>"""
+    replacements = {
+        "__USER_EMAIL__": user_email,
+        "__PROFILE_EMAIL__": profile.get("email") or user_email,
+        "__NAME__": profile.get("name", ""),
+        "__PHONE__": profile.get("phone", ""),
+        "__LINKEDIN_PROFILE_URL__": profile.get("linkedin_profile_url", ""),
+        "__NAUKRI_PROFILE_URL__": profile.get("naukri_profile_url", ""),
+        "__TARGET_ROLES__": profile.get("target_roles", ""),
+        "__LOCATIONS__": profile.get("locations", ""),
+        "__SKILLS__": profile.get("skills", ""),
+        "__MAX_JOBS__": str(profile.get("max_jobs_per_portal", 10)),
+        "__DAILY_AT__": profile.get("daily_at", ""),
+        "__RESUME_STATUS__": (
+            f"Saved resume available: {profile['resume_name']}. Choose a file only to replace it."
+            if profile.get("resume_name")
+            else "No resume saved yet. Upload one for your first run."
+        ),
+        "__APPLICATION_OPTIONS__": (
+            '<option value="draft">Draft</option><option value="email" selected>Email when recruiter email exists</option>'
+            if profile.get("application_mode") == "email"
+            else '<option value="draft" selected>Draft</option><option value="email">Email when recruiter email exists</option>'
+        ),
+    }
+    for token, value in replacements.items():
+        page = page.replace(token, _escape_html(value) if token != "__APPLICATION_OPTIONS__" else value)
+    return page

@@ -1,4 +1,5 @@
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -13,7 +14,7 @@ from job_hunting_agent.web import (
     app,
     build_config_from_form,
     restore_active_schedule,
-    scheduler,
+    schedulers,
 )
 
 
@@ -34,7 +35,7 @@ def test_web_health_returns_scheduler_status() -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert "scheduler" in response.json()
+    assert "scheduler" not in response.json()
 
 
 def test_local_test_environment_does_not_use_secure_cookie_default_secret() -> None:
@@ -62,7 +63,7 @@ def test_login_page_contains_email_otp_flow() -> None:
 
 
 def test_home_page_contains_resume_and_profile_inputs() -> None:
-    client = authenticated_client()
+    client = authenticated_client(f"fresh-{uuid4().hex}@example.com")
 
     response = client.get("/")
 
@@ -74,9 +75,8 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "Schedule Daily Run" in response.text
     assert "scheduler-status" in response.text
     assert "activeResult" in response.text
-    assert "payload.scheduler?.last_result" in response.text
-    assert "fetch('/api/runs')" in response.text
-    assert "payload.runs?.[0]?.payload" in response.text
+    assert "fetch('/api/dashboard')" in response.text
+    assert "payload.latest_run?.payload" in response.text
     assert "function shouldRenderResult" in response.text
     assert "result.generated_at > activeResult.generatedAt" in response.text
     assert "Showing latest scheduled run" in response.text
@@ -86,6 +86,8 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert 'name="daily_timezone"' in response.text
     assert "Intl.DateTimeFormat().resolvedOptions().timeZone" in response.text
     assert "Application and Email Audit" not in response.text
+    assert "https://www.linkedin.com/in/mriganka-das-b2ba3186/" not in response.text
+    assert "Python Developer, Machine Learning Engineer, Data Engineer" not in response.text
 
 
 def test_static_hero_asset_is_served() -> None:
@@ -112,6 +114,59 @@ def test_authenticated_run_history_endpoint_returns_runs() -> None:
 
     assert response.status_code == 200
     assert "runs" in response.json()
+    assert len(response.json()["runs"]) <= 1
+
+
+def test_profile_values_are_isolated_by_authenticated_email() -> None:
+    owner_email = f"owner-{uuid4().hex}@example.com"
+    other_email = f"other-{uuid4().hex}@example.com"
+    owner = authenticated_client(owner_email)
+    other = authenticated_client(other_email)
+
+    response = owner.post(
+        "/api/scheduler/start",
+        data={
+            "daily_at": "23:59",
+            "daily_timezone": "Asia/Kolkata",
+            "name": "Profile Owner",
+            "linkedin_profile_url": "https://www.linkedin.com/in/profile-owner/",
+            "naukri_profile_url": "https://www.naukri.com/mnjuser/profile/profile-owner",
+            "target_roles": "Data Engineer",
+            "locations": "Mumbai, Remote",
+            "skills": "Python, SQL",
+            "application_mode": "draft",
+        },
+        files={"resume": ("owner-resume.txt", b"Python SQL Data Engineer", "text/plain")},
+    )
+    assert response.status_code == 200
+
+    owner_page = owner.get("/").text
+    other_page = other.get("/").text
+    assert "Profile Owner" in owner_page
+    assert "https://www.linkedin.com/in/profile-owner/" in owner_page
+    assert "Data Engineer" in owner_page
+    assert "owner-resume.txt" in owner_page
+    assert "Profile Owner" not in other_page
+    assert "https://www.linkedin.com/in/profile-owner/" not in other_page
+    assert ">Data Engineer</textarea>" not in other_page
+    assert other.get("/api/dashboard").json()["latest_run"] is None
+
+    assert owner.post("/api/scheduler/stop").status_code == 200
+    resumed = owner.post(
+        "/api/scheduler/start",
+        data={
+            "daily_at": "22:30",
+            "daily_timezone": "Asia/Kolkata",
+            "name": "Profile Owner",
+            "target_roles": "Data Engineer",
+            "locations": "Mumbai, Remote",
+            "skills": "Python, SQL",
+            "application_mode": "draft",
+        },
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["scheduler"]["daily_at"] == "22:30"
+    assert owner.post("/api/scheduler/stop").status_code == 200
 
 
 def test_application_payload_includes_draft_message(tmp_path: Path) -> None:
@@ -124,6 +179,17 @@ def test_application_payload_includes_draft_message(tmp_path: Path) -> None:
 
     assert payload["draft_path"] == str(draft_path)
     assert payload["draft_message"] == "Hello recruiter,\n\nI am interested."
+
+
+def test_skipped_application_payload_includes_saved_draft_message(tmp_path: Path) -> None:
+    draft_path = tmp_path / "draft.md"
+    draft_path.write_text("Reusable scheduled draft", encoding="utf-8")
+    job = JobLead("linkedin", "Data Engineer", "Example Corp", "Remote", "https://example.com/job")
+    result = ApplicationResult(job, "skipped", f"Already present in ledger. Draft saved to {draft_path}")
+
+    payload = _application_payload(result)
+
+    assert payload["draft_message"] == "Reusable scheduled draft"
 
 
 def test_build_config_from_form_keeps_portal_profiles() -> None:
@@ -194,8 +260,9 @@ def test_run_endpoint_rejects_unsupported_resume_format(tmp_path: Path) -> None:
 
 
 def test_scheduler_start_endpoint_starts_without_immediate_run() -> None:
-    client = authenticated_client("scheduler@example.com")
-    scheduler.stop()
+    user_email = f"scheduler-{uuid4().hex}@example.com"
+    client = authenticated_client(user_email)
+    assert client.post("/api/scheduler/stop").status_code == 200
 
     response = client.post(
         "/api/scheduler/start",
@@ -219,11 +286,12 @@ def test_scheduler_start_endpoint_starts_without_immediate_run() -> None:
     assert payload["scheduler"]["last_run_at"] is None
     assert payload["scheduler"]["next_run_at"]
 
-    scheduler.stop()
+    assert client.post("/api/scheduler/stop").status_code == 200
 
 
 def test_restore_active_schedule_keeps_last_result(monkeypatch) -> None:
-    scheduler.stop()
+    user_email = f"restore-{uuid4().hex}@example.com"
+    schedulers.stop(user_email)
     last_result = {
         "ats_report": {"score": 77, "strengths": [], "improvements": [], "missing_keywords": []},
         "jobs": [{"portal": "linkedin", "title": "Data Engineer", "company": "Example", "location": "Remote", "url": "https://example.com"}],
@@ -243,12 +311,12 @@ def test_restore_active_schedule_keeps_last_result(monkeypatch) -> None:
                 "resume_uri": "",
                 "daily_at": "23:59",
                 "timezone": "Asia/Kolkata",
-                "user_email": "restore@example.com",
+                "user_email": user_email,
                 "last_run_at": "2026-06-17T03:02:02",
                 "last_error": "",
                 "last_result": last_result,
                 "config_payload": {
-                    "profile": {"email": "restore@example.com"},
+                    "profile": {"email": user_email},
                     "search": {},
                     "application": {"mode": "draft", "data_dir": "data"},
                 },
@@ -259,10 +327,12 @@ def test_restore_active_schedule_keeps_last_result(monkeypatch) -> None:
 
     restore_active_schedule()
 
+    scheduler = schedulers.get(user_email)
+    assert scheduler is not None
     snapshot = scheduler.snapshot()
     assert snapshot["running"] is True
     assert snapshot["last_run_at"] == "2026-06-17T03:02:02"
     assert snapshot["last_result"]["ats_report"]["score"] == 77
     assert snapshot["history"][-1]["status"] == "completed"
 
-    scheduler.stop()
+    schedulers.stop(user_email)

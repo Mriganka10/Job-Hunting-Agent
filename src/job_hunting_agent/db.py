@@ -62,6 +62,18 @@ def init_db() -> None:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS user_profiles (
+              id SERIAL PRIMARY KEY,
+              user_email VARCHAR(320) UNIQUE NOT NULL,
+              profile_payload JSONB NOT NULL,
+              resume_path TEXT NOT NULL DEFAULT '',
+              resume_uri TEXT NOT NULL DEFAULT '',
+              resume_name TEXT NOT NULL DEFAULT '',
+              created_at TIMESTAMPTZ NOT NULL,
+              updated_at TIMESTAMPTZ NOT NULL
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS run_records (
               id SERIAL PRIMARY KEY,
               user_email VARCHAR(320) NOT NULL,
@@ -135,6 +147,18 @@ def init_db() -> None:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS user_profiles (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_email TEXT UNIQUE NOT NULL,
+              profile_payload TEXT NOT NULL,
+              resume_path TEXT NOT NULL DEFAULT '',
+              resume_uri TEXT NOT NULL DEFAULT '',
+              resume_name TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS run_records (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               user_email TEXT NOT NULL,
@@ -196,6 +220,74 @@ def init_db() -> None:
         _ensure_column(conn, "scheduler_records", "last_run_at", "TEXT")
         _ensure_column(conn, "scheduler_records", "last_error", "TEXT")
         _ensure_column(conn, "scheduler_records", "last_result", "TEXT")
+
+
+def save_user_profile(
+    user_email: str,
+    profile_payload: dict[str, Any],
+    *,
+    resume_path: str = "",
+    resume_uri: str = "",
+    resume_name: str = "",
+) -> None:
+    normalized = normalize_email(user_email)
+    now = _serialize_time(utcnow())
+    payload = _json_dump(profile_payload)
+    with connection() as conn:
+        row = _fetchone(conn, "SELECT id FROM user_profiles WHERE user_email = ?", (normalized,))
+        if row:
+            _execute(
+                conn,
+                """
+                UPDATE user_profiles
+                SET profile_payload = ?,
+                    resume_path = CASE WHEN ? = '' THEN resume_path ELSE ? END,
+                    resume_uri = CASE WHEN ? = '' THEN resume_uri ELSE ? END,
+                    resume_name = CASE WHEN ? = '' THEN resume_name ELSE ? END,
+                    updated_at = ?
+                WHERE user_email = ?
+                """,
+                (
+                    payload,
+                    resume_path,
+                    resume_path,
+                    resume_uri,
+                    resume_uri,
+                    resume_name,
+                    resume_name,
+                    now,
+                    normalized,
+                ),
+            )
+            return
+        _execute(
+            conn,
+            """
+            INSERT INTO user_profiles
+            (user_email, profile_payload, resume_path, resume_uri, resume_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (normalized, payload, resume_path, resume_uri, resume_name, now, now),
+        )
+
+
+def user_profile(user_email: str) -> dict[str, Any] | None:
+    normalized = normalize_email(user_email)
+    with connection() as conn:
+        row = _fetchone(
+            conn,
+            """
+            SELECT user_email, profile_payload, resume_path, resume_uri, resume_name, created_at, updated_at
+            FROM user_profiles
+            WHERE user_email = ?
+            """,
+            (normalized,),
+        )
+    if not row:
+        return None
+    if isinstance(row.get("profile_payload"), str):
+        row["profile_payload"] = json.loads(row["profile_payload"])
+    return row
 
 
 def ensure_user(email: str) -> None:
@@ -398,6 +490,22 @@ def active_schedules(limit: int = 10) -> list[dict[str, Any]]:
             (True, limit),
         )
     return [_decode_schedule(row) for row in rows]
+
+
+def schedule_for_user(user_email: str) -> dict[str, Any] | None:
+    normalized = normalize_email(user_email)
+    with connection() as conn:
+        row = _fetchone(
+            conn,
+            """
+            SELECT user_email, active, daily_at, timezone, resume_path, resume_uri, config_payload,
+                   next_run_at, last_run_at, last_error, last_result, created_at, updated_at
+            FROM scheduler_records
+            WHERE user_email = ?
+            """,
+            (normalized,),
+        )
+    return _decode_schedule(row) if row else None
 
 
 def _execute(conn: Any, sql: str, params: tuple[Any, ...] = ()) -> Any:
