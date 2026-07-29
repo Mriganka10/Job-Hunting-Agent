@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import textwrap
 from pathlib import Path
 
 from .models import AtsReport, CandidateProfile, Resume
@@ -36,6 +35,10 @@ def _resume_sections(resume: Resume, report: AtsReport, profile: CandidateProfil
     experience_lines = _experience_bullets(resume.text)
     education_lines = _education_lines(resume.text)
     project_lines = _project_bullets(resume.text, experience_lines)
+    certifications = _certification_lines(resume.text)
+    achievements = _achievement_lines(resume.text, experience_lines)
+    languages = _language_lines(resume.text)
+    technical_skill_lines = _technical_skill_lines(skills)
     year_text = _experience_years(resume.text)
     summary = (
         f"{profile.name or 'Candidate'} is a {', '.join(target_roles[:3]) if target_roles else 'technology professional'} "
@@ -45,13 +48,16 @@ def _resume_sections(resume: Resume, report: AtsReport, profile: CandidateProfil
     contact = _contact_line(profile)
 
     return [
-        ("Contact", [contact] if contact else []),
-        ("Professional Summary", [summary]),
-        ("Technical Skills", [", ".join(skills)] if skills else []),
-        ("Target Roles", [", ".join(target_roles)] if target_roles else []),
-        ("Professional Experience", experience_lines),
-        ("Projects", project_lines),
-        ("Education", education_lines),
+        ("CONTACT", [contact] if contact else []),
+        ("PROFESSIONAL SUMMARY", [summary]),
+        ("CORE SKILLS", skills[:10]),
+        ("PROFESSIONAL EXPERIENCE", experience_lines),
+        ("PROJECTS", project_lines),
+        ("TECHNICAL SKILLS", technical_skill_lines),
+        ("EDUCATION", education_lines),
+        ("CERTIFICATIONS", certifications),
+        ("ACHIEVEMENTS", achievements),
+        ("LANGUAGES", languages),
     ]
 
 
@@ -72,7 +78,7 @@ def _write_docx(path: Path, sections: list[tuple[str, list[str]]]) -> None:
             continue
         document.add_paragraph(heading, style="ResumeHeading")
         for item in items:
-            if heading in {"Contact", "Professional Summary", "Technical Skills", "Target Roles"}:
+            if heading in {"CONTACT", "PROFESSIONAL SUMMARY", "TECHNICAL SKILLS"}:
                 document.add_paragraph(item, style="ResumeBody")
             else:
                 paragraph = document.add_paragraph(_clean_sentence(item), style="ResumeBullet")
@@ -82,13 +88,13 @@ def _write_docx(path: Path, sections: list[tuple[str, list[str]]]) -> None:
 
 def _configure_document(document) -> None:
     from docx.enum.style import WD_STYLE_TYPE
-    from docx.shared import Inches, Pt
+    from docx.shared import Inches, Pt, RGBColor
 
     section = document.sections[0]
-    section.top_margin = Inches(0.7)
-    section.bottom_margin = Inches(0.7)
-    section.left_margin = Inches(0.75)
-    section.right_margin = Inches(0.75)
+    section.top_margin = Inches(1)
+    section.bottom_margin = Inches(1)
+    section.left_margin = Inches(1.25)
+    section.right_margin = Inches(1.25)
 
     styles = document.styles
     normal = styles["Normal"]
@@ -97,16 +103,17 @@ def _configure_document(document) -> None:
     normal.paragraph_format.space_after = Pt(4)
     normal.paragraph_format.line_spacing = 1.05
 
-    for name, font_size, bold, before, after in (
-        ("ResumeName", 18, True, 0, 6),
-        ("ResumeHeading", 11, True, 10, 3),
-        ("ResumeBody", 10.5, False, 0, 5),
-        ("ResumeBullet", 10.5, False, 0, 3),
+    for name, font_size, bold, before, after, color in (
+        ("ResumeName", 16, True, 0, 6, "4f81bd"),
+        ("ResumeHeading", 13, True, 10, 3, "5b8fd1"),
+        ("ResumeBody", 10.5, False, 0, 5, "000000"),
+        ("ResumeBullet", 10.5, False, 0, 2, "000000"),
     ):
         style = styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
         style.font.name = "Calibri"
         style.font.size = Pt(font_size)
         style.font.bold = bold
+        style.font.color.rgb = RGBColor.from_string(color)
         style.paragraph_format.space_before = Pt(before)
         style.paragraph_format.space_after = Pt(after)
         style.paragraph_format.line_spacing = 1.05
@@ -152,6 +159,83 @@ def _education_lines(text: str) -> list[str]:
         for match in re.finditer(pattern, text, flags=re.I):
             matches.append(_clean_sentence(match.group(0)))
     return _dedupe_lines(matches)[:4]
+
+
+def _certification_lines(text: str) -> list[str]:
+    lines = []
+    patterns = (
+        r"(?:certifications?|certified in|certified)\s*[:\-]?\s*([^•\n]{8,180})",
+        r"([A-Z][A-Za-z0-9 +/#.-]{2,80}\s+(?:Certification|Certified|Certificate)[A-Za-z0-9 +/#.-]{0,80})",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.I):
+            value = match.group(1) if match.groups() else match.group(0)
+            cleaned = _clean_sentence(value)
+            if cleaned and not cleaned.lower().startswith(("none", "not applicable")):
+                lines.append(cleaned)
+    return _dedupe_lines(lines)[:5]
+
+
+def _achievement_lines(text: str, experience_lines: list[str]) -> list[str]:
+    measurable_terms = (
+        "%",
+        "years",
+        "csv",
+        "json",
+        "parquet",
+        "reduced",
+        "optimized",
+        "improved",
+        "automated",
+        "streamlined",
+        "enhanced",
+        "delivered",
+        "implemented",
+    )
+    achievements = [
+        line
+        for line in experience_lines
+        if re.search(r"\d", line) or any(term in line.lower() for term in measurable_terms)
+    ]
+    if not achievements and experience_lines:
+        achievements = experience_lines[:2]
+    return _dedupe_lines(achievements)[:4]
+
+
+def _language_lines(text: str) -> list[str]:
+    match = re.search(r"languages?(?: known)?\s*[:\-]\s*([^•\n]{3,160})", text, flags=re.I)
+    if not match:
+        return []
+    language_text = re.split(r"\b(?:address|education|experience|skills|projects)\b", match.group(1), maxsplit=1, flags=re.I)[0]
+    language_text = re.sub(r"\s+\band\b\s+", ",", language_text, flags=re.I)
+    values = [item.strip(" .;") for item in re.split(r"[,/|]", language_text) if item.strip(" .;")]
+    return _dedupe_lines([_clean_sentence(value) for value in values])[:6]
+
+
+def _technical_skill_lines(skills: list[str]) -> list[str]:
+    categories = {
+        "Programming Languages": ("python", "java", "scala", "sql", "javascript", "typescript", "c++", "c#"),
+        "Databases": ("postgresql", "postgres", "mysql", "oracle", "sql server", "mongodb", "snowflake", "redshift", "dynamodb"),
+        "Cloud": ("aws", "azure", "gcp", "google cloud"),
+        "Big Data": ("spark", "hadoop", "hive", "databricks", "airflow", "kafka", "sqoop", "pyspark"),
+        "Tools": ("fastapi", "autosys", "jenkins", "git", "github", "docker", "kubernetes", "tableau", "power bi", "excel", "jira"),
+        "Analytics": ("machine learning", "data analytics", "risk modeller", "risk browser", "underwriting iq", "matplotlib", "seaborn"),
+        "Operating Systems": ("linux", "unix", "windows"),
+    }
+    remaining = list(skills)
+    lines: list[str] = []
+    for label, keywords in categories.items():
+        matched = []
+        for skill in list(remaining):
+            key = skill.lower()
+            if any(keyword == key or (len(keyword) > 3 and keyword in key) for keyword in keywords):
+                matched.append(skill)
+                remaining.remove(skill)
+        if matched:
+            lines.append(f"{label}: {', '.join(_ordered_terms(tuple(matched)))}")
+    if remaining:
+        lines.append(f"Additional Skills: {', '.join(_ordered_terms(tuple(remaining[:10])))}")
+    return lines[:7]
 
 
 def _split_on_resume_bullets(text: str) -> list[str]:
