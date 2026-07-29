@@ -18,7 +18,7 @@ from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import BackgroundTasks, Cookie, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .agent import JobHuntingAgent
@@ -39,7 +39,7 @@ from .db import (
     user_profile,
 )
 from .models import CandidateProfile
-from .storage import StoredObject, download_file, mirror_artifacts, upload_file
+from .storage import StoredObject, download_file, mirror_artifacts, presigned_download_url, upload_file
 
 app = FastAPI(title="Job Hunting Agent")
 
@@ -431,7 +431,7 @@ def health() -> dict:
 @app.get("/api/dashboard")
 def dashboard(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
     user_email = require_user(job_agent_session)
-    runs = latest_runs(user_email, limit=1)
+    runs = [_run_with_payload_id(run) for run in latest_runs(user_email, limit=1)]
     latest_run = runs[0] if runs else None
     scheduler = schedulers.get(user_email)
     scheduler_snapshot = scheduler.snapshot() if scheduler else _persisted_scheduler_snapshot(user_email)
@@ -446,7 +446,7 @@ def dashboard(job_agent_session: str | None = Cookie(default=None, alias=SESSION
 @app.get("/api/runs")
 def runs(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
     user_email = require_user(job_agent_session)
-    return {"runs": latest_runs(user_email, limit=1)}
+    return {"runs": [_run_with_payload_id(run) for run in latest_runs(user_email, limit=1)]}
 
 
 @app.post("/api/run")
@@ -557,16 +557,19 @@ def stop_scheduler(job_agent_session: Annotated[str | None, Cookie(alias=SESSION
 
 
 def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user_email: str = "") -> dict:
-    report, jobs, results = JobHuntingAgent(config).run(resume_path)
+    report, jobs, results, improved_resume = JobHuntingAgent(config).run(resume_path)
     application_summary = _application_summary(results)
+    generated_at = datetime.now().isoformat(timespec="seconds")
+    improved_resume = _publish_improved_resume(improved_resume, user_email or config.profile.email or "anonymous", generated_at)
     result = {
         "ats_report": asdict(report),
         "jobs": [asdict(job) for job in jobs],
         "applications": [_application_payload(result) for result in results],
         "application_summary": application_summary,
         "output_dir": str(Path(config.application.data_dir).resolve()),
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": generated_at,
         "trigger": trigger,
+        "improved_resume": improved_resume,
         "portal_submission_note": (
             "Portal applications are prepared as drafts or recruiter emails. "
             "Authenticated LinkedIn/Naukri submission remains adapter-gated because those portals can require login, CAPTCHA, OTP, and screening answers."
@@ -578,6 +581,44 @@ def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user
     if user_email:
         result["run_id"] = record_run(user_email, result)
     return result
+
+
+@app.get("/api/runs/{run_id}/improved-resume")
+def download_improved_resume(
+    run_id: int,
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+):
+    user_email = require_user(job_agent_session)
+    run = next((item for item in latest_runs(user_email, limit=20) if int(item.get("id", 0)) == run_id), None)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    payload = run.get("payload") or {}
+    improved = payload.get("improved_resume") or {}
+    uri = improved.get("docx_uri") or ""
+    if uri:
+        signed_url = presigned_download_url(uri)
+        if signed_url:
+            return RedirectResponse(signed_url, status_code=303)
+    path = Path(improved.get("docx_path") or "")
+    if path.exists() and path.is_file():
+        return FileResponse(
+            path,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=path.name,
+        )
+    raise HTTPException(status_code=404, detail="Improved resume artifact is not available for this run.")
+
+
+def _publish_improved_resume(improved_resume: dict[str, str], user_email: str, generated_at: str) -> dict[str, str]:
+    published = dict(improved_resume)
+    prefix = f"artifacts/{normalize_email(user_email)}/{generated_at}/improved_resume"
+    docx_path = improved_resume.get("docx_path")
+    if docx_path:
+        published["docx_uri"] = upload_file(docx_path, prefix)
+    pdf_path = improved_resume.get("pdf_path")
+    if pdf_path:
+        published["pdf_uri"] = upload_file(pdf_path, prefix)
+    return published
 
 
 def _application_payload(result) -> dict:
@@ -763,6 +804,12 @@ def _run_history_item(run: dict) -> dict:
         "jobs": run.get("job_count", 0),
         "applications": run.get("application_summary") or {},
     }
+
+
+def _run_with_payload_id(run: dict) -> dict:
+    payload = dict(run.get("payload") or {})
+    payload.setdefault("run_id", run.get("id"))
+    return {**run, "payload": payload}
 
 
 def build_config_from_form(
@@ -1095,6 +1142,9 @@ def _page(user_email: str, profile: dict) -> str:
     .status-pill.error { background: #fef3f2; color: #b42318; }
     .metric { display: inline-flex; align-items: baseline; gap: 7px; padding: 10px 12px; border: 1px solid #dfe4ee; border-radius: 7px; margin: 0 8px 8px 0; background: #fbfcfe; }
     .metric strong { font-size: 26px; }
+    .download-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0 12px; }
+    .download-button { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 9px 12px; border-radius: 7px; background: var(--blue); color: #ffffff; text-decoration: none; font-weight: 850; box-shadow: 0 10px 24px rgba(23, 92, 211, 0.2); }
+    .download-button:hover { filter: brightness(1.04); }
     .history-list { grid-column: 1 / -1; margin: 2px 0 0; padding: 8px; list-style: none; border: 1px solid #dfe6f0; border-radius: 6px; background: rgba(255, 255, 255, 0.82); }
     .history-list li { margin: 0; font-size: 11px; line-height: 1.4; }
     .result-section { margin-top: 18px; padding: 16px; border: 1px solid rgba(225, 232, 242, 0.92); border-radius: 8px; background: rgba(255, 255, 255, 0.84); box-shadow: 0 12px 32px rgba(29, 41, 57, 0.07); }
@@ -1339,11 +1389,13 @@ def _page(user_email: str, profile: dict) -> str:
       const resultLabel = source === 'scheduled'
         ? `<p class="muted">Showing latest scheduled run from ${escapeHtml(payload.generated_at || 'the scheduler')}.</p>`
         : '';
+      const improvedResumeAction = improvedResumeDownload(payload);
       summary.className = '';
       summary.innerHTML = `
         <span class="metric"><strong>${report.score}</strong><span>/100 ATS</span></span>
         <span class="metric"><strong>${payload.jobs.length}</strong><span>jobs</span></span>
         <span class="metric"><strong>${appSummary.drafted || 0}</strong><span>drafts ready</span></span>
+        ${improvedResumeAction}
         ${resultLabel}
         <p class="muted">Outputs: ${payload.output_dir}</p>
         <p class="muted">${payload.portal_submission_note}</p>
@@ -1355,6 +1407,7 @@ def _page(user_email: str, profile: dict) -> str:
       details.innerHTML = `
         <section class="result-section">
           <h3>Resume Signals</h3>
+          ${improvedResumeAction || '<p class="muted">Run the agent to generate an ATS-improved resume download.</p>'}
           <div class="result-grid">
             <div><strong>Resume Improvements</strong><ul class="insight-list">${improvements || '<li>No major improvements found.</li>'}</ul></div>
             <div><strong>Missing Keywords</strong><ul class="insight-list">${missing || '<li>No configured keywords are missing.</li>'}</ul></div>
@@ -1368,6 +1421,15 @@ def _page(user_email: str, profile: dict) -> str:
           <h3>Reusable Draft Message</h3>
           <div class="draft-grid">${draftTemplate ? draftCard(draftTemplate) : '<p class="muted">No draft message was generated for this run.</p>'}</div>
         </section>
+      `;
+    }
+    function improvedResumeDownload(payload) {
+      if (!payload.improved_resume || !payload.run_id) return '';
+      return `
+        <div class="download-actions">
+          <a class="download-button" href="/api/runs/${encodeURIComponent(payload.run_id)}/improved-resume">Download Improved Resume</a>
+          <span class="muted">ATS-friendly DOCX generated from missing keywords and improvement suggestions.</span>
+        </div>
       `;
     }
     function buildDraftTemplate(applications) {

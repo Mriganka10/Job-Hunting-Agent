@@ -4,6 +4,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 import job_hunting_agent.web as web
+from job_hunting_agent.db import record_run
 from job_hunting_agent.models import ApplicationResult, JobLead
 from job_hunting_agent.web import (
     APP_SECRET,
@@ -114,6 +115,7 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "function shouldRenderResult" in response.text
     assert "result.generated_at > activeResult.generatedAt" in response.text
     assert "Showing latest scheduled run" in response.text
+    assert "Download Improved Resume" in response.text
     assert "Reusable Draft Message" in response.text
     assert "[Company Name]" in response.text
     assert "copy-draft" in response.text
@@ -149,6 +151,32 @@ def test_authenticated_run_history_endpoint_returns_runs() -> None:
     assert response.status_code == 200
     assert "runs" in response.json()
     assert len(response.json()["runs"]) <= 1
+
+
+def test_improved_resume_download_requires_run_owner(tmp_path: Path) -> None:
+    owner_email = f"resume-owner-{uuid4().hex}@example.com"
+    other_email = f"resume-other-{uuid4().hex}@example.com"
+    docx_path = tmp_path / "improved.docx"
+    docx_path.write_bytes(b"docx bytes")
+    run_id = record_run(
+        owner_email,
+        {
+            "trigger": "manual",
+            "generated_at": "2026-07-29T10:00:00",
+            "ats_report": {"score": 81},
+            "jobs": [],
+            "application_summary": {},
+            "output_dir": str(tmp_path),
+            "payload": {},
+            "improved_resume": {"docx_path": str(docx_path)},
+        },
+    )
+
+    owner = authenticated_client(owner_email)
+    other = authenticated_client(other_email)
+
+    assert owner.get(f"/api/runs/{run_id}/improved-resume").status_code == 200
+    assert other.get(f"/api/runs/{run_id}/improved-resume").status_code == 404
 
 
 def test_profile_values_are_isolated_by_authenticated_email() -> None:

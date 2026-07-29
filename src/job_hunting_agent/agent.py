@@ -7,6 +7,7 @@ from .models import ApplicationResult, AtsReport, JobLead, Resume
 from .portals import build_search_intent, get_adapters
 from .reports import write_ats_report, write_run_summary
 from .resume import parse_resume
+from .resume_builder import write_improved_resume
 
 
 class JobHuntingAgent:
@@ -27,11 +28,12 @@ class JobHuntingAgent:
             jobs.extend(adapter.search(intent, self.config.search, self.config.profile))
         return resume, report, _dedupe_jobs(jobs)
 
-    def run(self, resume_path: str) -> tuple[AtsReport, list[JobLead], list[ApplicationResult]]:
+    def run(self, resume_path: str) -> tuple[AtsReport, list[JobLead], list[ApplicationResult], dict[str, str]]:
         resume, report, jobs = self.search(resume_path)
+        improved_resume = write_improved_resume(resume, report, self.config.profile, self.config.application.data_dir)
         results = apply_to_jobs(jobs, resume, report, self.config)
         write_run_summary(resume, report, jobs, results, self.config.application.data_dir)
-        return report, jobs, results
+        return report, jobs, results, improved_resume
 
 
 def _dedupe_jobs(jobs: list[JobLead]) -> list[JobLead]:

@@ -54,10 +54,12 @@ def main() -> None:
 
 
 def _run_once(agent: JobHuntingAgent, resume_path: str) -> None:
-    report, jobs, results = agent.run(resume_path)
+    report, jobs, results, improved_resume = agent.run(resume_path)
     print(f"ATS score: {report.score}/100")
     print(f"Jobs discovered: {len(jobs)}")
     print(f"Application actions: {len(results)}")
+    if improved_resume.get("docx_path"):
+        print(f"Improved resume: {improved_resume['docx_path']}")
     for result in results:
         print(f"- {result.status}: {result.job.title} ({result.job.portal}) -> {result.detail}")
 

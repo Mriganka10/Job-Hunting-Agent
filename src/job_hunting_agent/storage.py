@@ -40,6 +40,17 @@ def download_file(uri: str, target_dir: str | Path) -> Path:
     return target
 
 
+def presigned_download_url(uri: str, expires_in: int = 900) -> str:
+    if not uri.startswith("s3://"):
+        return ""
+    bucket, key = _split_s3_uri(uri)
+    return _client().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=expires_in,
+    )
+
+
 def mirror_artifacts(data_dir: str | Path, user_email: str, generated_at: str) -> list[str]:
     if not is_s3_enabled():
         return []
