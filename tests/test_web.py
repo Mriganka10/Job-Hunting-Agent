@@ -116,6 +116,8 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "result.generated_at > activeResult.generatedAt" in response.text
     assert "Showing latest scheduled run" in response.text
     assert "Download Final ATS Resume" in response.text
+    assert "Mock Interview" in response.text
+    assert "/mock-interview" in response.text
     assert "Reusable Draft Message" in response.text
     assert "[Company Name]" in response.text
     assert "copy-draft" in response.text
@@ -151,6 +153,53 @@ def test_authenticated_run_history_endpoint_returns_runs() -> None:
     assert response.status_code == 200
     assert "runs" in response.json()
     assert len(response.json()["runs"]) <= 1
+
+
+def test_mock_interview_page_and_api_are_personalized() -> None:
+    email = f"mock-{uuid4().hex}@example.com"
+    client = authenticated_client(email)
+    response = client.post(
+        "/api/scheduler/start",
+        data={
+            "daily_at": "23:45",
+            "daily_timezone": "Asia/Kolkata",
+            "name": "Mock Candidate",
+            "target_roles": "Data Engineer, Machine Learning Engineer",
+            "locations": "Bengaluru, Remote",
+            "skills": "Python, SQL, Spark, AWS, Machine Learning",
+            "application_mode": "draft",
+        },
+        files={"resume": ("resume.txt", b"Python SQL Spark AWS Machine Learning", "text/plain")},
+    )
+    assert response.status_code == 200
+
+    page = client.get("/mock-interview")
+    assert page.status_code == 200
+    assert "Mock Interview Questions" in page.text
+    assert "/api/mock-interview/questions" in page.text
+
+    questions = client.get("/api/mock-interview/questions")
+    assert questions.status_code == 200
+    payload = questions.json()
+    assert "Data Engineer" in payload["roles"]
+    assert "Spark" in payload["skills"]
+    assert payload["question_count"] >= 12
+    rendered = " ".join(
+        question
+        for group in payload["groups"]
+        for question in group["questions"]
+    )
+    assert "Spark shuffle" in rendered
+    assert "RAG-style assistant" in rendered
+
+    assert client.post("/api/scheduler/stop").status_code == 200
+
+
+def test_mock_interview_requires_authenticated_user() -> None:
+    client = TestClient(app)
+
+    assert client.get("/mock-interview", follow_redirects=False).status_code == 303
+    assert client.get("/api/mock-interview/questions").status_code == 401
 
 
 def test_improved_resume_download_requires_run_owner(tmp_path: Path) -> None:

@@ -399,7 +399,7 @@ def _project_account_lines(text: str) -> list[str]:
             continue
         value = _clean_sentence(match.group(1))
         if value and value.lower() not in {"gft", "corporate technology solution"}:
-            accounts.append(f"{value}: project/account experience referenced in professional experience.")
+            accounts.append(f"{value}: delivered technology solutions, data workflows, and stakeholder-facing outcomes in a client project/account environment.")
     return _dedupe_lines(accounts)[:6]
 
 

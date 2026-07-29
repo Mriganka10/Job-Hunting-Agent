@@ -370,6 +370,14 @@ def index(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COO
     return HTMLResponse(_page(user_email, _profile_for_user(user_email)))
 
 
+@app.get("/mock-interview", response_class=HTMLResponse)
+def mock_interview_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
+    user_email = current_user_email(job_agent_session)
+    if not user_email:
+        return RedirectResponse("/login", status_code=303)
+    return HTMLResponse(_mock_interview_page(user_email))
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
     if current_user_email(job_agent_session):
@@ -447,6 +455,15 @@ def dashboard(job_agent_session: str | None = Cookie(default=None, alias=SESSION
 def runs(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
     user_email = require_user(job_agent_session)
     return {"runs": [_run_with_payload_id(run) for run in latest_runs(user_email, limit=1)]}
+
+
+@app.get("/api/mock-interview/questions")
+def mock_interview_questions(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    profile = _profile_for_user(user_email)
+    latest = next(iter(latest_runs(user_email, limit=1)), None)
+    payload = (latest or {}).get("payload") or {}
+    return _mock_interview_payload(profile, payload)
 
 
 @app.post("/api/run")
@@ -809,6 +826,119 @@ def _run_with_payload_id(run: dict) -> dict:
     return {**run, "payload": payload}
 
 
+def _mock_interview_payload(profile: dict, latest_payload: dict | None = None) -> dict:
+    latest_payload = latest_payload or {}
+    roles = _split_csv(profile.get("target_roles", ""))
+    skills = _split_csv(profile.get("skills", ""))
+    if latest_payload.get("ats_report"):
+        skills = _ordered_unique((*skills, *tuple(latest_payload.get("ats_report", {}).get("missing_keywords") or ())))
+    roles = roles or tuple(latest_payload.get("ats_report", {}).get("target_roles") or ()) or ("Data Engineer",)
+    skills = skills or ("Python", "SQL", "Spark", "AWS")
+    questions = _mock_interview_questions_for(roles, skills)
+    return {
+        "roles": roles,
+        "skills": skills,
+        "question_count": sum(len(group["questions"]) for group in questions),
+        "groups": questions,
+    }
+
+
+def _mock_interview_questions_for(roles: tuple[str, ...], skills: tuple[str, ...]) -> list[dict]:
+    skill_text = " ".join(skills).lower()
+    role_text = " ".join(roles).lower()
+    primary_role = roles[0] if roles else "target role"
+    groups: list[dict] = [
+        {
+            "title": "Role And Project Deep Dive",
+            "tag": primary_role,
+            "questions": [
+                f"Walk me through your strongest project for a {primary_role} role. What business problem did it solve, what tradeoffs did you make, and how did you measure success?",
+                "Pick one production issue from your resume. How did you identify the root cause, communicate status, and prevent recurrence?",
+                "Explain a recent architecture decision where you balanced scalability, cost, delivery timeline, and maintainability.",
+            ],
+        },
+        {
+            "title": "SQL And Python",
+            "tag": "Core coding",
+            "questions": [
+                "Write a SQL query to identify duplicate customer records, keep the latest record, and explain how you would index the table.",
+                "How would you optimize a slow SQL query with joins, aggregations, and date filters on a large fact table?",
+                "In Python, how would you validate, transform, and load a mixed CSV/JSON feed while handling bad records and retries?",
+            ],
+        },
+        {
+            "title": "Data Engineering System Design",
+            "tag": "Pipelines",
+            "questions": [
+                "Design an end-to-end batch pipeline that ingests files, validates schema, handles late-arriving data, and publishes curated datasets.",
+                "How would you implement data quality checks, observability, lineage, and alerting for a critical banking data workflow?",
+                "Explain how you would backfill two years of data without breaking downstream reports or SLAs.",
+            ],
+        },
+    ]
+    if any(term in skill_text for term in ("spark", "scala", "pyspark", "hadoop", "hive", "sqoop", "databricks")):
+        groups.append(
+            {
+                "title": "Spark, Scala, And Big Data",
+                "tag": "Distributed data",
+                "questions": [
+                    "Explain Spark shuffle, partitioning, and data skew. How would you debug and fix a job that suddenly became slow?",
+                    "When would you use broadcast joins, bucketing, caching, or adaptive query execution in Spark?",
+                    "How would you design a Spark pipeline for CSV, JSON, and Parquet data with schema evolution and replay support?",
+                    "Compare DataFrames, RDDs, and Spark SQL for maintainability and performance in a production pipeline.",
+                ],
+            }
+        )
+    if any(term in skill_text for term in ("aws", "azure", "gcp", "cloud", "databricks", "jenkins", "autosys")):
+        groups.append(
+            {
+                "title": "Cloud, Scheduling, And DevOps",
+                "tag": "Production readiness",
+                "questions": [
+                    "How would you deploy a data pipeline with environment-specific configuration, secrets management, and rollback support?",
+                    "How do you monitor scheduled jobs and distinguish data failures from infrastructure failures?",
+                    "Explain how you would design cloud storage zones for raw, curated, and consumption-ready datasets.",
+                ],
+            }
+        )
+    if any(term in skill_text or term in role_text for term in ("machine learning", "ml", "rag", "llm", "model", "analytics")):
+        groups.append(
+            {
+                "title": "Analytics, ML, And GenAI",
+                "tag": "Current market focus",
+                "questions": [
+                    "How would you prepare features, avoid leakage, and evaluate a machine learning model for a business workflow?",
+                    "Explain how you would productionize a model with monitoring for drift, latency, quality, and retraining triggers.",
+                    "For a RAG-style assistant, how would you design chunking, retrieval evaluation, access control, and hallucination checks?",
+                ],
+            }
+        )
+    groups.append(
+        {
+            "title": "Behavioral And Leadership",
+            "tag": "Client delivery",
+            "questions": [
+                "Describe a time you led multiple stakeholders or vendors through an ambiguous delivery problem.",
+                "Tell me about a time you disagreed with an architecture or implementation approach. How did you resolve it?",
+                "How do you explain a technical failure or delivery risk to a non-technical stakeholder?",
+            ],
+        }
+    )
+    return groups
+
+
+def _ordered_unique(values: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        key = cleaned.lower()
+        if cleaned and key not in seen:
+            seen.add(key)
+            result.append(cleaned)
+    return tuple(result)
+
+
 def build_config_from_form(
     *,
     name: str,
@@ -1015,6 +1145,96 @@ def _login_page() -> str:
 </html>"""
 
 
+def _mock_interview_page(user_email: str) -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mock Interview Questions - Job Hunting Agent</title>
+  <style>
+    :root {{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#142033; --muted:#667085; --blue:#175cd3; --line:#d8e0ec; --green:#087443; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin:0; min-height:100vh; color:var(--ink); background: linear-gradient(120deg, rgba(10, 31, 61, .90), rgba(10, 31, 61, .62)), url('/static/job-search-hero.png'); background-size: cover; background-attachment: fixed; }}
+    .topbar {{ width:min(1180px, calc(100% - 48px)); margin:0 auto; padding:18px 0; display:flex; justify-content:space-between; gap:12px; align-items:center; color:#fff; }}
+    .topbar a, .topbar button {{ min-height:38px; border:0; border-radius:7px; padding:9px 13px; font-weight:850; text-decoration:none; cursor:pointer; }}
+    .topbar a {{ background:rgba(255,255,255,.94); color:#152238; }}
+    .topbar form {{ margin:0; }}
+    .topbar button {{ background:#175cd3; color:#fff; }}
+    .user-chip {{ padding:8px 12px; border:1px solid rgba(255,255,255,.32); border-radius:999px; background:rgba(255,255,255,.14); font-size:13px; font-weight:800; }}
+    main {{ width:min(1180px, calc(100% - 48px)); margin:20px auto 48px; }}
+    .hero-panel {{ display:grid; grid-template-columns:minmax(280px, 1fr) 320px; gap:24px; align-items:end; padding:28px; border:1px solid rgba(255,255,255,.28); border-radius:8px; background:rgba(255,255,255,.92); box-shadow:0 24px 70px rgba(0,0,0,.26); backdrop-filter:blur(18px); }}
+    h1 {{ margin:8px 0 10px; font-size:clamp(32px, 5vw, 54px); line-height:1.03; letter-spacing:0; }}
+    .eyebrow {{ display:inline-flex; padding:7px 10px; border-radius:999px; color:#175cd3; background:#eaf2ff; font-size:13px; font-weight:900; }}
+    .muted {{ color:var(--muted); line-height:1.55; }}
+    .prep-card {{ padding:18px; border-radius:8px; background:linear-gradient(180deg,#f8fbff,#eef5ff); border:1px solid #d8e7ff; }}
+    .prep-card strong {{ display:block; font-size:34px; line-height:1; }}
+    .chips {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }}
+    .chip {{ display:inline-flex; align-items:center; min-height:30px; padding:6px 10px; border-radius:999px; background:#fff; border:1px solid var(--line); color:#344054; font-size:12px; font-weight:800; }}
+    .grid {{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:16px; margin-top:20px; }}
+    .group {{ border:1px solid rgba(216,224,236,.9); border-radius:8px; background:rgba(255,255,255,.94); padding:18px; box-shadow:0 16px 40px rgba(16,24,40,.14); }}
+    .group-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:10px; }}
+    h2 {{ margin:0; font-size:20px; }}
+    .tag {{ display:inline-flex; min-height:26px; align-items:center; padding:5px 9px; border-radius:999px; background:#ecfdf3; color:#087443; font-size:12px; font-weight:900; white-space:nowrap; }}
+    ol {{ margin:0; padding-left:22px; }}
+    li {{ margin:10px 0; line-height:1.45; }}
+    .empty {{ padding:20px; border:1px dashed #b8c5d8; border-radius:8px; background:rgba(255,255,255,.88); }}
+    @media (max-width: 820px) {{ .hero-panel, .grid {{ grid-template-columns:1fr; }} .topbar {{ width:min(100% - 32px, 720px); flex-wrap:wrap; }} main {{ width:min(100% - 32px, 720px); }} }}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="user-chip">Signed in as {_escape_html(user_email)}</span>
+    <div>
+      <a href="/">Back to Dashboard</a>
+      <form style="display:inline" method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
+    </div>
+  </div>
+  <main>
+    <section class="hero-panel">
+      <div>
+        <span class="eyebrow">Interview preparation</span>
+        <h1>Mock Interview Questions</h1>
+        <p class="muted">Role-specific practice questions based on your saved target roles, skills, and latest run signals. Use these to rehearse technical depth, system design, and project storytelling.</p>
+        <div id="chips" class="chips"></div>
+      </div>
+      <aside class="prep-card">
+        <strong id="question-count">0</strong>
+        <span class="muted">questions ready for practice</span>
+      </aside>
+    </section>
+    <section id="question-grid" class="grid" aria-live="polite"></section>
+  </main>
+  <script>
+    const grid = document.getElementById('question-grid');
+    const chips = document.getElementById('chips');
+    const count = document.getElementById('question-count');
+    function escapeHtml(value) {{
+      return String(value).replace(/[&<>"']/g, (char) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}}[char]));
+    }}
+    async function loadQuestions() {{
+      const response = await fetch('/api/mock-interview/questions');
+      const payload = await response.json();
+      if (!response.ok) {{
+        grid.innerHTML = `<div class="empty">Unable to load questions.</div>`;
+        return;
+      }}
+      count.textContent = payload.question_count || 0;
+      const allChips = [...(payload.roles || []), ...(payload.skills || []).slice(0, 10)];
+      chips.innerHTML = allChips.map((item) => `<span class="chip">${{escapeHtml(item)}}</span>`).join('');
+      grid.innerHTML = (payload.groups || []).map((group) => `
+        <article class="group">
+          <div class="group-head"><h2>${{escapeHtml(group.title)}}</h2><span class="tag">${{escapeHtml(group.tag)}}</span></div>
+          <ol>${{(group.questions || []).map((question) => `<li>${{escapeHtml(question)}}</li>`).join('')}}</ol>
+        </article>
+      `).join('') || '<div class="empty">Add target roles and skills on the dashboard to personalize questions.</div>';
+    }}
+    loadQuestions();
+  </script>
+</body>
+</html>"""
+
+
 def _page(user_email: str, profile: dict) -> str:
     page = """<!doctype html>
 <html lang="en">
@@ -1124,6 +1344,7 @@ def _page(user_email: str, profile: dict) -> str:
     .workspace-header { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(280px, 340px); gap: 16px; align-items: start; margin-bottom: 20px; }
     .results-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
     .results-header h2 { margin: 0; font-size: 26px; letter-spacing: 0; }
+    .panel-link { display: inline-flex; align-items: center; min-height: 34px; padding: 7px 10px; border-radius: 7px; background: #edf4ff; color: var(--blue); text-decoration: none; font-size: 13px; font-weight: 900; white-space: nowrap; }
     .status-pill { display: inline-flex; align-items: center; min-height: 30px; padding: 6px 10px; border-radius: 999px; background: #ecfdf3; color: var(--green); font-size: 12px; font-weight: 850; white-space: nowrap; }
     .empty-state { display: grid; place-items: center; min-height: 360px; border: 1px dashed #cbd5e1; border-radius: 8px; background: #f8fafc; text-align: center; padding: 24px; }
     .empty-visual { width: 118px; height: 90px; margin-bottom: 14px; border-radius: 8px; background: #ffffff; border: 1px solid #d8e0ec; box-shadow: 0 10px 24px rgba(29, 41, 57, 0.08); position: relative; }
@@ -1141,6 +1362,7 @@ def _page(user_email: str, profile: dict) -> str:
     .metric strong { font-size: 26px; }
     .download-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0 12px; }
     .download-button { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 9px 12px; border-radius: 7px; background: var(--blue); color: #ffffff; text-decoration: none; font-weight: 850; box-shadow: 0 10px 24px rgba(23, 92, 211, 0.2); }
+    .download-button.secondary-link { background: #394150; box-shadow: none; }
     .download-button:hover { filter: brightness(1.04); }
     .history-list { grid-column: 1 / -1; margin: 2px 0 0; padding: 8px; list-style: none; border: 1px solid #dfe6f0; border-radius: 6px; background: rgba(255, 255, 255, 0.82); }
     .history-list li { margin: 0; font-size: 11px; line-height: 1.4; }
@@ -1269,6 +1491,7 @@ def _page(user_email: str, profile: dict) -> str:
             <h2>Run Results</h2>
             <p class="muted">ATS score, role matches, missing keywords, and draft actions appear here.</p>
           </div>
+          <a class="panel-link" href="/mock-interview">Mock Interview</a>
         </div>
         <aside class="scheduler-panel" aria-label="Daily scheduler status">
           <div class="scheduler-panel-head"><h3>Daily Automation</h3><span class="status-pill">Ready</span></div>
@@ -1424,6 +1647,7 @@ def _page(user_email: str, profile: dict) -> str:
       return `
         <div class="download-actions">
           <a class="download-button" href="/api/runs/${encodeURIComponent(payload.run_id)}/improved-resume">Download Final ATS Resume</a>
+          <a class="download-button secondary-link" href="/mock-interview">Mock Interview Questions</a>
           <span class="muted">Single-column DOCX resume using standard ATS section headings.</span>
         </div>
       `;

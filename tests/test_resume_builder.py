@@ -95,6 +95,8 @@ def test_write_improved_resume_preserves_all_detected_experience_entries(tmp_pat
     assert "Associate" in text
     assert "Consultant" in text
     assert "Software Engineer" in text
+    assert "delivered technology solutions, data workflows, and stakeholder-facing outcomes" in text
+    assert "experience referenced in professional experience" not in text
 
 
 def test_write_improved_resume_keeps_metadata_out_of_achievements_and_languages(tmp_path: Path) -> None:
