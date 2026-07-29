@@ -136,7 +136,7 @@ def _configure_document(document) -> None:
 
 
 def _experience_items(text: str, target_roles: list[str]) -> list[str]:
-    entries = _structured_experience_entries(text)
+    entries = [entry for entry in _structured_experience_entries(text) if entry["company"] or entry["dates"]]
     if entries:
         items: list[str] = []
         for entry in entries[:4]:
@@ -147,7 +147,7 @@ def _experience_items(text: str, target_roles: list[str]) -> list[str]:
                 items.append(f"META::{company_meta}")
             if entry["dates"]:
                 items.append(f"META::{entry['dates']}")
-            items.extend(f"BULLET::{bullet}" for bullet in entry["bullets"][:5])
+            items.extend(f"BULLET::{bullet}" for bullet in entry["bullets"][:7])
         if any(item.startswith("ROLE::") or item.startswith("META::") for item in items):
             return items
 
@@ -161,22 +161,37 @@ def _experience_items(text: str, target_roles: list[str]) -> list[str]:
 
 
 def _structured_experience_entries(text: str) -> list[dict[str, str | list[str]]]:
-    section = _section_text(text, ("professional experience", "work experience", "employment history", "career history", "experience"))
-    lines = _resume_lines(section or text)
+    lines = _experience_section_lines(text)
     entries: list[dict[str, str | list[str]]] = []
     current: dict[str, str | list[str]] | None = None
 
     for line in lines:
         lower = line.lower()
-        if lower in {"professional experience", "work experience", "employment history", "career history", "experience"}:
+        if lower in {"professional experience", "work experience", "employment history", "career history", "experience", "key result areas"}:
             continue
-        if lower in {"projects", "technical skills", "education", "certifications", "achievements", "languages", "profile summary"}:
+        if lower in {"personal details"}:
             break
+
+        timeline_match = _experience_timeline_match(line)
+        if timeline_match:
+            current = {
+                "title": timeline_match["title"],
+                "company": timeline_match["company"],
+                "location": timeline_match["location"],
+                "dates": timeline_match["dates"],
+                "bullets": [],
+            }
+            entries.append(current)
+            continue
 
         label_match = re.match(r"^(?:job title|designation|role|position)\s*[:\-]\s*(.+)$", line, flags=re.I)
         if label_match:
             current = _ensure_entry(entries, current)
-            current["title"] = _clean_sentence(label_match.group(1))
+            title = _clean_sentence(label_match.group(1))
+            if current["title"]:
+                current["bullets"].append(f"Project/Account: {title}")  # type: ignore[union-attr]
+            else:
+                current["title"] = title
             continue
 
         label_match = re.match(r"^(?:company|company name|employer|organization|organisation)\s*[:\-]\s*(.+)$", line, flags=re.I)
@@ -196,6 +211,11 @@ def _structured_experience_entries(text: str) -> list[dict[str, str | list[str]]
             current["dates"] = _clean_sentence(line)
             continue
 
+        if re.match(r"^(?:development tools?|database|key result areas?)\s*:", line, flags=re.I):
+            if current and len(_clean_sentence(line)) >= 20:
+                current["bullets"].append(_clean_sentence(line))  # type: ignore[union-attr]
+            continue
+
         if _looks_like_role(line):
             if current and (current["title"] or current["company"] or current["bullets"]):
                 current = None
@@ -210,10 +230,47 @@ def _structured_experience_entries(text: str) -> list[dict[str, str | list[str]]
             continue
 
         cleaned = _clean_sentence(line)
-        if current and len(cleaned) >= 35:
-            current["bullets"].append(_strengthen_action_verb(cleaned))  # type: ignore[union-attr]
+        if current and len(cleaned) >= 3:
+            _append_experience_bullet(current, _strengthen_action_verb(cleaned))
 
     return [entry for entry in entries if entry["title"] or entry["company"] or entry["bullets"]]
+
+
+def _experience_section_lines(text: str) -> list[str]:
+    lines = _resume_lines(text)
+    heading_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if line.lower() in {"professional experience", "work experience", "employment history", "career history"}
+    ]
+    if not heading_indexes:
+        return lines
+    start = heading_indexes[-1] + 1
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if lines[index].lower() in {"personal details", "education", "certifications", "languages"}:
+            end = index
+            break
+    return lines[start:end]
+
+
+def _experience_timeline_match(line: str) -> dict[str, str] | None:
+    parts = [_clean_sentence(part) for part in re.split(r"\s*\|\s*", line) if _clean_sentence(part)]
+    if len(parts) < 2 or not _looks_like_date_range(parts[0]):
+        return None
+    company = parts[1]
+    title = parts[2] if len(parts) >= 3 else ""
+    location = ""
+    company_location_match = re.match(r"(.+?),\s*([^,]+)$", company)
+    if company_location_match and not re.search(r"\b(?:ltd|limited|pvt|private|inc|corp|corporation)\b$", company, flags=re.I):
+        company = _clean_sentence(company_location_match.group(1))
+        location = _clean_sentence(company_location_match.group(2))
+    return {
+        "dates": parts[0],
+        "company": company,
+        "location": location,
+        "title": title,
+    }
 
 
 def _ensure_entry(
@@ -223,6 +280,28 @@ def _ensure_entry(
         current = {"title": "", "company": "", "location": "", "dates": "", "bullets": []}
         entries.append(current)
     return current
+
+
+def _append_experience_bullet(entry: dict[str, str | list[str]], line: str) -> None:
+    bullets = entry["bullets"]
+    if not isinstance(bullets, list):
+        return
+    previous = str(bullets[-1]) if bullets else ""
+    previous_is_metadata = bool(re.match(r"^(?:development tools?|database|title|project/account)\s*:", previous, flags=re.I))
+    is_continuation = bool(
+        bullets
+        and not previous_is_metadata
+        and (
+            line[:1].islower()
+            or line.lower().startswith(("and ", "or ", "within ", "requirements", "projects", "banking ", "creation "))
+            or len(str(bullets[-1])) < 80
+            or not previous.endswith((".", ":", ";"))
+        )
+    )
+    if is_continuation:
+        bullets[-1] = _clean_sentence(f"{bullets[-1]} {line}")
+    else:
+        bullets.append(line)
 
 
 def _section_text(text: str, headings: tuple[str, ...]) -> str:
@@ -248,6 +327,14 @@ def _resume_lines(text: str) -> list[str]:
 
 
 def _looks_like_role(line: str) -> bool:
+    if ":" in line or "," in line or "." in line or len(line.split()) > 8:
+        return False
+    if re.match(
+        r"^(?:actively|serving|played|efficiently|utilized|transformed|managed|developed|designed|contributed|implemented|defined|built|led|created|and)\b",
+        line,
+        flags=re.I,
+    ):
+        return False
     return bool(
         re.search(
             r"\b(engineer|developer|analyst|manager|consultant|architect|lead|specialist|administrator|scientist|associate)\b",
