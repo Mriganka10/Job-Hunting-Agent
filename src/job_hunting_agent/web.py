@@ -615,9 +615,6 @@ def _publish_improved_resume(improved_resume: dict[str, str], user_email: str, g
     docx_path = improved_resume.get("docx_path")
     if docx_path:
         published["docx_uri"] = upload_file(docx_path, prefix)
-    pdf_path = improved_resume.get("pdf_path")
-    if pdf_path:
-        published["pdf_uri"] = upload_file(pdf_path, prefix)
     return published
 
 
@@ -1395,7 +1392,6 @@ def _page(user_email: str, profile: dict) -> str:
         <span class="metric"><strong>${report.score}</strong><span>/100 ATS</span></span>
         <span class="metric"><strong>${payload.jobs.length}</strong><span>jobs</span></span>
         <span class="metric"><strong>${appSummary.drafted || 0}</strong><span>drafts ready</span></span>
-        ${improvedResumeAction}
         ${resultLabel}
         <p class="muted">Outputs: ${payload.output_dir}</p>
         <p class="muted">${payload.portal_submission_note}</p>
@@ -1407,7 +1403,7 @@ def _page(user_email: str, profile: dict) -> str:
       details.innerHTML = `
         <section class="result-section">
           <h3>Resume Signals</h3>
-          ${improvedResumeAction || '<p class="muted">Run the agent to generate an ATS-improved resume download.</p>'}
+          ${improvedResumeAction || '<p class="muted">Run the agent to prepare a final ATS-friendly resume download.</p>'}
           <div class="result-grid">
             <div><strong>Resume Improvements</strong><ul class="insight-list">${improvements || '<li>No major improvements found.</li>'}</ul></div>
             <div><strong>Missing Keywords</strong><ul class="insight-list">${missing || '<li>No configured keywords are missing.</li>'}</ul></div>
@@ -1427,8 +1423,8 @@ def _page(user_email: str, profile: dict) -> str:
       if (!payload.improved_resume || !payload.run_id) return '';
       return `
         <div class="download-actions">
-          <a class="download-button" href="/api/runs/${encodeURIComponent(payload.run_id)}/improved-resume">Download Improved Resume</a>
-          <span class="muted">ATS-friendly DOCX generated from missing keywords and improvement suggestions.</span>
+          <a class="download-button" href="/api/runs/${encodeURIComponent(payload.run_id)}/improved-resume">Download Final ATS Resume</a>
+          <span class="muted">Single-column DOCX resume using standard ATS section headings.</span>
         </div>
       `;
     }

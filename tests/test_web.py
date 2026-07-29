@@ -115,7 +115,7 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "function shouldRenderResult" in response.text
     assert "result.generated_at > activeResult.generatedAt" in response.text
     assert "Showing latest scheduled run" in response.text
-    assert "Download Improved Resume" in response.text
+    assert "Download Final ATS Resume" in response.text
     assert "Reusable Draft Message" in response.text
     assert "[Company Name]" in response.text
     assert "copy-draft" in response.text
