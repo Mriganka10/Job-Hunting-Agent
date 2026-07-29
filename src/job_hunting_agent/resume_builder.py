@@ -32,11 +32,12 @@ def write_improved_resume(resume: Resume, report: AtsReport, profile: CandidateP
 def _resume_sections(resume: Resume, report: AtsReport, profile: CandidateProfile) -> list[tuple[str, list[str]]]:
     target_roles = _ordered_terms((*profile.target_roles, *resume.inferred_roles))
     skills = _ordered_terms((*profile.skills, *resume.inferred_skills, *report.missing_keywords))
-    experience_lines = _experience_bullets(resume.text)
+    experience_lines = _experience_items(resume.text, target_roles)
+    experience_bullets = [item.removeprefix("BULLET::") for item in experience_lines if item.startswith("BULLET::")]
     education_lines = _education_lines(resume.text)
-    project_lines = _project_bullets(resume.text, experience_lines)
+    project_lines = _project_bullets(resume.text, experience_bullets)
     certifications = _certification_lines(resume.text)
-    achievements = _achievement_lines(resume.text, experience_lines)
+    achievements = _achievement_lines(resume.text, experience_bullets)
     languages = _language_lines(resume.text)
     technical_skill_lines = _technical_skill_lines(skills)
     year_text = _experience_years(resume.text)
@@ -80,6 +81,17 @@ def _write_docx(path: Path, sections: list[tuple[str, list[str]]]) -> None:
         for item in items:
             if heading in {"CONTACT", "PROFESSIONAL SUMMARY", "TECHNICAL SKILLS"}:
                 document.add_paragraph(item, style="ResumeBody")
+            elif heading == "PROFESSIONAL EXPERIENCE":
+                if item.startswith("ROLE::"):
+                    paragraph = document.add_paragraph(item.removeprefix("ROLE::"), style="ResumeBody")
+                    paragraph.runs[0].bold = True
+                elif item.startswith("META::"):
+                    document.add_paragraph(item.removeprefix("META::"), style="ResumeBody")
+                elif item.startswith("BULLET::"):
+                    paragraph = document.add_paragraph(_clean_sentence(item.removeprefix("BULLET::")), style="ResumeBullet")
+                    paragraph.paragraph_format.keep_together = True
+                else:
+                    document.add_paragraph(_clean_sentence(item), style="ResumeBody")
             else:
                 paragraph = document.add_paragraph(_clean_sentence(item), style="ResumeBullet")
                 paragraph.paragraph_format.keep_together = True
@@ -123,6 +135,147 @@ def _configure_document(document) -> None:
     styles["ResumeBullet"].paragraph_format.first_line_indent = Inches(-0.14)
 
 
+def _experience_items(text: str, target_roles: list[str]) -> list[str]:
+    entries = _structured_experience_entries(text)
+    if entries:
+        items: list[str] = []
+        for entry in entries[:4]:
+            if entry["title"]:
+                items.append(f"ROLE::{entry['title']}")
+            company_meta = " | ".join(part for part in (entry["company"], entry["location"]) if part)
+            if company_meta:
+                items.append(f"META::{company_meta}")
+            if entry["dates"]:
+                items.append(f"META::{entry['dates']}")
+            items.extend(f"BULLET::{bullet}" for bullet in entry["bullets"][:5])
+        if any(item.startswith("ROLE::") or item.startswith("META::") for item in items):
+            return items
+
+    bullets = _experience_bullets(text)
+    role = target_roles[0] if target_roles else "Relevant Professional Experience"
+    return [
+        f"ROLE::{role}",
+        "META::Company, location, and dates were not detected in the uploaded resume.",
+        *(f"BULLET::{bullet}" for bullet in bullets),
+    ]
+
+
+def _structured_experience_entries(text: str) -> list[dict[str, str | list[str]]]:
+    section = _section_text(text, ("professional experience", "work experience", "employment history", "career history", "experience"))
+    lines = _resume_lines(section or text)
+    entries: list[dict[str, str | list[str]]] = []
+    current: dict[str, str | list[str]] | None = None
+
+    for line in lines:
+        lower = line.lower()
+        if lower in {"professional experience", "work experience", "employment history", "career history", "experience"}:
+            continue
+        if lower in {"projects", "technical skills", "education", "certifications", "achievements", "languages", "profile summary"}:
+            break
+
+        label_match = re.match(r"^(?:job title|designation|role|position)\s*[:\-]\s*(.+)$", line, flags=re.I)
+        if label_match:
+            current = _ensure_entry(entries, current)
+            current["title"] = _clean_sentence(label_match.group(1))
+            continue
+
+        label_match = re.match(r"^(?:company|company name|employer|organization|organisation)\s*[:\-]\s*(.+)$", line, flags=re.I)
+        if label_match:
+            current = _ensure_entry(entries, current)
+            current["company"] = _clean_sentence(label_match.group(1))
+            continue
+
+        label_match = re.match(r"^(?:location)\s*[:\-]\s*(.+)$", line, flags=re.I)
+        if label_match:
+            current = _ensure_entry(entries, current)
+            current["location"] = _clean_sentence(label_match.group(1))
+            continue
+
+        if _looks_like_date_range(line):
+            current = _ensure_entry(entries, current)
+            current["dates"] = _clean_sentence(line)
+            continue
+
+        if _looks_like_role(line):
+            if current and (current["title"] or current["company"] or current["bullets"]):
+                current = None
+            current = _ensure_entry(entries, current)
+            current["title"] = _clean_sentence(line)
+            continue
+
+        if current and _looks_like_company_meta(line) and not current["company"]:
+            company, location = _split_company_meta(line)
+            current["company"] = company
+            current["location"] = location
+            continue
+
+        cleaned = _clean_sentence(line)
+        if current and len(cleaned) >= 35:
+            current["bullets"].append(_strengthen_action_verb(cleaned))  # type: ignore[union-attr]
+
+    return [entry for entry in entries if entry["title"] or entry["company"] or entry["bullets"]]
+
+
+def _ensure_entry(
+    entries: list[dict[str, str | list[str]]], current: dict[str, str | list[str]] | None
+) -> dict[str, str | list[str]]:
+    if current is None:
+        current = {"title": "", "company": "", "location": "", "dates": "", "bullets": []}
+        entries.append(current)
+    return current
+
+
+def _section_text(text: str, headings: tuple[str, ...]) -> str:
+    pattern = "|".join(re.escape(heading) for heading in headings)
+    match = re.search(
+        rf"\b(?:{pattern})\b(?P<body>.*?)(?=\b(?:projects|technical skills|education|certifications|achievements|languages|personal details)\b|$)",
+        text,
+        flags=re.I | re.S,
+    )
+    return match.group("body") if match else ""
+
+
+def _resume_lines(text: str) -> list[str]:
+    normalized = text.replace("\uf0b7", "\n• ")
+    normalized = re.sub(
+        r"\b(PROFESSIONAL EXPERIENCE|WORK EXPERIENCE|EMPLOYMENT HISTORY|CAREER HISTORY|PROJECTS|TECHNICAL SKILLS|EDUCATION|CERTIFICATIONS|ACHIEVEMENTS|LANGUAGES|PROFILE SUMMARY)\b",
+        r"\n\1\n",
+        normalized,
+        flags=re.I,
+    )
+    normalized = re.sub(r"\s*([•])\s*", r"\n\1 ", normalized)
+    return [_clean_sentence(line) for line in normalized.splitlines() if _clean_sentence(line)]
+
+
+def _looks_like_role(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(engineer|developer|analyst|manager|consultant|architect|lead|specialist|administrator|scientist|associate)\b",
+            line,
+            flags=re.I,
+        )
+    ) and len(line) <= 90
+
+
+def _looks_like_company_meta(line: str) -> bool:
+    return ("|" in line and len(line) <= 140) or bool(
+        re.search(r"\b(?:pvt|private|limited|ltd|inc|corp|corporation|technologies|solutions|systems|services|bank|consultancy)\b", line, flags=re.I)
+    )
+
+
+def _split_company_meta(line: str) -> tuple[str, str]:
+    parts = [_clean_sentence(part) for part in line.split("|", 1)]
+    return parts[0], parts[1] if len(parts) > 1 else ""
+
+
+def _looks_like_date_range(line: str) -> bool:
+    month = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
+    return bool(
+        re.search(rf"\b(?:{month})?\s*\d{{4}}\s*(?:-|–|to)\s*(?:present|current|(?:{month})?\s*\d{{4}})\b", line, flags=re.I)
+        or re.search(r"\b\d{4}\s*(?:-|–|to)\s*(?:present|current|\d{4})\b", line, flags=re.I)
+    )
+
+
 def _experience_bullets(text: str) -> list[str]:
     bullets = [_strengthen_action_verb(item) for item in _split_on_resume_bullets(text)]
     preferred = [
@@ -141,7 +294,7 @@ def _experience_bullets(text: str) -> list[str]:
 def _project_bullets(text: str, experience_lines: list[str]) -> list[str]:
     project_terms = ("project", "framework", "solution", "deployment", "jenkins", "autosys", "databricks")
     bullets = [
-        _strengthen_action_verb(item)
+        _strip_section_prefix(_strengthen_action_verb(item))
         for item in _split_on_resume_bullets(text)
         if any(term in item.lower() for term in project_terms)
     ]
@@ -250,6 +403,10 @@ def _split_on_resume_bullets(text: str) -> list[str]:
         return candidates
     sentences = re.split(r"(?<=[.!?])\s+", normalized)
     return [_clean_sentence(sentence) for sentence in sentences if len(_clean_sentence(sentence)) >= 45]
+
+
+def _strip_section_prefix(value: str) -> str:
+    return re.sub(r"^(?:projects?|professional experience|technical skills)\s+", "", value, flags=re.I).strip()
 
 
 def _strengthen_action_verb(value: str) -> str:

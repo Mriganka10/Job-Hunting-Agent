@@ -67,7 +67,9 @@ def parse_resume(path: str | Path) -> Resume:
 
 
 def normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+    normalized = "\n".join(line for line in lines if line)
+    return re.sub(r"\n{3,}", "\n\n", normalized).strip()
 
 
 def extract_skills(text: str) -> tuple[str, ...]:

@@ -9,7 +9,16 @@ from job_hunting_agent.resume_builder import write_improved_resume
 def test_write_improved_resume_creates_final_ats_docx(tmp_path: Path) -> None:
     resume = Resume(
         path="resume.txt",
-        text="Summary Python developer. Experience built APIs. Skills Python SQL.",
+        text=(
+            "PROFESSIONAL EXPERIENCE\n"
+            "Senior Data Engineer\n"
+            "Tata Consultancy Services | Bengaluru\n"
+            "Jan 2020 - Present\n"
+            "Built APIs and data pipelines using Python and SQL for analytics workflows.\n"
+            "Improved delivery quality by automating validation checks.\n"
+            "TECHNICAL SKILLS\n"
+            "Skills Python SQL."
+        ),
         inferred_skills=("Python", "SQL"),
         inferred_roles=("Python Developer",),
     )
@@ -35,6 +44,9 @@ def test_write_improved_resume_creates_final_ats_docx(tmp_path: Path) -> None:
     assert "PROFESSIONAL SUMMARY" in text
     assert "CORE SKILLS" in text
     assert "PROFESSIONAL EXPERIENCE" in text
+    assert "Senior Data Engineer" in text
+    assert "Tata Consultancy Services | Bengaluru" in text
+    assert "Jan 2020 - Present" in text
     assert "TECHNICAL SKILLS" in text
     assert "Programming Languages:" in text
     assert "Aws" in text
