@@ -52,6 +52,8 @@ OTP_TTL_MINUTES = int(os.getenv("JOB_AGENT_OTP_TTL_MINUTES", "10"))
 APP_SECRET = os.getenv("JOB_AGENT_SECRET_KEY", "local-dev-change-me")
 COOKIE_SECURE = os.getenv("JOB_AGENT_COOKIE_SECURE", "false").lower() == "true"
 DEV_RETURN_OTP = os.getenv("JOB_AGENT_DEV_RETURN_OTP", "true").lower() == "true"
+EMAIL_PROVIDER = os.getenv("JOB_AGENT_EMAIL_PROVIDER", "smtp").strip().lower()
+SES_REGION = os.getenv("JOB_AGENT_SES_REGION", os.getenv("AWS_REGION", "ap-south-1"))
 if COOKIE_SECURE and APP_SECRET == "local-dev-change-me":
     raise RuntimeError("Set JOB_AGENT_SECRET_KEY to a long random value before running with secure cookies.")
 
@@ -304,6 +306,8 @@ def _pad_b64(value: str) -> bytes:
 
 
 def _send_otp_email(email: str, otp: str) -> bool:
+    if EMAIL_PROVIDER == "ses":
+        return _send_otp_email_ses(email, otp)
     smtp_host = os.getenv("JOB_AGENT_SMTP_HOST", "")
     smtp_user = os.getenv("JOB_AGENT_SMTP_USERNAME", "")
     smtp_password = os.getenv("JOB_AGENT_SMTP_PASSWORD", "")
@@ -321,6 +325,41 @@ def _send_otp_email(email: str, otp: str) -> bool:
         smtp.login(smtp_user, smtp_password)
         smtp.send_message(message)
     return True
+
+
+def _send_otp_email_ses(email: str, otp: str) -> bool:
+    from_email = os.getenv("JOB_AGENT_SES_FROM", os.getenv("JOB_AGENT_SMTP_FROM", "")).strip()
+    if not from_email:
+        print(f"[job-agent] SES OTP delivery is not configured; OTP for {email}: {otp}")
+        return False
+
+    subject = "Your Job Hunting Agent sign-in code"
+    body = (
+        f"Your Job Hunting Agent OTP is {otp}.\n\n"
+        f"It expires in {OTP_TTL_MINUTES} minutes. If you did not request this code, you can ignore this email."
+    )
+    try:
+        client = _ses_client()
+        client.send_email(
+            FromEmailAddress=from_email,
+            Destination={"ToAddresses": [email]},
+            Content={
+                "Simple": {
+                    "Subject": {"Data": subject, "Charset": "UTF-8"},
+                    "Body": {"Text": {"Data": body, "Charset": "UTF-8"}},
+                }
+            },
+        )
+    except Exception as exc:
+        print(f"[job-agent] SES OTP delivery failed for {email}: {exc}")
+        return False
+    return True
+
+
+def _ses_client():
+    import boto3
+
+    return boto3.client("sesv2", region_name=SES_REGION)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -347,6 +386,8 @@ def request_otp(email: Annotated[str, Form()]) -> dict:
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_TTL_MINUTES)
     save_otp(normalized, _hash_otp(normalized, otp), expires_at)
     sent = _send_otp_email(normalized, otp)
+    if not sent and not DEV_RETURN_OTP:
+        raise HTTPException(status_code=503, detail="OTP email delivery is not configured or failed. Please try again later.")
     response = {
         "status": "sent",
         "email": normalized,

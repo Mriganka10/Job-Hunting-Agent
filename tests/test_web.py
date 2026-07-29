@@ -62,6 +62,40 @@ def test_login_page_contains_email_otp_flow() -> None:
     assert "/api/auth/request-otp" in response.text
 
 
+def test_request_otp_uses_ses_provider(monkeypatch) -> None:
+    sent_messages: list[dict] = []
+
+    class FakeSesClient:
+        def send_email(self, **kwargs):
+            sent_messages.append(kwargs)
+
+    monkeypatch.setattr(web, "EMAIL_PROVIDER", "ses")
+    monkeypatch.setattr(web, "SES_REGION", "ap-south-1")
+    monkeypatch.setenv("JOB_AGENT_SES_FROM", "no-reply@jobhuntingagent.in")
+    monkeypatch.setattr(web, "_ses_client", lambda: FakeSesClient())
+
+    client = TestClient(app)
+    response = client.post("/api/auth/request-otp", data={"email": "client@example.com"})
+
+    assert response.status_code == 200
+    assert response.json()["delivery"] == "email"
+    assert sent_messages[0]["FromEmailAddress"] == "no-reply@jobhuntingagent.in"
+    assert sent_messages[0]["Destination"] == {"ToAddresses": ["client@example.com"]}
+
+
+def test_request_otp_fails_closed_when_production_email_is_not_configured(monkeypatch) -> None:
+    monkeypatch.setattr(web, "EMAIL_PROVIDER", "ses")
+    monkeypatch.setattr(web, "DEV_RETURN_OTP", False)
+    monkeypatch.delenv("JOB_AGENT_SES_FROM", raising=False)
+    monkeypatch.delenv("JOB_AGENT_SMTP_FROM", raising=False)
+
+    client = TestClient(app)
+    response = client.post("/api/auth/request-otp", data={"email": "client@example.com"})
+
+    assert response.status_code == 503
+    assert "OTP email delivery" in response.json()["detail"]
+
+
 def test_home_page_contains_resume_and_profile_inputs() -> None:
     client = authenticated_client(f"fresh-{uuid4().hex}@example.com")
 
