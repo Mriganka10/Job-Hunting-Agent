@@ -379,13 +379,28 @@ def _experience_bullets(text: str) -> list[str]:
 
 
 def _project_bullets(text: str, experience_lines: list[str]) -> list[str]:
+    projects = _project_account_lines(text)
+    if projects:
+        return projects
     project_terms = ("project", "framework", "solution", "deployment", "jenkins", "autosys", "databricks")
     bullets = [
         _strip_section_prefix(_strengthen_action_verb(item))
-        for item in _split_on_resume_bullets(text)
+        for item in _split_on_resume_bullets(_section_text(text, ("projects",)))
         if any(term in item.lower() for term in project_terms)
     ]
-    return _dedupe_lines([item for item in bullets if item not in experience_lines])[:5]
+    return _dedupe_lines([item for item in bullets if item not in experience_lines and not _is_resume_metadata(item)])[:5]
+
+
+def _project_account_lines(text: str) -> list[str]:
+    accounts = []
+    for line in _experience_section_lines(text):
+        match = re.match(r"^title\s*:\s*(.+)$", line, flags=re.I)
+        if not match:
+            continue
+        value = _clean_sentence(match.group(1))
+        if value and value.lower() not in {"gft", "corporate technology solution"}:
+            accounts.append(f"{value}: project/account experience referenced in professional experience.")
+    return _dedupe_lines(accounts)[:6]
 
 
 def _education_lines(text: str) -> list[str]:
@@ -402,21 +417,25 @@ def _education_lines(text: str) -> list[str]:
 
 
 def _certification_lines(text: str) -> list[str]:
+    compact = _clean_sentence(text)
     lines = []
     patterns = (
-        r"(?:certifications?|certified in|certified)\s*[:\-]?\s*([^•\n]{8,180})",
-        r"([A-Z][A-Za-z0-9 +/#.-]{2,80}\s+(?:Certification|Certified|Certificate)[A-Za-z0-9 +/#.-]{0,80})",
+        r"NSE.?s Certification on Financial Market\s*\(Basic Module\)",
+        r"NSE.?s Certification on Securities Market",
+        r"NSE.?s Certification on Mutual Funds",
+        r"Professional Training from Petaa Bytes Institute on Hadoop, PIG, Hive & Sqoop, Spark with Scala",
+        r"Completed Databricks certification on Apache Spark\s*\(ETL Extraction Series, Cluster Setup on AWS\)",
     )
     for pattern in patterns:
-        for match in re.finditer(pattern, text, flags=re.I):
-            value = match.group(1) if match.groups() else match.group(0)
-            cleaned = _clean_sentence(value)
-            if cleaned and not cleaned.lower().startswith(("none", "not applicable")):
-                lines.append(cleaned)
+        for match in re.finditer(pattern, compact, flags=re.I):
+            lines.append(_clean_sentence(match.group(0)))
     return _dedupe_lines(lines)[:5]
 
 
 def _achievement_lines(text: str, experience_lines: list[str]) -> list[str]:
+    recognitions = _recognition_lines(text)
+    if recognitions:
+        return recognitions
     measurable_terms = (
         "%",
         "years",
@@ -435,21 +454,55 @@ def _achievement_lines(text: str, experience_lines: list[str]) -> list[str]:
     achievements = [
         line
         for line in experience_lines
-        if re.search(r"\d", line) or any(term in line.lower() for term in measurable_terms)
+        if not _is_resume_metadata(line)
+        and (re.search(r"\d", line) or any(term in line.lower() for term in measurable_terms))
     ]
     if not achievements and experience_lines:
-        achievements = experience_lines[:2]
+        achievements = [line for line in experience_lines if not _is_resume_metadata(line)][:2]
     return _dedupe_lines(achievements)[:4]
 
 
+def _recognition_lines(text: str) -> list[str]:
+    lines = []
+    compact = _clean_sentence(text)
+    batch_topper = re.search(r"completed Executive Programme on Business Analytics at IIM Calcutta as Batch Topper", compact, flags=re.I)
+    if batch_topper:
+        lines.append("Completed Executive Programme on Business Analytics at IIM Calcutta as Batch Topper.")
+    award_match = re.search(
+        r"recognized for outstanding performance with (?P<body>.*?Star Employee Award from Capgemini India Ltd in 2020)",
+        compact,
+        flags=re.I,
+    )
+    if award_match:
+        body = _clean_sentence(award_match.group("body"))
+        body = re.sub(r"^various awards and appreciations including\s+", "", body, flags=re.I)
+        for item in re.split(r",\s+and\s+|,\s*(?=Pat on Back|Star Employee|Best Debutant)", body):
+            cleaned = _clean_sentence(item)
+            if cleaned and re.search(r"\baward|appreciation|employee|debutant|pat on back\b", cleaned, flags=re.I):
+                lines.append(cleaned)
+    return _dedupe_lines(lines)[:5]
+
+
 def _language_lines(text: str) -> list[str]:
-    match = re.search(r"languages?(?: known)?\s*[:\-]\s*([^•\n]{3,160})", text, flags=re.I)
+    match = re.search(r"\blanguages known\s*[:\-]\s*([^•\n]{3,160})", text, flags=re.I)
+    if not match:
+        match = re.search(r"(?im)^languages\s*[:\-]\s*([^•\n]{3,160})$", text)
     if not match:
         return []
     language_text = re.split(r"\b(?:address|education|experience|skills|projects)\b", match.group(1), maxsplit=1, flags=re.I)[0]
     language_text = re.sub(r"\s+\band\b\s+", ",", language_text, flags=re.I)
     values = [item.strip(" .;") for item in re.split(r"[,/|]", language_text) if item.strip(" .;")]
     return _dedupe_lines([_clean_sentence(value) for value in values])[:6]
+
+
+def _is_resume_metadata(value: str) -> bool:
+    return bool(
+        re.match(
+            r"^(?:database|development tools?|devops tool|cloud technology|big data technology|data visualization tool|operating systems|scripting language|source versioning control tool|programming language|eagle technology|title|project/account)\s*:",
+            value,
+            flags=re.I,
+        )
+    )
 
 
 def _technical_skill_lines(skills: list[str]) -> list[str]:

@@ -95,3 +95,56 @@ def test_write_improved_resume_preserves_all_detected_experience_entries(tmp_pat
     assert "Associate" in text
     assert "Consultant" in text
     assert "Software Engineer" in text
+
+
+def test_write_improved_resume_keeps_metadata_out_of_achievements_and_languages(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text=(
+            "PROFILE SUMMARY\n"
+            "Successfully completed Executive Programme on Business Analytics at IIM Calcutta as Batch Topper.\n"
+            "Recognized for outstanding performance with Best Debutant Award from Hexaware Technologies in the year 2014-2015, "
+            "Pat on Back Award from a client in the year 2016, and Star Employee Award from Capgemini India Ltd in 2020.\n"
+            "CERTIFICATIONS\n"
+            "NSE’s Certification on Financial Market (Basic Module)\n"
+            "NSE’s Certification on Securities Market\n"
+            "Completed Databricks certification on Apache Spark (ETL Extraction Series, Cluster Setup on AWS)\n"
+            "TECHNICAL SKILLS\n"
+            "Database: Oracle 11G\n"
+            "Scripting Language: Unix Shell Script\n"
+            "WORK EXPERIENCE\n"
+            "December 2021 - Present | CitiCorp Services India Pvt. Ltd. | Officer\n"
+            "Database: Oracle 11G\n"
+            "Implemented Big Data Solutions using Spark with Scala and Parquet formats.\n"
+            "PERSONAL DETAILS\n"
+            "Languages Known: English, Hindi, and Bengali"
+        ),
+        inferred_skills=("Python", "SQL"),
+        inferred_roles=("Data Engineer",),
+    )
+    report = AtsReport(score=74, strengths=(), improvements=(), missing_keywords=())
+    profile = CandidateProfile(name="Mriganka Das", target_roles=("Data Engineer",), skills=("Python", "SQL"))
+
+    artifact = write_improved_resume(resume, report, profile, tmp_path)
+
+    paragraphs = [paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs if paragraph.text.strip()]
+    text = "\n".join(paragraphs)
+    achievements_start = paragraphs.index("ACHIEVEMENTS")
+    languages_start = paragraphs.index("LANGUAGES")
+    certifications_start = paragraphs.index("CERTIFICATIONS")
+    achievements = paragraphs[achievements_start + 1 : languages_start]
+    certifications = paragraphs[certifications_start + 1 : achievements_start]
+    languages = paragraphs[languages_start + 1 :]
+    assert "NSE’s Certification on Financial Market (Basic Module)" in certifications
+    assert "NSE’s Certification on Securities Market" in certifications
+    assert any("Completed Databricks certification on Apache Spark" in item for item in certifications)
+    assert any("Best Debutant Award" in item for item in achievements)
+    assert any("Batch Topper" in item for item in achievements)
+    assert all(not item.startswith("Database:") for item in achievements)
+    assert "SOFT SKILLS CERTIFICATIONS" not in certifications
+    assert "English" in languages
+    assert "Hindi" in languages
+    assert "Bengali" in languages
+    assert "Unix Shell Script" not in languages
+    assert "Scripting Language: Unix Shell Script" not in languages
+    assert "Scripting Language: Unix Shell Script" not in text.split("LANGUAGES", 1)[1]
