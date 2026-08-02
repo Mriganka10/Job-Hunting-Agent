@@ -27,10 +27,13 @@ from .db import (
     active_schedules,
     consume_valid_otp,
     disable_schedule,
+    email_verification,
+    ensure_user,
     init_db,
     latest_runs,
     normalize_email,
     record_run,
+    save_email_verification,
     save_user_profile,
     save_otp,
     save_schedule,
@@ -356,6 +359,49 @@ def _send_otp_email_ses(email: str, otp: str) -> bool:
     return True
 
 
+def _ses_sender_configured() -> bool:
+    return bool(os.getenv("JOB_AGENT_SES_FROM", os.getenv("JOB_AGENT_SMTP_FROM", "")).strip())
+
+
+def _ses_email_status(email: str) -> str:
+    try:
+        response = _ses_client().get_email_identity(EmailIdentity=normalize_email(email))
+        status = str(response.get("VerificationStatus") or "NOT_STARTED")
+    except Exception as exc:
+        print(f"[job-agent] SES verification status check failed for {email}: {exc}")
+        status = "UNKNOWN"
+    save_email_verification(email, status, detail="SES identity status checked.")
+    return status
+
+
+def _ses_email_verified(email: str) -> bool:
+    if _ses_email_status(email).upper() == "SUCCESS":
+        ensure_user(normalize_email(email))
+        return True
+    return False
+
+
+def _start_ses_email_verification(email: str) -> dict:
+    normalized = normalize_email(email)
+    if EMAIL_PROVIDER != "ses":
+        save_email_verification(normalized, "SUCCESS", detail="Non-SES local provider; verification bypassed for local/dev mode.")
+        ensure_user(normalized)
+        return {"status": "verified", "email": normalized, "provider": EMAIL_PROVIDER}
+    try:
+        _ses_client().create_email_identity(EmailIdentity=normalized)
+        save_email_verification(normalized, "PENDING", detail="AWS SES verification email requested.")
+    except Exception as exc:
+        status = _ses_email_status(normalized)
+        if status.upper() == "SUCCESS":
+            ensure_user(normalized)
+            return {"status": "verified", "email": normalized, "provider": "ses"}
+        save_email_verification(normalized, status, detail=f"SES verification request did not complete: {exc}")
+        if status.upper() in {"PENDING", "TEMPORARY_FAILURE"}:
+            return {"status": "pending", "email": normalized, "provider": "ses", "ses_status": status}
+        raise HTTPException(status_code=503, detail="Unable to start AWS SES email verification. Please try again later.") from exc
+    return {"status": "pending", "email": normalized, "provider": "ses", "ses_status": "PENDING"}
+
+
 def _ses_client():
     import boto3
 
@@ -385,11 +431,26 @@ def login_page(job_agent_session: str | None = Cookie(default=None, alias=SESSIO
     return HTMLResponse(_login_page())
 
 
+@app.get("/register", response_class=HTMLResponse)
+def register_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
+    if current_user_email(job_agent_session):
+        return RedirectResponse("/", status_code=303)
+    return HTMLResponse(_register_page())
+
+
 @app.post("/api/auth/request-otp")
 def request_otp(email: Annotated[str, Form()]) -> dict:
     normalized = normalize_email(email)
     if "@" not in normalized or "." not in normalized.rsplit("@", 1)[-1]:
         raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    if EMAIL_PROVIDER == "ses" and not DEV_RETURN_OTP:
+        if not _ses_sender_configured():
+            raise HTTPException(status_code=503, detail="OTP email delivery is not configured or failed. Please try again later.")
+        if not _ses_email_verified(normalized):
+            raise HTTPException(
+                status_code=403,
+                detail="This email is not verified yet. Use New User Registration first, then request OTP after clicking the AWS verification link.",
+            )
     otp = f"{secrets.randbelow(1_000_000):06d}"
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_TTL_MINUTES)
     save_otp(normalized, _hash_otp(normalized, otp), expires_at)
@@ -405,6 +466,24 @@ def request_otp(email: Annotated[str, Form()]) -> dict:
     if DEV_RETURN_OTP and not sent:
         response["dev_otp"] = otp
     return response
+
+
+@app.post("/api/auth/register-email")
+def register_email(email: Annotated[str, Form()]) -> dict:
+    normalized = normalize_email(email)
+    if "@" not in normalized or "." not in normalized.rsplit("@", 1)[-1]:
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    current = email_verification(normalized)
+    status = (current or {}).get("status", "")
+    if status.upper() == "SUCCESS" or (EMAIL_PROVIDER == "ses" and _ses_email_verified(normalized)):
+        ensure_user(normalized)
+        return {"status": "verified", "email": normalized, "message": "Email is already verified. You can return to login and request an OTP."}
+    result = _start_ses_email_verification(normalized)
+    result["message"] = (
+        "AWS SES verification email requested. Open that email and click the verification link, "
+        "then return to login and request OTP."
+    )
+    return result
 
 
 @app.post("/api/auth/verify")
@@ -1091,6 +1170,8 @@ def _login_page() -> str:
     label { display: block; margin: 14px 0 6px; color: #344054; font-size: 13px; font-weight: 800; }
     input { width: 100%; min-height: 44px; border: 1px solid #c9d4e5; border-radius: 7px; padding: 10px 12px; font: inherit; }
     button { width: 100%; min-height: 44px; margin-top: 14px; border: 0; border-radius: 7px; color: #ffffff; background: #175cd3; font-weight: 900; cursor: pointer; }
+    .secondary-link { display: block; margin-top: 14px; text-align: center; color: #175cd3; font-size: 13px; font-weight: 850; text-decoration: none; }
+    .secondary-link:hover { text-decoration: underline; }
     .muted { color: #667085; font-size: 13px; line-height: 1.5; }
     .status { min-height: 20px; color: #087443; font-size: 13px; font-weight: 750; }
     @media (max-width: 800px) { .shell { grid-template-columns: 1fr; padding: 28px 0; } }
@@ -1117,6 +1198,7 @@ def _login_page() -> str:
         <input id="otp" name="otp" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" required>
         <button type="submit">Verify and Continue</button>
       </form>
+      <a class="secondary-link" href="/register">New user? Verify your email first</a>
       <p id="status" class="status"></p>
     </section>
   </main>
@@ -1139,6 +1221,77 @@ def _login_page() -> str:
       status.textContent = payload.dev_otp
         ? `OTP generated for local testing: ${payload.dev_otp}`
         : `OTP sent to ${payload.email}.`;
+    });
+  </script>
+</body>
+</html>"""
+
+
+def _register_page() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>New User Verification - Job Hunting Agent</title>
+  <style>
+    :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #142033; }
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: linear-gradient(90deg, rgba(9, 24, 47, 0.88), rgba(9, 24, 47, 0.58)), url('/static/job-search-hero.png'); background-size: cover; background-position: center; }
+    .shell { width: min(960px, calc(100% - 36px)); display: grid; grid-template-columns: minmax(260px, 1fr) 420px; gap: 28px; align-items: center; }
+    .copy { color: #ffffff; }
+    .eyebrow { display: inline-flex; padding: 7px 10px; border-radius: 999px; border: 1px solid rgba(255,255,255,.35); background: rgba(255,255,255,.14); font-size: 13px; font-weight: 800; }
+    h1 { margin: 18px 0 12px; font-size: clamp(34px, 6vw, 60px); line-height: 1; letter-spacing: 0; }
+    p { color: rgba(255,255,255,.82); line-height: 1.6; }
+    .card { border-radius: 8px; border: 1px solid rgba(255,255,255,.5); background: rgba(255,255,255,.94); padding: 24px; box-shadow: 0 24px 70px rgba(0,0,0,.28); backdrop-filter: blur(18px); }
+    .card h2 { margin: 0 0 8px; font-size: 24px; }
+    .card p { color: #667085; }
+    label { display: block; margin: 14px 0 6px; color: #344054; font-size: 13px; font-weight: 800; }
+    input { width: 100%; min-height: 44px; border: 1px solid #c9d4e5; border-radius: 7px; padding: 10px 12px; font: inherit; }
+    button { width: 100%; min-height: 44px; margin-top: 14px; border: 0; border-radius: 7px; color: #ffffff; background: #175cd3; font-weight: 900; cursor: pointer; }
+    .secondary-link { display: block; margin-top: 14px; text-align: center; color: #175cd3; font-size: 13px; font-weight: 850; text-decoration: none; }
+    .secondary-link:hover { text-decoration: underline; }
+    .status { min-height: 20px; color: #087443; font-size: 13px; font-weight: 750; line-height: 1.5; }
+    .note { margin-top: 14px; padding: 12px; border-radius: 7px; background: #fff8eb; border: 1px solid #fedf89; color: #7a4a08; font-size: 13px; line-height: 1.5; }
+    @media (max-width: 800px) { .shell { grid-template-columns: 1fr; padding: 28px 0; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="copy">
+      <div class="eyebrow">First-time verification</div>
+      <h1>Verify Your Email</h1>
+      <p>New users must verify their email once through AWS SES. After verification, return to login and request your OTP normally.</p>
+    </section>
+    <section class="card">
+      <h2>New User Registration</h2>
+      <p>Enter your email address. AWS will send a verification email with a link to approve this address for OTP delivery.</p>
+      <form id="register-form">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="email" required>
+        <button type="submit">Send Verification Link</button>
+      </form>
+      <p class="note">After clicking the AWS verification link, come back to the login page and click Send OTP.</p>
+      <a class="secondary-link" href="/login">Back to Login</a>
+      <p id="status" class="status"></p>
+    </section>
+  </main>
+  <script>
+    const form = document.getElementById('register-form');
+    const status = document.getElementById('status');
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      status.style.color = '#344054';
+      status.textContent = 'Requesting AWS verification email...';
+      const response = await fetch('/api/auth/register-email', { method: 'POST', body: new FormData(form) });
+      const payload = await response.json();
+      if (!response.ok) {
+        status.style.color = '#b42318';
+        status.textContent = payload.detail || 'Unable to request verification right now.';
+        return;
+      }
+      status.style.color = '#087443';
+      status.textContent = payload.message || 'Verification email requested. Check your inbox.';
     });
   </script>
 </body>

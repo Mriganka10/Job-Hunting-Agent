@@ -61,6 +61,75 @@ def test_login_page_contains_email_otp_flow() -> None:
     assert response.status_code == 200
     assert "Email OTP Sign In" in response.text
     assert "/api/auth/request-otp" in response.text
+    assert "New user? Verify your email first" in response.text
+    assert "/register" in response.text
+
+
+def test_register_page_contains_new_user_verification_flow() -> None:
+    client = TestClient(app)
+
+    response = client.get("/register")
+
+    assert response.status_code == 200
+    assert "New User Registration" in response.text
+    assert "Send Verification Link" in response.text
+    assert "/api/auth/register-email" in response.text
+    assert "Back to Login" in response.text
+
+
+def test_register_email_starts_ses_identity_verification(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    class FakeSesClient:
+        def get_email_identity(self, **kwargs):
+            return {"VerificationStatus": "NOT_STARTED"}
+
+        def create_email_identity(self, **kwargs):
+            calls.append(kwargs)
+            return {}
+
+    monkeypatch.setattr(web, "EMAIL_PROVIDER", "ses")
+    monkeypatch.setattr(web, "_ses_client", lambda: FakeSesClient())
+
+    client = TestClient(app)
+    response = client.post("/api/auth/register-email", data={"email": "newuser@example.com"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "pending"
+    assert response.json()["email"] == "newuser@example.com"
+    assert calls == [{"EmailIdentity": "newuser@example.com"}]
+
+
+def test_register_email_returns_verified_when_ses_identity_is_verified(monkeypatch) -> None:
+    class FakeSesClient:
+        def get_email_identity(self, **kwargs):
+            return {"VerificationStatus": "SUCCESS"}
+
+    monkeypatch.setattr(web, "EMAIL_PROVIDER", "ses")
+    monkeypatch.setattr(web, "_ses_client", lambda: FakeSesClient())
+
+    client = TestClient(app)
+    response = client.post("/api/auth/register-email", data={"email": "verified@example.com"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "verified"
+
+
+def test_request_otp_requires_verified_ses_recipient_in_production(monkeypatch) -> None:
+    class FakeSesClient:
+        def get_email_identity(self, **kwargs):
+            return {"VerificationStatus": "PENDING"}
+
+    monkeypatch.setattr(web, "EMAIL_PROVIDER", "ses")
+    monkeypatch.setattr(web, "DEV_RETURN_OTP", False)
+    monkeypatch.setenv("JOB_AGENT_SES_FROM", "no-reply@jobhuntingagent.in")
+    monkeypatch.setattr(web, "_ses_client", lambda: FakeSesClient())
+
+    client = TestClient(app)
+    response = client.post("/api/auth/request-otp", data={"email": "pending@example.com"})
+
+    assert response.status_code == 403
+    assert "not verified yet" in response.json()["detail"]
 
 
 def test_request_otp_uses_ses_provider(monkeypatch) -> None:

@@ -62,6 +62,18 @@ def init_db() -> None:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS email_verifications (
+              id SERIAL PRIMARY KEY,
+              email VARCHAR(320) UNIQUE NOT NULL,
+              status VARCHAR(32) NOT NULL,
+              provider VARCHAR(32) NOT NULL DEFAULT 'ses',
+              requested_at TIMESTAMPTZ NOT NULL,
+              verified_at TIMESTAMPTZ,
+              last_checked_at TIMESTAMPTZ,
+              detail TEXT NOT NULL DEFAULT ''
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS user_profiles (
               id SERIAL PRIMARY KEY,
               user_email VARCHAR(320) UNIQUE NOT NULL,
@@ -147,6 +159,18 @@ def init_db() -> None:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS email_verifications (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              email TEXT UNIQUE NOT NULL,
+              status TEXT NOT NULL,
+              provider TEXT NOT NULL DEFAULT 'ses',
+              requested_at TEXT NOT NULL,
+              verified_at TEXT,
+              last_checked_at TEXT,
+              detail TEXT NOT NULL DEFAULT ''
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS user_profiles (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               user_email TEXT UNIQUE NOT NULL,
@@ -220,6 +244,10 @@ def init_db() -> None:
         _ensure_column(conn, "scheduler_records", "last_run_at", "TEXT")
         _ensure_column(conn, "scheduler_records", "last_error", "TEXT")
         _ensure_column(conn, "scheduler_records", "last_result", "TEXT")
+        _ensure_column(conn, "email_verifications", "provider", "TEXT NOT NULL DEFAULT 'ses'")
+        _ensure_column(conn, "email_verifications", "verified_at", "TEXT")
+        _ensure_column(conn, "email_verifications", "last_checked_at", "TEXT")
+        _ensure_column(conn, "email_verifications", "detail", "TEXT NOT NULL DEFAULT ''")
 
 
 def save_user_profile(
@@ -330,6 +358,50 @@ def consume_valid_otp(email: str, code_hash: str) -> bool:
         _execute(conn, "UPDATE otp_codes SET consumed = ? WHERE id = ?", (True, row["id"]))
     ensure_user(normalized)
     return True
+
+
+def save_email_verification(email: str, status: str, *, detail: str = "", provider: str = "ses") -> None:
+    normalized = normalize_email(email)
+    now = _serialize_time(utcnow())
+    verified_at = now if status.lower() in {"success", "verified"} else None
+    with connection() as conn:
+        row = _fetchone(conn, "SELECT id FROM email_verifications WHERE email = ?", (normalized,))
+        if row:
+            _execute(
+                conn,
+                """
+                UPDATE email_verifications
+                SET status = ?, provider = ?, last_checked_at = ?,
+                    verified_at = CASE WHEN ? IS NULL THEN verified_at ELSE ? END,
+                    detail = ?
+                WHERE email = ?
+                """,
+                (status, provider, now, verified_at, verified_at, detail, normalized),
+            )
+            return
+        _execute(
+            conn,
+            """
+            INSERT INTO email_verifications
+            (email, status, provider, requested_at, verified_at, last_checked_at, detail)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (normalized, status, provider, now, verified_at, now, detail),
+        )
+
+
+def email_verification(email: str) -> dict[str, Any] | None:
+    normalized = normalize_email(email)
+    with connection() as conn:
+        return _fetchone(
+            conn,
+            """
+            SELECT email, status, provider, requested_at, verified_at, last_checked_at, detail
+            FROM email_verifications
+            WHERE email = ?
+            """,
+            (normalized,),
+        )
 
 
 def record_run(user_email: str, result: dict[str, Any]) -> int:
