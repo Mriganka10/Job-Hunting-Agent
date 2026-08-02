@@ -367,17 +367,27 @@ def save_email_verification(email: str, status: str, *, detail: str = "", provid
     with connection() as conn:
         row = _fetchone(conn, "SELECT id FROM email_verifications WHERE email = ?", (normalized,))
         if row:
-            _execute(
-                conn,
-                """
-                UPDATE email_verifications
-                SET status = ?, provider = ?, last_checked_at = ?,
-                    verified_at = COALESCE(CAST(? AS TEXT), verified_at),
-                    detail = ?
-                WHERE email = ?
-                """,
-                (status, provider, now, verified_at, detail, normalized),
-            )
+            if verified_at:
+                _execute(
+                    conn,
+                    """
+                    UPDATE email_verifications
+                    SET status = ?, provider = ?, last_checked_at = ?,
+                        verified_at = ?, detail = ?
+                    WHERE email = ?
+                    """,
+                    (status, provider, now, verified_at, detail, normalized),
+                )
+            else:
+                _execute(
+                    conn,
+                    """
+                    UPDATE email_verifications
+                    SET status = ?, provider = ?, last_checked_at = ?, detail = ?
+                    WHERE email = ?
+                    """,
+                    (status, provider, now, detail, normalized),
+                )
             return
         _execute(
             conn,
