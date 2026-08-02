@@ -372,11 +372,11 @@ def save_email_verification(email: str, status: str, *, detail: str = "", provid
                 """
                 UPDATE email_verifications
                 SET status = ?, provider = ?, last_checked_at = ?,
-                    verified_at = CASE WHEN ? IS NULL THEN verified_at ELSE ? END,
+                    verified_at = COALESCE(CAST(? AS TEXT), verified_at),
                     detail = ?
                 WHERE email = ?
                 """,
-                (status, provider, now, verified_at, verified_at, detail, normalized),
+                (status, provider, now, verified_at, detail, normalized),
             )
             return
         _execute(

@@ -1283,15 +1283,21 @@ def _register_page() -> str:
       event.preventDefault();
       status.style.color = '#344054';
       status.textContent = 'Requesting AWS verification email...';
-      const response = await fetch('/api/auth/register-email', { method: 'POST', body: new FormData(form) });
-      const payload = await response.json();
-      if (!response.ok) {
+      try {
+        const response = await fetch('/api/auth/register-email', { method: 'POST', body: new FormData(form) });
+        const contentType = response.headers.get('content-type') || '';
+        const payload = contentType.includes('application/json') ? await response.json() : { detail: await response.text() };
+        if (!response.ok) {
+          status.style.color = '#b42318';
+          status.textContent = payload.detail || 'Unable to request verification right now.';
+          return;
+        }
+        status.style.color = '#087443';
+        status.textContent = payload.message || 'Verification email requested. Check your inbox.';
+      } catch (error) {
         status.style.color = '#b42318';
-        status.textContent = payload.detail || 'Unable to request verification right now.';
-        return;
+        status.textContent = 'Unable to reach the server. Please try again.';
       }
-      status.style.color = '#087443';
-      status.textContent = payload.message || 'Verification email requested. Check your inbox.';
     });
   </script>
 </body>
