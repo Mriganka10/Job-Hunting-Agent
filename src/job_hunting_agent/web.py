@@ -1719,7 +1719,7 @@ def _mock_interview_page(user_email: str) -> str:
     const accentLabel = document.getElementById('accent-label');
     const transcript = document.getElementById('transcript');
     const scorecard = document.getElementById('scorecard');
-    const history = document.getElementById('history');
+    const historyPanel = document.getElementById('history');
     const questionCountPill = document.getElementById('question-count-pill');
     const recordingState = document.getElementById('recording-state');
     const cameraPreview = document.getElementById('camera-preview');
@@ -1745,6 +1745,10 @@ def _mock_interview_page(user_email: str) -> str:
     }}
     async function enableCamera() {{
       try {{
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
+          cameraPlaceholder.textContent = 'Camera preview is not available in this browser. Interview can continue without video.';
+          return;
+        }}
         mediaStream = await navigator.mediaDevices.getUserMedia({{ video: true, audio: false }});
         cameraPreview.srcObject = mediaStream;
         cameraPlaceholder.classList.add('hidden');
@@ -1813,7 +1817,7 @@ def _mock_interview_page(user_email: str) -> str:
       if (!response.ok) return;
       const payload = await response.json();
       const sessions = payload.sessions || [];
-      history.innerHTML = `<h3>Recent Interviews</h3>` + (sessions.length ? sessions.map((item) => `
+      historyPanel.innerHTML = `<h3>Recent Interviews</h3>` + (sessions.length ? sessions.map((item) => `
         <div class="turn" style="margin-top:10px">
           <strong>${{escapeHtml(item.accent)}} · ${{item.score || 0}}/100</strong>
           <span class="muted">${{escapeHtml(item.completed_at || item.started_at || '')}}</span>

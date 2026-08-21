@@ -249,6 +249,8 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert "Enable Camera" in page.text
     assert "camera-preview" in page.text
     assert "Your video" in page.text
+    assert "const history =" not in page.text
+    assert "historyPanel" in page.text
     assert "/api/mock-interview/questions" in page.text
     assert "/api/mock-interview/start" in page.text
     assert "/api/mock-interview/complete" in page.text
