@@ -1743,7 +1743,21 @@ def _mock_interview_page(user_email: str) -> str:
       if (!startedAt) return;
       timer.textContent = formatTime(Math.floor((Date.now() - startedAt) / 1000));
     }}
+    function stopCamera() {{
+      if (mediaStream) {{
+        mediaStream.getTracks().forEach((track) => track.stop());
+      }}
+      mediaStream = null;
+      cameraPreview.srcObject = null;
+      cameraPlaceholder.textContent = 'Camera preview appears here after permission is granted.';
+      cameraPlaceholder.classList.remove('hidden');
+      cameraBtn.textContent = 'Enable Camera';
+    }}
     async function enableCamera() {{
+      if (mediaStream) {{
+        stopCamera();
+        return;
+      }}
       try {{
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
           cameraPlaceholder.textContent = 'Camera preview is not available in this browser. Interview can continue without video.';

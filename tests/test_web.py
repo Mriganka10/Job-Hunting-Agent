@@ -249,6 +249,8 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert "Enable Camera" in page.text
     assert "camera-preview" in page.text
     assert "Your video" in page.text
+    assert "function stopCamera()" in page.text
+    assert "mediaStream.getTracks().forEach((track) => track.stop())" in page.text
     assert "/static/ai-interviewer-sarah.png" in page.text
     assert "const history =" not in page.text
     assert "historyPanel" in page.text
