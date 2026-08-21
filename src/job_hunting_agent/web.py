@@ -1405,7 +1405,6 @@ def _login_page() -> str:
     label { display: block; margin: 14px 0 6px; color: #344054; font-size: 13px; font-weight: 800; }
     input { width: 100%; min-height: 44px; border: 1px solid #c9d4e5; border-radius: 7px; padding: 10px 12px; font: inherit; }
     input:invalid:not(:placeholder-shown) { border-color: #d92d20; box-shadow: 0 0 0 3px rgba(217,45,32,.12); }
-    input:invalid:not(:placeholder-shown) { border-color: #d92d20; box-shadow: 0 0 0 3px rgba(217,45,32,.12); }
     button { width: 100%; min-height: 44px; margin-top: 14px; border: 0; border-radius: 7px; color: #ffffff; background: #175cd3; font-weight: 900; cursor: pointer; }
     .secondary-link { display: block; margin-top: 14px; text-align: center; color: #175cd3; font-size: 13px; font-weight: 850; text-decoration: none; }
     .secondary-link:hover { text-decoration: underline; }
