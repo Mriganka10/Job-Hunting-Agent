@@ -1766,7 +1766,7 @@ def _mock_interview_page(user_email: str) -> str:
         mediaStream = await navigator.mediaDevices.getUserMedia({{ video: true, audio: false }});
         cameraPreview.srcObject = mediaStream;
         cameraPlaceholder.classList.add('hidden');
-        cameraBtn.textContent = 'Camera On';
+        cameraBtn.textContent = 'Turn Camera Off';
       }} catch (error) {{
         cameraPlaceholder.textContent = 'Camera permission was not granted. Interview can continue without video.';
       }}

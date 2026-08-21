@@ -247,6 +247,8 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert "Mock Interview Agent" in page.text
     assert "Virtual Interview Studio" in page.text
     assert "Enable Camera" in page.text
+    assert "Turn Camera Off" in page.text
+    assert "Camera On" not in page.text
     assert "camera-preview" in page.text
     assert "Your video" in page.text
     assert "function stopCamera()" in page.text
