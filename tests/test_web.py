@@ -245,7 +245,10 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     page = client.get("/mock-interview")
     assert page.status_code == 200
     assert "Mock Interview Agent" in page.text
-    assert "Virtual interview room" in page.text
+    assert "Virtual Interview Studio" in page.text
+    assert "Enable Camera" in page.text
+    assert "camera-preview" in page.text
+    assert "Your video" in page.text
     assert "/api/mock-interview/questions" in page.text
     assert "/api/mock-interview/start" in page.text
     assert "/api/mock-interview/complete" in page.text

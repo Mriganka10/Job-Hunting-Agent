@@ -1532,60 +1532,78 @@ def _mock_interview_page(user_email: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Virtual Mock Interview - Job Hunting Agent</title>
   <style>
-    :root {{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#142033; --muted:#667085; --blue:#175cd3; --line:#d8e0ec; --green:#087443; --gold:#a15c07; --panel:rgba(255,255,255,.94); }}
+    :root {{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#142033; --muted:#8ca0bd; --blue:#2563eb; --line:#29405f; --green:#22c55e; --gold:#f59e0b; --panel:rgba(13, 25, 43, .92); --panel2:rgba(17, 31, 52, .96); }}
     * {{ box-sizing: border-box; }}
-    body {{ margin:0; min-height:100vh; color:var(--ink); background: linear-gradient(120deg, rgba(10, 31, 61, .90), rgba(10, 31, 61, .62)), url('/static/job-search-hero.png'); background-size: cover; background-attachment: fixed; }}
-    .topbar {{ width:min(1180px, calc(100% - 48px)); margin:0 auto; padding:18px 0; display:flex; justify-content:space-between; gap:12px; align-items:center; color:#fff; }}
-    .topbar a, .topbar button {{ min-height:38px; border:0; border-radius:7px; padding:9px 13px; font-weight:850; text-decoration:none; cursor:pointer; }}
+    body {{ margin:0; min-height:100vh; color:#eef6ff; background: radial-gradient(circle at 50% 20%, rgba(37,99,235,.35), transparent 34%), linear-gradient(120deg, rgba(5, 14, 29, .95), rgba(9, 22, 41, .88)), url('/static/job-search-hero.png'); background-size: cover; background-attachment: fixed; }}
+    .topbar {{ width:min(1360px, calc(100% - 36px)); margin:0 auto; padding:14px 0; display:flex; justify-content:space-between; gap:12px; align-items:center; color:#fff; }}
+    .topbar a, .topbar button {{ min-height:36px; border:0; border-radius:7px; padding:8px 13px; font-weight:850; text-decoration:none; cursor:pointer; }}
     .topbar a {{ background:rgba(255,255,255,.94); color:#152238; }}
     .topbar form {{ margin:0; }}
     .topbar button {{ background:#175cd3; color:#fff; }}
-    .user-chip {{ padding:8px 12px; border:1px solid rgba(255,255,255,.32); border-radius:999px; background:rgba(255,255,255,.14); font-size:13px; font-weight:800; }}
-    main {{ width:min(1180px, calc(100% - 48px)); margin:20px auto 48px; }}
-    .hero-panel {{ display:grid; grid-template-columns:minmax(280px, 1fr) 360px; gap:24px; align-items:end; padding:28px; border:1px solid rgba(255,255,255,.28); border-radius:8px; background:rgba(255,255,255,.92); box-shadow:0 24px 70px rgba(0,0,0,.26); backdrop-filter:blur(18px); }}
-    h1 {{ margin:8px 0 10px; font-size:clamp(32px, 5vw, 54px); line-height:1.03; letter-spacing:0; }}
-    .eyebrow {{ display:inline-flex; padding:7px 10px; border-radius:999px; color:#175cd3; background:#eaf2ff; font-size:13px; font-weight:900; }}
-    .muted {{ color:var(--muted); line-height:1.55; }}
-    .prep-card {{ padding:18px; border-radius:8px; background:linear-gradient(180deg,#f8fbff,#eef5ff); border:1px solid #d8e7ff; }}
-    .prep-card strong {{ display:block; font-size:34px; line-height:1; }}
-    .chips {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }}
-    .chip {{ display:inline-flex; align-items:center; min-height:30px; padding:6px 10px; border-radius:999px; background:#fff; border:1px solid var(--line); color:#344054; font-size:12px; font-weight:800; }}
-    .layout {{ display:grid; grid-template-columns:360px minmax(0,1fr); gap:18px; margin-top:20px; align-items:start; }}
-    .panel {{ border:1px solid rgba(216,224,236,.92); border-radius:8px; background:var(--panel); padding:18px; box-shadow:0 16px 40px rgba(16,24,40,.16); }}
-    h2, h3 {{ margin:0; }}
-    h2 {{ font-size:22px; }}
-    h3 {{ font-size:17px; }}
-    label {{ display:block; font-weight:850; color:#344054; margin:14px 0 6px; }}
-    select, textarea {{ width:100%; border:1px solid #c8d4e5; border-radius:7px; padding:11px 12px; font:inherit; color:var(--ink); background:#fff; }}
-    textarea {{ min-height:150px; resize:vertical; line-height:1.45; }}
-    .button-row {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }}
-    button, .button {{ border:0; border-radius:7px; min-height:42px; padding:10px 14px; font-weight:900; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; }}
+    .user-chip {{ padding:8px 12px; border:1px solid rgba(255,255,255,.28); border-radius:999px; background:rgba(255,255,255,.11); font-size:13px; font-weight:800; }}
+    main {{ width:min(1360px, calc(100% - 36px)); margin:6px auto 36px; }}
+    .studio-shell {{ border:1px solid rgba(148,163,184,.35); border-radius:10px; background:rgba(6,16,31,.82); box-shadow:0 30px 90px rgba(0,0,0,.45); overflow:hidden; }}
+    .studio-top {{ display:flex; justify-content:space-between; gap:12px; align-items:center; min-height:48px; padding:10px 14px; background:#0b1424; border-bottom:1px solid rgba(148,163,184,.26); }}
+    .brand {{ display:flex; align-items:center; gap:10px; font-weight:950; }}
+    .brand-mark {{ width:30px; height:30px; border-radius:50%; display:grid; place-items:center; background:#1d4ed8; color:#fff; }}
+    .session-stats {{ display:flex; flex-wrap:wrap; gap:14px; color:#cbd5e1; font-size:13px; font-weight:800; }}
+    .session-stats strong {{ color:#fff; }}
+    .interview-grid {{ display:grid; grid-template-columns:300px minmax(380px,1fr) 330px; gap:12px; min-height:650px; padding:12px; }}
+    .room-panel {{ border:1px solid rgba(148,163,184,.32); border-radius:8px; background:var(--panel); box-shadow:inset 0 1px 0 rgba(255,255,255,.05); overflow:hidden; }}
+    .panel-head {{ display:flex; justify-content:space-between; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid rgba(148,163,184,.22); background:rgba(15, 29, 49, .9); }}
+    .panel-title {{ margin:0; font-size:15px; color:#dbeafe; }}
+    .pill {{ display:inline-flex; min-height:24px; align-items:center; padding:4px 8px; border-radius:999px; background:rgba(37,99,235,.18); color:#bfdbfe; border:1px solid rgba(96,165,250,.35); font-size:12px; font-weight:900; }}
+    .question-body {{ padding:14px; }}
+    .question-text {{ margin:10px 0 0; color:#fff; font-size:17px; line-height:1.45; font-weight:800; }}
+    .code-box {{ margin-top:14px; min-height:180px; padding:12px; border-radius:7px; background:#050b16; color:#9ee7ff; border:1px solid rgba(148,163,184,.26); font:12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space:pre-wrap; }}
+    .stage {{ position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:650px; background:linear-gradient(180deg,#1264d8,#0d8ce3 48%,#0c4a6e); }}
+    .stage::before {{ content:""; position:absolute; inset:0; background-image:linear-gradient(rgba(255,255,255,.16) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.12) 1px, transparent 1px); background-size:70px 70px; opacity:.22; }}
+    .stage-logo {{ position:absolute; inset:22px; display:grid; grid-template-columns:repeat(3,1fr); gap:28px; opacity:.18; color:#fff; font-weight:950; font-size:20px; pointer-events:none; }}
+    .agent-avatar {{ position:relative; width:min(360px, 72%); aspect-ratio:1; border-radius:50%; background:radial-gradient(circle at 50% 35%, #fff 0 9%, #f1f5f9 10% 21%, transparent 22%), radial-gradient(circle at 50% 58%, #f8fafc 0 30%, transparent 31%), linear-gradient(135deg,#334155,#0f172a); box-shadow:0 30px 70px rgba(0,0,0,.38); border:8px solid rgba(255,255,255,.22); }}
+    .agent-avatar::before {{ content:"AI"; position:absolute; inset:auto 0 24%; text-align:center; color:#1e293b; font-size:64px; font-weight:950; }}
+    .agent-badge {{ position:relative; margin-top:-26px; padding:9px 16px; border-radius:999px; background:rgba(2,6,23,.82); border:1px solid rgba(255,255,255,.22); color:#fff; font-weight:900; text-align:center; }}
+    .agent-badge small {{ display:block; margin-top:2px; color:#bfdbfe; font-size:11px; }}
+    .stage-controls {{ position:absolute; left:50%; bottom:18px; transform:translateX(-50%); display:flex; gap:10px; align-items:center; padding:8px; border-radius:999px; background:rgba(2,6,23,.6); border:1px solid rgba(255,255,255,.2); }}
+    button, .button {{ border:0; border-radius:7px; min-height:40px; padding:10px 13px; font-weight:900; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; }}
     .primary {{ background:var(--blue); color:#fff; }}
-    .dark {{ background:#344054; color:#fff; }}
-    .ghost {{ background:#eef4ff; color:#175cd3; }}
-    .danger {{ background:#fff1f0; color:#b42318; }}
+    .dark {{ background:#1f2937; color:#fff; }}
+    .ghost {{ background:#eaf2ff; color:#175cd3; }}
+    .danger {{ background:#dc2626; color:#fff; }}
+    .warn {{ background:#f59e0b; color:#111827; }}
     button:disabled {{ opacity:.55; cursor:not-allowed; }}
-    .interviewer {{ display:grid; grid-template-columns:88px minmax(0,1fr); gap:16px; align-items:center; padding:18px; border-radius:8px; background:linear-gradient(135deg,#102542,#1d4ed8); color:#fff; }}
-    .avatar {{ width:76px; height:76px; border-radius:50%; display:grid; place-items:center; font-size:32px; font-weight:950; background:rgba(255,255,255,.18); border:1px solid rgba(255,255,255,.35); }}
-    .question-card {{ margin-top:16px; border:1px solid #d8e7ff; border-radius:8px; background:#f8fbff; padding:18px; }}
-    .question-card .tag {{ display:inline-flex; min-height:26px; align-items:center; padding:5px 9px; border-radius:999px; background:#ecfdf3; color:#087443; font-size:12px; font-weight:900; }}
-    .question-text {{ margin:12px 0 0; font-size:22px; line-height:1.35; font-weight:850; }}
-    .progress {{ height:10px; border-radius:999px; background:#e5edf8; overflow:hidden; margin-top:12px; }}
-    .progress > span {{ display:block; height:100%; width:0%; background:#175cd3; transition:width .2s ease; }}
-    .stat-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:12px; }}
-    .stat {{ border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; }}
-    .stat strong {{ display:block; font-size:24px; }}
-    .transcript {{ display:grid; gap:10px; max-height:320px; overflow:auto; padding-right:4px; }}
-    .turn {{ border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; }}
-    .turn strong {{ display:block; margin-bottom:6px; }}
-    .score {{ display:grid; grid-template-columns:170px minmax(0,1fr); gap:18px; align-items:center; }}
-    .score-circle {{ width:140px; height:140px; border-radius:50%; display:grid; place-items:center; background:conic-gradient(#175cd3 calc(var(--score,0) * 1%), #e8eef7 0); }}
-    .score-circle span {{ width:106px; height:106px; border-radius:50%; display:grid; place-items:center; background:#fff; font-size:34px; font-weight:950; }}
+    .right-stack {{ display:grid; grid-template-rows:185px minmax(330px,1fr); gap:12px; }}
+    .camera-card {{ position:relative; background:#020617; }}
+    video {{ width:100%; height:100%; object-fit:cover; display:block; background:#111827; }}
+    .camera-placeholder {{ position:absolute; inset:0; display:grid; place-items:center; padding:16px; color:#cbd5e1; text-align:center; background:linear-gradient(135deg,#0f172a,#1e293b); }}
+    .camera-label {{ position:absolute; left:10px; bottom:10px; padding:5px 8px; border-radius:999px; background:rgba(2,6,23,.78); color:#fff; font-size:12px; font-weight:900; }}
+    .answer-area {{ display:flex; flex-direction:column; min-height:0; }}
+    .mic-orb {{ width:58px; height:58px; margin:16px auto 10px; border-radius:50%; display:grid; place-items:center; color:#fff; background:radial-gradient(circle,#38bdf8,#2563eb); box-shadow:0 0 0 10px rgba(37,99,235,.14); font-weight:950; }}
+    label {{ display:block; font-weight:850; color:#dbeafe; margin:10px 14px 6px; }}
+    select, textarea {{ width:100%; border:1px solid rgba(148,163,184,.45); border-radius:7px; padding:10px 11px; font:inherit; color:#eef6ff; background:rgba(15,23,42,.88); }}
+    textarea {{ min-height:210px; resize:vertical; line-height:1.45; }}
+    .answer-pad {{ padding:0 14px 14px; }}
+    .button-row {{ display:flex; flex-wrap:wrap; gap:9px; margin-top:12px; }}
+    .setup-panel {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:12px; padding:14px; border:1px solid rgba(148,163,184,.3); border-radius:8px; background:rgba(15,23,42,.72); }}
+    .setup-panel h2 {{ margin:0; font-size:18px; }}
+    .setup-panel p {{ margin:6px 0 0; color:#cbd5e1; line-height:1.45; }}
+    .setup-actions {{ display:flex; align-items:end; gap:10px; flex-wrap:wrap; }}
+    .progress {{ height:9px; border-radius:999px; background:#1e293b; overflow:hidden; }}
+    .progress > span {{ display:block; height:100%; width:0%; background:#38bdf8; transition:width .2s ease; }}
+    .stat-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:12px; }}
+    .stat {{ border:1px solid rgba(148,163,184,.3); border-radius:8px; padding:10px; background:rgba(15,23,42,.75); }}
+    .stat strong {{ display:block; font-size:24px; color:#fff; }}
+    .stat span, .muted {{ color:#cbd5e1; }}
+    .transcript {{ display:grid; gap:10px; max-height:270px; overflow:auto; padding:12px; }}
+    .turn {{ border:1px solid rgba(148,163,184,.28); border-radius:8px; padding:11px; background:rgba(15,23,42,.72); color:#e5edf8; }}
+    .turn strong {{ display:block; margin-bottom:6px; color:#fff; }}
+    .score {{ display:grid; grid-template-columns:140px minmax(0,1fr); gap:16px; align-items:center; }}
+    .score-circle {{ width:118px; height:118px; border-radius:50%; display:grid; place-items:center; background:conic-gradient(#38bdf8 calc(var(--score,0) * 1%), #1e293b 0); }}
+    .score-circle span {{ width:88px; height:88px; border-radius:50%; display:grid; place-items:center; background:#0f172a; color:#fff; font-size:30px; font-weight:950; }}
     .feedback-list {{ margin:10px 0 0; padding-left:22px; }}
     .feedback-list li {{ margin:7px 0; line-height:1.4; }}
     .hidden {{ display:none !important; }}
-    .notice {{ margin-top:12px; padding:12px; border:1px solid #f7d394; border-radius:8px; color:#7a4b12; background:#fff8e8; }}
-    @media (max-width: 920px) {{ .hero-panel, .layout, .score {{ grid-template-columns:1fr; }} .topbar {{ width:min(100% - 32px, 720px); flex-wrap:wrap; }} main {{ width:min(100% - 32px, 720px); }} .stat-grid {{ grid-template-columns:1fr; }} }}
+    .notice {{ margin-top:12px; padding:10px; border:1px solid rgba(245,158,11,.5); border-radius:8px; color:#fde68a; background:rgba(120,53,15,.28); }}
+    @media (max-width: 1100px) {{ .interview-grid, .setup-panel {{ grid-template-columns:1fr; }} .right-stack {{ grid-template-rows:auto; }} .stage {{ min-height:480px; }} .topbar {{ width:min(100% - 28px, 760px); flex-wrap:wrap; }} main {{ width:min(100% - 28px, 760px); }} .stat-grid {{ grid-template-columns:1fr; }} }}
   </style>
 </head>
 <body>
@@ -1597,92 +1615,103 @@ def _mock_interview_page(user_email: str) -> str:
     </div>
   </div>
   <main>
-    <section class="hero-panel">
-      <div>
-        <span class="eyebrow">Virtual interview room</span>
-        <h1>Mock Interview Agent</h1>
-        <p class="muted">A guided interview specialist will ask role-specific questions from your saved target roles and skills, capture your answers, and produce a confidence-building scorecard at the end.</p>
-        <div id="chips" class="chips"></div>
-      </div>
-      <aside class="prep-card">
-        <strong id="question-count">8</strong>
-        <span class="muted">question live interview with transcript and performance review</span>
-      </aside>
-    </section>
-    <section class="layout">
-      <aside class="panel">
-        <h2>Interview Setup</h2>
-        <p class="muted">Choose the interview region so the agent uses a matching English voice where your browser supports it.</p>
-        <label for="region">Region or country accent</label>
-        <select id="region">
-          <option value="India">India English</option>
-          <option value="United States">US English</option>
-          <option value="United Kingdom">British English</option>
-          <option value="Australia">Australian English</option>
-          <option value="Canada">Canadian English</option>
-          <option value="Singapore">Singapore English</option>
-        </select>
-        <label for="question-limit">Interview length</label>
-        <select id="question-limit">
-          <option value="8">Standard - 8 questions</option>
-          <option value="5">Quick confidence round - 5 questions</option>
-          <option value="10">Deep practice - 10 questions</option>
-        </select>
-        <div class="button-row">
+    <section class="studio-shell">
+      <header class="studio-top">
+        <div class="brand"><span class="brand-mark">JH</span><span>Mock Interview Agent · Virtual Interview Studio</span></div>
+        <div class="session-stats"><span>Elapsed <strong id="timer">00:00</strong></span><span>Progress <strong id="progress-label">0/0</strong></span><span>Voice <strong id="accent-label">Indian English</strong></span></div>
+      </header>
+      <section class="setup-panel">
+        <div>
+          <h2>Interview Setup</h2>
+          <p>Choose region, interview length, and enable camera for a realistic practice room.</p>
+        </div>
+        <div>
+          <label for="region">Region or country accent</label>
+          <select id="region">
+            <option value="India">India English</option>
+            <option value="United States">US English</option>
+            <option value="United Kingdom">British English</option>
+            <option value="Australia">Australian English</option>
+            <option value="Canada">Canadian English</option>
+            <option value="Singapore">Singapore English</option>
+          </select>
+        </div>
+        <div>
+          <label for="question-limit">Interview length</label>
+          <select id="question-limit">
+            <option value="8">Standard - 8 questions</option>
+            <option value="5">Quick confidence round - 5 questions</option>
+            <option value="10">Deep practice - 10 questions</option>
+          </select>
+        </div>
+        <div class="setup-actions">
+          <button id="camera-btn" class="ghost" type="button">Enable Camera</button>
           <button id="start-btn" class="primary" type="button">Start Interview</button>
-          <button id="stop-btn" class="danger hidden" type="button">End Interview</button>
+          <button id="stop-btn" class="danger hidden" type="button">End</button>
         </div>
-        <div class="notice">Microphone capture depends on browser permission. You can always type answers manually and submit them.</div>
-        <section id="history" style="margin-top:18px"></section>
-      </aside>
-      <section class="panel">
-        <div class="interviewer">
-          <div class="avatar">AI</div>
-          <div>
-            <h2>Specialised Interview Agent</h2>
-            <p id="agent-status" class="muted" style="color:#dbeafe;margin:6px 0 0">Ready to begin a professional mock interview.</p>
-          </div>
-        </div>
-        <div class="stat-grid">
-          <div class="stat"><strong id="timer">00:00</strong><span class="muted">elapsed</span></div>
-          <div class="stat"><strong id="progress-label">0/0</strong><span class="muted">questions</span></div>
-          <div class="stat"><strong id="accent-label">Indian English</strong><span class="muted">voice profile</span></div>
-        </div>
-        <div class="progress"><span id="progress-bar"></span></div>
-        <article id="question-card" class="question-card hidden">
-          <span id="category" class="tag">Interview</span>
-          <p id="question-text" class="question-text"></p>
-        </article>
-        <label for="answer">Your answer</label>
-        <textarea id="answer" placeholder="Speak after clicking Record Answer, or type your answer here. Use examples, technical depth, and measurable impact."></textarea>
-        <div class="button-row">
-          <button id="speak-btn" class="ghost" type="button" disabled>Replay Question</button>
-          <button id="record-btn" class="dark" type="button" disabled>Record Answer</button>
-          <button id="save-btn" class="primary" type="button" disabled>Save Answer & Next</button>
-        </div>
-        <section id="scorecard" class="panel hidden" style="margin-top:18px"></section>
       </section>
-    </section>
-    <section class="panel" style="margin-top:18px">
-      <h2>Interview Transcript</h2>
-      <p class="muted">Your latest practice answers are stored against your signed-in user only.</p>
-      <div id="transcript" class="transcript"></div>
+      <div class="progress"><span id="progress-bar"></span></div>
+      <section class="interview-grid">
+        <aside class="room-panel">
+          <div class="panel-head"><h2 class="panel-title">Current Question</h2><span id="question-count-pill" class="pill">Ready</span></div>
+          <div class="question-body">
+            <span id="category" class="pill">Interview</span>
+            <p id="question-text" class="question-text">Start the interview to receive the first role-specific question.</p>
+            <div id="code-box" class="code-box">Interview context will adapt to your target roles and skills.\n\nDetected focus areas:\n- Loading profile signals...</div>
+            <div class="notice">Tip: answer with situation, technical action, tradeoff, and measurable result.</div>
+          </div>
+        </aside>
+        <section class="room-panel stage">
+          <div class="stage-logo"><span>Job Hunt</span><span>ATS</span><span>Mock</span><span>Data</span><span>Career</span><span>Agent</span></div>
+          <div class="agent-avatar" aria-label="AI interviewer avatar"></div>
+          <div class="agent-badge">AI Interviewer - Sarah<small id="agent-status">Ready to begin a professional mock interview.</small></div>
+          <div class="stage-controls">
+            <button id="speak-btn" class="ghost" type="button" disabled>Replay</button>
+            <button id="record-btn" class="primary" type="button" disabled>Record</button>
+          </div>
+        </section>
+        <aside class="right-stack">
+          <section class="room-panel camera-card">
+            <video id="camera-preview" autoplay muted playsinline></video>
+            <div id="camera-placeholder" class="camera-placeholder">Camera preview appears here after permission is granted.</div>
+            <span class="camera-label">Your video</span>
+          </section>
+          <section class="room-panel answer-area">
+            <div class="panel-head"><h2 class="panel-title">Your Answer</h2><span id="recording-state" class="pill">Idle</span></div>
+            <div class="mic-orb">MIC</div>
+            <label for="answer">Response transcript</label>
+            <div class="answer-pad">
+              <textarea id="answer" placeholder="Speak after clicking Record, or type your answer here. Use examples, technical depth, and measurable impact."></textarea>
+              <div class="button-row">
+                <button id="save-btn" class="primary" type="button" disabled>Submit & Next</button>
+                <button id="clear-btn" class="dark" type="button">Clear</button>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </section>
+      <section id="scorecard" class="room-panel hidden" style="margin:12px;padding:16px"></section>
+      <section class="room-panel" style="margin:12px">
+        <div class="panel-head"><h2 class="panel-title">Interview Transcript</h2><span class="pill">User specific</span></div>
+        <div id="transcript" class="transcript"></div>
+      </section>
+      <section id="history" class="room-panel" style="margin:12px;padding:14px"></section>
     </section>
   </main>
   <script>
-    const chips = document.getElementById('chips');
-    const count = document.getElementById('question-count');
     const startBtn = document.getElementById('start-btn');
     const stopBtn = document.getElementById('stop-btn');
     const speakBtn = document.getElementById('speak-btn');
     const recordBtn = document.getElementById('record-btn');
     const saveBtn = document.getElementById('save-btn');
+    const clearBtn = document.getElementById('clear-btn');
+    const cameraBtn = document.getElementById('camera-btn');
     const region = document.getElementById('region');
     const questionLimit = document.getElementById('question-limit');
     const answer = document.getElementById('answer');
-    const questionCard = document.getElementById('question-card');
     const questionText = document.getElementById('question-text');
     const category = document.getElementById('category');
+    const codeBox = document.getElementById('code-box');
     const statusText = document.getElementById('agent-status');
     const timer = document.getElementById('timer');
     const progressLabel = document.getElementById('progress-label');
@@ -1691,12 +1720,17 @@ def _mock_interview_page(user_email: str) -> str:
     const transcript = document.getElementById('transcript');
     const scorecard = document.getElementById('scorecard');
     const history = document.getElementById('history');
+    const questionCountPill = document.getElementById('question-count-pill');
+    const recordingState = document.getElementById('recording-state');
+    const cameraPreview = document.getElementById('camera-preview');
+    const cameraPlaceholder = document.getElementById('camera-placeholder');
     let session = null;
     let activeIndex = 0;
     let answers = [];
     let startedAt = null;
     let timerId = null;
     let recognition = null;
+    let mediaStream = null;
     function escapeHtml(value) {{
       return String(value).replace(/[&<>"']/g, (char) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}}[char]));
     }}
@@ -1708,6 +1742,16 @@ def _mock_interview_page(user_email: str) -> str:
     function tickTimer() {{
       if (!startedAt) return;
       timer.textContent = formatTime(Math.floor((Date.now() - startedAt) / 1000));
+    }}
+    async function enableCamera() {{
+      try {{
+        mediaStream = await navigator.mediaDevices.getUserMedia({{ video: true, audio: false }});
+        cameraPreview.srcObject = mediaStream;
+        cameraPlaceholder.classList.add('hidden');
+        cameraBtn.textContent = 'Camera On';
+      }} catch (error) {{
+        cameraPlaceholder.textContent = 'Camera permission was not granted. Interview can continue without video.';
+      }}
     }}
     function preferredVoice(voiceProfile) {{
       const voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
@@ -1729,14 +1773,15 @@ def _mock_interview_page(user_email: str) -> str:
     }}
     function renderQuestion() {{
       const item = session.questions[activeIndex];
-      questionCard.classList.remove('hidden');
       category.textContent = item.category;
       questionText.textContent = item.question;
       answer.value = '';
       const total = session.questions.length;
+      questionCountPill.textContent = `${{activeIndex + 1}}/${{total}}`;
       progressLabel.textContent = `${{Math.min(activeIndex + 1, total)}}/${{total}}`;
       progressBar.style.width = `${{Math.round((activeIndex / total) * 100)}}%`;
-      statusText.textContent = `Question ${{activeIndex + 1}} of ${{total}}. Listen carefully, then answer with a structured example.`;
+      codeBox.textContent = `Focus: ${{item.tag || item.category}}\n\nPrompt type: ${{item.category}}\n\nListen fully, pause, then answer with a real project example.`;
+      statusText.textContent = `Question ${{activeIndex + 1}} of ${{total}} · Listening...`;
       speak(item.question);
     }}
     function renderTranscript() {{
@@ -1745,7 +1790,7 @@ def _mock_interview_page(user_email: str) -> str:
           <strong>Q${{index + 1}}. ${{escapeHtml(item.question)}}</strong>
           <div>${{escapeHtml(item.answer || 'No answer captured.')}}</div>
         </article>
-      `).join('') || '<div class="muted">No answers captured yet.</div>';
+      `).join('') || '<div class="turn">No answers captured yet.</div>';
     }}
     function setInterviewActive(active) {{
       startBtn.disabled = active;
@@ -1761,9 +1806,7 @@ def _mock_interview_page(user_email: str) -> str:
         statusText.textContent = 'Unable to load interview context.';
         return;
       }}
-      count.textContent = payload.question_count || 0;
-      const allChips = [...(payload.roles || []), ...(payload.skills || []).slice(0, 10)];
-      chips.innerHTML = allChips.map((item) => `<span class="chip">${{escapeHtml(item)}}</span>`).join('');
+      codeBox.textContent = `Detected focus areas:\n- ${{[...(payload.roles || []), ...(payload.skills || []).slice(0, 7)].join('\n- ') || 'Add target roles and skills on the dashboard.'}}`;
     }}
     async function loadHistory() {{
       const response = await fetch('/api/mock-interview/history');
@@ -1816,14 +1859,15 @@ def _mock_interview_page(user_email: str) -> str:
         answer.value = text.trim();
       }};
       rec.onerror = () => {{ statusText.textContent = 'Microphone capture was interrupted. You can type the answer manually.'; }};
-      rec.onend = () => {{ recordBtn.textContent = 'Record Answer'; }};
+      rec.onend = () => {{ recordBtn.textContent = 'Record'; recordingState.textContent = 'Idle'; }};
       return rec;
     }}
     function recordAnswer() {{
       if (recognition) {{
         recognition.stop();
         recognition = null;
-        recordBtn.textContent = 'Record Answer';
+        recordBtn.textContent = 'Record';
+        recordingState.textContent = 'Idle';
         return;
       }}
       recognition = setupRecognition();
@@ -1831,7 +1875,8 @@ def _mock_interview_page(user_email: str) -> str:
         statusText.textContent = 'Speech recognition is not available in this browser. Type your answer and continue.';
         return;
       }}
-      recordBtn.textContent = 'Stop Recording';
+      recordBtn.textContent = 'Stop';
+      recordingState.textContent = 'Recording';
       recognition.start();
     }}
     async function saveAnswer(next = true) {{
@@ -1879,7 +1924,7 @@ def _mock_interview_page(user_email: str) -> str:
             <p class="muted">${{escapeHtml(card.summary)}}</p>
           </div>
         </div>
-        <div class="layout" style="grid-template-columns:1fr 1fr;margin-top:16px">
+        <div class="setup-panel" style="grid-template-columns:1fr 1fr;margin:16px 0 0">
           <div><h3>Strengths</h3><ul class="feedback-list">${{(card.strengths || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
           <div><h3>Next improvements</h3><ul class="feedback-list">${{(card.improvements || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
         </div>
@@ -1891,6 +1936,8 @@ def _mock_interview_page(user_email: str) -> str:
     speakBtn.addEventListener('click', () => session && speak(session.questions[activeIndex].question));
     recordBtn.addEventListener('click', recordAnswer);
     saveBtn.addEventListener('click', () => saveAnswer(true));
+    clearBtn.addEventListener('click', () => {{ answer.value = ''; }});
+    cameraBtn.addEventListener('click', enableCamera);
     region.addEventListener('change', () => {{ accentLabel.textContent = region.options[region.selectedIndex].text; }});
     renderTranscript();
     loadQuestions();
@@ -1898,7 +1945,6 @@ def _mock_interview_page(user_email: str) -> str:
   </script>
 </body>
 </html>"""
-
 
 def _page(user_email: str, profile: dict) -> str:
     page = """<!doctype html>
