@@ -1559,8 +1559,8 @@ def _mock_interview_page(user_email: str) -> str:
     .stage {{ position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:650px; background:linear-gradient(180deg,#1264d8,#0d8ce3 48%,#0c4a6e); }}
     .stage::before {{ content:""; position:absolute; inset:0; background-image:linear-gradient(rgba(255,255,255,.16) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.12) 1px, transparent 1px); background-size:70px 70px; opacity:.22; }}
     .stage-logo {{ position:absolute; inset:22px; display:grid; grid-template-columns:repeat(3,1fr); gap:28px; opacity:.18; color:#fff; font-weight:950; font-size:20px; pointer-events:none; }}
-    .agent-avatar {{ position:relative; width:min(360px, 72%); aspect-ratio:1; border-radius:50%; background:radial-gradient(circle at 50% 35%, #fff 0 9%, #f1f5f9 10% 21%, transparent 22%), radial-gradient(circle at 50% 58%, #f8fafc 0 30%, transparent 31%), linear-gradient(135deg,#334155,#0f172a); box-shadow:0 30px 70px rgba(0,0,0,.38); border:8px solid rgba(255,255,255,.22); }}
-    .agent-avatar::before {{ content:"AI"; position:absolute; inset:auto 0 24%; text-align:center; color:#1e293b; font-size:64px; font-weight:950; }}
+    .agent-avatar {{ position:relative; width:min(380px, 76%); aspect-ratio:1; border-radius:50%; background:linear-gradient(135deg,#334155,#0f172a); background-image:url('/static/ai-interviewer-sarah.png'); background-size:cover; background-position:center; box-shadow:0 30px 70px rgba(0,0,0,.42), 0 0 0 14px rgba(15,23,42,.45); border:8px solid rgba(255,255,255,.22); overflow:hidden; }}
+    .agent-avatar::after {{ content:""; position:absolute; inset:0; border-radius:inherit; box-shadow:inset 0 -42px 70px rgba(15,23,42,.28), inset 0 0 0 1px rgba(255,255,255,.18); pointer-events:none; }}
     .agent-badge {{ position:relative; margin-top:-26px; padding:9px 16px; border-radius:999px; background:rgba(2,6,23,.82); border:1px solid rgba(255,255,255,.22); color:#fff; font-weight:900; text-align:center; }}
     .agent-badge small {{ display:block; margin-top:2px; color:#bfdbfe; font-size:11px; }}
     .stage-controls {{ position:absolute; left:50%; bottom:18px; transform:translateX(-50%); display:flex; gap:10px; align-items:center; padding:8px; border-radius:999px; background:rgba(2,6,23,.6); border:1px solid rgba(255,255,255,.2); }}
@@ -1810,7 +1810,11 @@ def _mock_interview_page(user_email: str) -> str:
         statusText.textContent = 'Unable to load interview context.';
         return;
       }}
-      codeBox.textContent = `Detected focus areas:\n- ${{[...(payload.roles || []), ...(payload.skills || []).slice(0, 7)].join('\n- ') || 'Add target roles and skills on the dashboard.'}}`;
+      const focusAreas = [...(payload.roles || []), ...(payload.skills || []).slice(0, 7)];
+      const focusLines = focusAreas.length
+        ? focusAreas.map((item) => `- ${{item}}`)
+        : ['- Add target roles and skills on the dashboard.'];
+      codeBox.textContent = ['Detected focus areas:', ...focusLines].join(String.fromCharCode(10));
     }}
     async function loadHistory() {{
       const response = await fetch('/api/mock-interview/history');

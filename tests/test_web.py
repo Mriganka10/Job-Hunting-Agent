@@ -249,8 +249,11 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert "Enable Camera" in page.text
     assert "camera-preview" in page.text
     assert "Your video" in page.text
+    assert "/static/ai-interviewer-sarah.png" in page.text
     assert "const history =" not in page.text
     assert "historyPanel" in page.text
+    assert "String.fromCharCode(10)" in page.text
+    assert "join('\n- ')" not in page.text
     assert "/api/mock-interview/questions" in page.text
     assert "/api/mock-interview/start" in page.text
     assert "/api/mock-interview/complete" in page.text
@@ -311,6 +314,15 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert history.json()["sessions"][0]["score"] == scorecard["score"]
 
     assert client.post("/api/scheduler/stop").status_code == 200
+
+
+def test_static_ai_interviewer_asset_is_served() -> None:
+    client = TestClient(app)
+
+    response = client.get("/static/ai-interviewer-sarah.png")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
 
 
 def test_mock_interview_requires_authenticated_user() -> None:
