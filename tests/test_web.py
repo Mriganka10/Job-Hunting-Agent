@@ -63,6 +63,10 @@ def test_login_page_contains_email_otp_flow() -> None:
     assert "/api/auth/request-otp" in response.text
     assert "New user? Verify your email first" in response.text
     assert "/register" in response.text
+    assert 'maxlength="254"' in response.text
+    assert "name@example.com" in response.text
+    assert "function validEmail" in response.text
+    assert "Enter a valid email address like name@example.com." in response.text
 
 
 def test_register_page_contains_new_user_verification_flow() -> None:
@@ -75,6 +79,26 @@ def test_register_page_contains_new_user_verification_flow() -> None:
     assert "Send Verification Link" in response.text
     assert "/api/auth/register-email" in response.text
     assert "Back to Login" in response.text
+    assert 'maxlength="254"' in response.text
+    assert "function validEmail" in response.text
+
+
+def test_auth_endpoints_reject_invalid_email_values() -> None:
+    client = TestClient(app)
+
+    invalid_values = ["", "plain-text", "a@b", "bad@@example.com", ".bad@example.com", "bad.@example.com", "bad..dots@example.com", "bad example@test.com"]
+    for value in invalid_values:
+        response = client.post("/api/auth/request-otp", data={"email": value})
+        assert response.status_code == 400
+        assert "valid email address" in response.json()["detail"]
+
+        register_response = client.post("/api/auth/register-email", data={"email": value})
+        assert register_response.status_code == 400
+        assert "valid email address" in register_response.json()["detail"]
+
+        verify_response = client.post("/api/auth/verify", data={"email": value, "otp": "123456"})
+        assert verify_response.status_code == 400
+        assert "valid email address" in verify_response.json()["detail"]
 
 
 def test_register_email_starts_ses_identity_verification(monkeypatch) -> None:

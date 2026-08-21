@@ -6,6 +6,7 @@ import hmac
 import base64
 import json
 import os
+import re
 import secrets
 import smtplib
 import threading
@@ -61,6 +62,10 @@ COOKIE_SECURE = os.getenv("JOB_AGENT_COOKIE_SECURE", "false").lower() == "true"
 DEV_RETURN_OTP = os.getenv("JOB_AGENT_DEV_RETURN_OTP", "true").lower() == "true"
 EMAIL_PROVIDER = os.getenv("JOB_AGENT_EMAIL_PROVIDER", "smtp").strip().lower()
 SES_REGION = os.getenv("JOB_AGENT_SES_REGION", os.getenv("AWS_REGION", "ap-south-1"))
+EMAIL_PATTERN = re.compile(
+    r"^(?=.{6,254}$)(?!.*\.\.)[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,63}$",
+    re.IGNORECASE,
+)
 if COOKIE_SECURE and APP_SECRET == "local-dev-change-me":
     raise RuntimeError("Set JOB_AGENT_SECRET_KEY to a long random value before running with secure cookies.")
 
@@ -301,6 +306,20 @@ def _hash_otp(email: str, otp: str) -> str:
     return hmac.new(APP_SECRET.encode("utf-8"), f"{normalize_email(email)}:{otp}".encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _validated_email(email: str) -> str:
+    normalized = normalize_email(email)
+    local_part = normalized.split("@", 1)[0] if "@" in normalized else ""
+    if (
+        not EMAIL_PATTERN.fullmatch(normalized)
+        or len(local_part) > 64
+        or local_part.startswith(".")
+        or local_part.endswith(".")
+        or any(char.isspace() for char in normalized)
+    ):
+        raise HTTPException(status_code=400, detail="Enter a valid email address like name@example.com.")
+    return normalized
+
+
 def _session_token(email: str) -> str:
     payload = json.dumps({"email": normalize_email(email), "iat": int(time.time())}, separators=(",", ":")).encode("utf-8")
     payload_b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
@@ -443,10 +462,8 @@ def register_page(job_agent_session: str | None = Cookie(default=None, alias=SES
 
 
 @app.post("/api/auth/request-otp")
-def request_otp(email: Annotated[str, Form()]) -> dict:
-    normalized = normalize_email(email)
-    if "@" not in normalized or "." not in normalized.rsplit("@", 1)[-1]:
-        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+def request_otp(email: Annotated[str, Form()] = "") -> dict:
+    normalized = _validated_email(email)
     if EMAIL_PROVIDER == "ses" and not DEV_RETURN_OTP:
         if not _ses_sender_configured():
             raise HTTPException(status_code=503, detail="OTP email delivery is not configured or failed. Please try again later.")
@@ -473,10 +490,8 @@ def request_otp(email: Annotated[str, Form()]) -> dict:
 
 
 @app.post("/api/auth/register-email")
-def register_email(email: Annotated[str, Form()]) -> dict:
-    normalized = normalize_email(email)
-    if "@" not in normalized or "." not in normalized.rsplit("@", 1)[-1]:
-        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+def register_email(email: Annotated[str, Form()] = "") -> dict:
+    normalized = _validated_email(email)
     current = email_verification(normalized)
     status = (current or {}).get("status", "")
     if status.upper() == "SUCCESS" or (EMAIL_PROVIDER == "ses" and _ses_email_verified(normalized)):
@@ -491,8 +506,8 @@ def register_email(email: Annotated[str, Form()]) -> dict:
 
 
 @app.post("/api/auth/verify")
-def verify_otp(email: Annotated[str, Form()], otp: Annotated[str, Form()]) -> HTMLResponse:
-    normalized = normalize_email(email)
+def verify_otp(email: Annotated[str, Form()] = "", otp: Annotated[str, Form()] = "") -> HTMLResponse:
+    normalized = _validated_email(email)
     if not consume_valid_otp(normalized, _hash_otp(normalized, otp.strip())):
         raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
     response = RedirectResponse("/", status_code=303)
@@ -1389,6 +1404,8 @@ def _login_page() -> str:
     .card h2 { margin: 0 0 8px; font-size: 24px; }
     label { display: block; margin: 14px 0 6px; color: #344054; font-size: 13px; font-weight: 800; }
     input { width: 100%; min-height: 44px; border: 1px solid #c9d4e5; border-radius: 7px; padding: 10px 12px; font: inherit; }
+    input:invalid:not(:placeholder-shown) { border-color: #d92d20; box-shadow: 0 0 0 3px rgba(217,45,32,.12); }
+    input:invalid:not(:placeholder-shown) { border-color: #d92d20; box-shadow: 0 0 0 3px rgba(217,45,32,.12); }
     button { width: 100%; min-height: 44px; margin-top: 14px; border: 0; border-radius: 7px; color: #ffffff; background: #175cd3; font-weight: 900; cursor: pointer; }
     .secondary-link { display: block; margin-top: 14px; text-align: center; color: #175cd3; font-size: 13px; font-weight: 850; text-decoration: none; }
     .secondary-link:hover { text-decoration: underline; }
@@ -1409,7 +1426,7 @@ def _login_page() -> str:
       <p class="muted">Enter your email to receive a one-time sign-in code.</p>
       <form id="request-form">
         <label for="email">Email</label>
-        <input id="email" name="email" type="email" autocomplete="email" required>
+        <input id="email" name="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" pattern="^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$" required>
         <button type="submit">Send OTP</button>
       </form>
       <form id="verify-form" method="post" action="/api/auth/verify">
@@ -1424,10 +1441,32 @@ def _login_page() -> str:
   </main>
   <script>
     const requestForm = document.getElementById('request-form');
+    const emailInput = document.getElementById('email');
     const verifyEmail = document.getElementById('verify-email');
     const status = document.getElementById('status');
+    function validEmail(value) {
+      const email = value.trim().toLowerCase();
+      const basicEmail = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/;
+      return email.length <= 254
+        && basicEmail.test(email)
+        && !email.includes('..')
+        && !email.split('@')[0].startsWith('.')
+        && !email.split('@')[0].endsWith('.');
+    }
+    function validateEmailField(input) {
+      const email = input.value.trim().toLowerCase();
+      input.value = email;
+      input.setCustomValidity(validEmail(email) ? '' : 'Enter a valid email address like name@example.com.');
+      return input.reportValidity();
+    }
+    emailInput.addEventListener('input', () => emailInput.setCustomValidity(''));
     requestForm.addEventListener('submit', async (event) => {
       event.preventDefault();
+      if (!validateEmailField(emailInput)) {
+        status.style.color = '#b42318';
+        status.textContent = 'Enter a valid email address like name@example.com.';
+        return;
+      }
       const data = new FormData(requestForm);
       const response = await fetch('/api/auth/request-otp', { method: 'POST', body: data });
       const payload = await response.json();
@@ -1488,7 +1527,7 @@ def _register_page() -> str:
       <p>Enter your email address. AWS will send a verification email with a link to approve this address for OTP delivery.</p>
       <form id="register-form">
         <label for="email">Email</label>
-        <input id="email" name="email" type="email" autocomplete="email" required>
+        <input id="email" name="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" pattern="^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$" required>
         <button type="submit">Send Verification Link</button>
       </form>
       <p class="note">After clicking the AWS verification link, come back to the login page and click Send OTP.</p>
@@ -1498,9 +1537,31 @@ def _register_page() -> str:
   </main>
   <script>
     const form = document.getElementById('register-form');
+    const emailInput = document.getElementById('email');
     const status = document.getElementById('status');
+    function validEmail(value) {
+      const email = value.trim().toLowerCase();
+      const basicEmail = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/;
+      return email.length <= 254
+        && basicEmail.test(email)
+        && !email.includes('..')
+        && !email.split('@')[0].startsWith('.')
+        && !email.split('@')[0].endsWith('.');
+    }
+    function validateEmailField(input) {
+      const email = input.value.trim().toLowerCase();
+      input.value = email;
+      input.setCustomValidity(validEmail(email) ? '' : 'Enter a valid email address like name@example.com.');
+      return input.reportValidity();
+    }
+    emailInput.addEventListener('input', () => emailInput.setCustomValidity(''));
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
+      if (!validateEmailField(emailInput)) {
+        status.style.color = '#b42318';
+        status.textContent = 'Enter a valid email address like name@example.com.';
+        return;
+      }
       status.style.color = '#344054';
       status.textContent = 'Requesting AWS verification email...';
       try {
