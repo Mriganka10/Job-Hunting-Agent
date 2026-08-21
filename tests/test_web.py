@@ -244,8 +244,11 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
 
     page = client.get("/mock-interview")
     assert page.status_code == 200
-    assert "Mock Interview Questions" in page.text
+    assert "Mock Interview Agent" in page.text
+    assert "Virtual interview room" in page.text
     assert "/api/mock-interview/questions" in page.text
+    assert "/api/mock-interview/start" in page.text
+    assert "/api/mock-interview/complete" in page.text
 
     questions = client.get("/api/mock-interview/questions")
     assert questions.status_code == 200
@@ -261,6 +264,47 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert "Spark shuffle" in rendered
     assert "RAG-style assistant" in rendered
 
+    start = client.post(
+        "/api/mock-interview/start",
+        json={"region": "United Kingdom", "question_limit": 5},
+    )
+    assert start.status_code == 200
+    interview = start.json()
+    assert interview["accent"] == "British English"
+    assert interview["voice"]["lang"] == "en-GB"
+    assert len(interview["questions"]) == 5
+    assert interview["session_id"]
+
+    complete = client.post(
+        "/api/mock-interview/complete",
+        json={
+            "session_id": interview["session_id"],
+            "questions": interview["questions"],
+            "answers": [
+                {
+                    "question_id": question["id"],
+                    "category": question["category"],
+                    "question": question["question"],
+                    "answer": (
+                        "I designed and implemented a Python SQL Spark pipeline because the existing workflow "
+                        "missed SLA windows. I measured records processed, reduced retries, improved latency, "
+                        "and communicated the tradeoffs to stakeholders with clear impact."
+                    ),
+                }
+                for question in interview["questions"]
+            ],
+        },
+    )
+    assert complete.status_code == 200
+    scorecard = complete.json()["scorecard"]
+    assert scorecard["score"] >= 70
+    assert scorecard["answered"] == 5
+    assert "answers" in scorecard
+
+    history = client.get("/api/mock-interview/history")
+    assert history.status_code == 200
+    assert history.json()["sessions"][0]["score"] == scorecard["score"]
+
     assert client.post("/api/scheduler/stop").status_code == 200
 
 
@@ -269,6 +313,9 @@ def test_mock_interview_requires_authenticated_user() -> None:
 
     assert client.get("/mock-interview", follow_redirects=False).status_code == 303
     assert client.get("/api/mock-interview/questions").status_code == 401
+    assert client.post("/api/mock-interview/start", json={}).status_code == 401
+    assert client.post("/api/mock-interview/complete", json={}).status_code == 401
+    assert client.get("/api/mock-interview/history").status_code == 401
 
 
 def test_improved_resume_download_requires_run_owner(tmp_path: Path) -> None:

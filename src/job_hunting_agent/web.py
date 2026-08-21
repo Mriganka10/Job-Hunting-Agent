@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import BackgroundTasks, Cookie, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Body, Cookie, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -25,12 +25,16 @@ from .agent import JobHuntingAgent
 from .config import AppConfig, ApplicationConfig, EmailConfig, SearchConfig
 from .db import (
     active_schedules,
+    complete_mock_interview_session,
     consume_valid_otp,
+    create_mock_interview_session,
     disable_schedule,
     email_verification,
     ensure_user,
     init_db,
     latest_runs,
+    latest_mock_interviews,
+    mock_interview_session,
     normalize_email,
     record_run,
     save_email_verification,
@@ -545,6 +549,72 @@ def mock_interview_questions(job_agent_session: str | None = Cookie(default=None
     return _mock_interview_payload(profile, payload)
 
 
+@app.post("/api/mock-interview/start")
+def start_mock_interview(
+    payload: Annotated[dict, Body()],
+    job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict:
+    user_email = require_user(job_agent_session)
+    profile = _profile_for_user(user_email)
+    latest = next(iter(latest_runs(user_email, limit=1)), None)
+    latest_payload = (latest or {}).get("payload") or {}
+    interview = _mock_interview_payload(profile, latest_payload)
+    region = str(payload.get("region") or "India")
+    accent = str(payload.get("accent") or _accent_for_region(region)["label"])
+    question_limit = max(4, min(int(payload.get("question_limit") or 8), 12))
+    questions = _interview_question_sequence(interview["groups"], question_limit)
+    session_id = create_mock_interview_session(
+        user_email,
+        region=region,
+        accent=accent,
+        roles=tuple(interview["roles"]),
+        skills=tuple(interview["skills"]),
+        questions=questions,
+    )
+    return {
+        "session_id": session_id,
+        "region": region,
+        "accent": accent,
+        "voice": _accent_for_region(region),
+        "roles": interview["roles"],
+        "skills": interview["skills"],
+        "questions": questions,
+    }
+
+
+@app.post("/api/mock-interview/complete")
+def complete_mock_interview(
+    payload: Annotated[dict, Body()],
+    job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict:
+    user_email = require_user(job_agent_session)
+    session_id = int(payload.get("session_id") or 0)
+    answers = payload.get("answers") or []
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Interview session id is required.")
+    if not isinstance(answers, list):
+        raise HTTPException(status_code=400, detail="Interview answers must be a list.")
+    session = mock_interview_session(user_email, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found.")
+    session_questions = session.get("questions") or []
+    scorecard = _score_mock_interview(answers, session_questions)
+    saved = complete_mock_interview_session(
+        user_email,
+        session_id,
+        answers=answers,
+        score=scorecard["score"],
+        feedback=scorecard,
+    )
+    return {"session": saved, "scorecard": scorecard}
+
+
+@app.get("/api/mock-interview/history")
+def mock_interview_history(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    return {"sessions": latest_mock_interviews(user_email, limit=3)}
+
+
 @app.post("/api/run")
 async def run_now(
     background_tasks: BackgroundTasks,
@@ -1006,6 +1076,156 @@ def _mock_interview_questions_for(roles: tuple[str, ...], skills: tuple[str, ...
     return groups
 
 
+def _interview_question_sequence(groups: list[dict], limit: int) -> list[dict]:
+    questions: list[dict] = []
+    for group in groups:
+        first_question = next(iter(group.get("questions") or []), "")
+        if first_question:
+            questions.append(
+                {
+                    "id": f"q{len(questions) + 1}",
+                    "category": group.get("title", "Interview"),
+                    "tag": group.get("tag", ""),
+                    "question": first_question,
+                }
+            )
+        if len(questions) >= limit:
+            return questions[:limit]
+    for group in groups:
+        for question in (group.get("questions") or [])[1:]:
+            questions.append(
+                {
+                    "id": f"q{len(questions) + 1}",
+                    "category": group.get("title", "Interview"),
+                    "tag": group.get("tag", ""),
+                    "question": question,
+                }
+            )
+            if len(questions) >= limit:
+                return questions[:limit]
+    return questions[:limit]
+
+
+def _accent_for_region(region: str) -> dict:
+    normalized = region.strip().lower()
+    accents = {
+        "india": {"label": "Indian English", "lang": "en-IN", "voice_hint": "India"},
+        "united states": {"label": "US English", "lang": "en-US", "voice_hint": "United States"},
+        "usa": {"label": "US English", "lang": "en-US", "voice_hint": "United States"},
+        "united kingdom": {"label": "British English", "lang": "en-GB", "voice_hint": "United Kingdom"},
+        "uk": {"label": "British English", "lang": "en-GB", "voice_hint": "United Kingdom"},
+        "australia": {"label": "Australian English", "lang": "en-AU", "voice_hint": "Australia"},
+        "canada": {"label": "Canadian English", "lang": "en-CA", "voice_hint": "Canada"},
+        "singapore": {"label": "Singapore English", "lang": "en-SG", "voice_hint": "Singapore"},
+    }
+    return accents.get(normalized, {"label": "Neutral English", "lang": "en-US", "voice_hint": "English"})
+
+
+def _score_mock_interview(answers: list[dict], questions: list[dict]) -> dict:
+    scored_answers: list[dict] = []
+    total = 0
+    answered = 0
+    for index, answer in enumerate(answers):
+        text = str(answer.get("answer") or "").strip()
+        question = str(answer.get("question") or (questions[index].get("question") if index < len(questions) else ""))
+        words = [word.strip(".,;:!?()[]{}").lower() for word in text.split() if word.strip()]
+        unique_words = len(set(words))
+        word_count = len(words)
+        score = 0
+        signals: list[str] = []
+        improvements: list[str] = []
+        if word_count >= 45:
+            score += 25
+            signals.append("Gave enough context for the interviewer to evaluate depth.")
+        elif word_count >= 20:
+            score += 16
+            signals.append("Answered the question, but could add more implementation detail.")
+            improvements.append("Add context, action, and outcome so the answer feels complete.")
+        else:
+            score += 6
+            improvements.append("Expand short answers with a clear project example and tradeoffs.")
+        if any(token in text.lower() for token in ("because", "therefore", "tradeoff", "trade-off", "root cause", "impact", "result", "measured", "reduced", "improved", "automated", "designed", "implemented")):
+            score += 25
+            signals.append("Explained reasoning, decisions, or measurable impact.")
+        else:
+            improvements.append("Use a structured flow: situation, decision, implementation, impact.")
+        if any(char.isdigit() for char in text) or any(token in text.lower() for token in ("sla", "latency", "cost", "volume", "users", "records", "gb", "tb", "percent", "%")):
+            score += 20
+            signals.append("Included measurable or operational detail.")
+        else:
+            improvements.append("Add numbers where truthful: data volume, SLA, latency, defect reduction, or timeline.")
+        if unique_words >= 30:
+            score += 15
+        elif unique_words >= 15:
+            score += 9
+        else:
+            improvements.append("Avoid repeating generic wording; be specific about tools, systems, and ownership.")
+        question_terms = {word for word in question.lower().replace("/", " ").replace("-", " ").split() if len(word) > 4}
+        overlap = sum(1 for term in question_terms if term in text.lower())
+        if overlap >= 2:
+            score += 15
+            signals.append("Stayed aligned to the question.")
+        else:
+            improvements.append("Echo the core question topic before answering so alignment is obvious.")
+        score = max(0, min(100, score))
+        if text:
+            answered += 1
+        total += score
+        scored_answers.append(
+            {
+                "question": question,
+                "answer": text,
+                "score": score,
+                "signals": signals,
+                "improvements": improvements[:3],
+            }
+        )
+    average = round(total / len(scored_answers)) if scored_answers else 0
+    confidence = "Strong" if average >= 78 else "Developing" if average >= 58 else "Needs practice"
+    return {
+        "score": average,
+        "confidence": confidence,
+        "answered": answered,
+        "question_count": len(scored_answers),
+        "summary": _interview_summary(average, answered, len(scored_answers)),
+        "strengths": _scorecard_strengths(scored_answers),
+        "improvements": _scorecard_improvements(scored_answers),
+        "answers": scored_answers,
+    }
+
+
+def _interview_summary(score: int, answered: int, total: int) -> str:
+    if not total:
+        return "No answers were submitted for evaluation."
+    if score >= 78:
+        return f"Strong mock interview. You answered {answered} of {total} questions with good structure and role relevance."
+    if score >= 58:
+        return f"Good practice round. You answered {answered} of {total} questions; add sharper examples and measurable outcomes to build confidence."
+    return f"Useful first practice round. You answered {answered} of {total} questions; focus on longer structured answers with specific project evidence."
+
+
+def _scorecard_strengths(scored_answers: list[dict]) -> list[str]:
+    strengths: list[str] = []
+    for answer in scored_answers:
+        for signal in answer.get("signals") or []:
+            if signal not in strengths:
+                strengths.append(signal)
+        if len(strengths) >= 3:
+            break
+    return strengths or ["Completed a structured practice interview round."]
+
+
+def _scorecard_improvements(scored_answers: list[dict]) -> list[str]:
+    improvements: list[str] = []
+    for answer in scored_answers:
+        for item in answer.get("improvements") or []:
+            if item not in improvements:
+                improvements.append(item)
+        if len(improvements) >= 4:
+            break
+    return improvements or ["Keep practicing concise examples using situation, action, technical depth, and business impact."]
+
+
 def _ordered_unique(values: tuple[str, ...]) -> tuple[str, ...]:
     seen: set[str] = set()
     result: list[str] = []
@@ -1310,9 +1530,9 @@ def _mock_interview_page(user_email: str) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mock Interview Questions - Job Hunting Agent</title>
+  <title>Virtual Mock Interview - Job Hunting Agent</title>
   <style>
-    :root {{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#142033; --muted:#667085; --blue:#175cd3; --line:#d8e0ec; --green:#087443; }}
+    :root {{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#142033; --muted:#667085; --blue:#175cd3; --line:#d8e0ec; --green:#087443; --gold:#a15c07; --panel:rgba(255,255,255,.94); }}
     * {{ box-sizing: border-box; }}
     body {{ margin:0; min-height:100vh; color:var(--ink); background: linear-gradient(120deg, rgba(10, 31, 61, .90), rgba(10, 31, 61, .62)), url('/static/job-search-hero.png'); background-size: cover; background-attachment: fixed; }}
     .topbar {{ width:min(1180px, calc(100% - 48px)); margin:0 auto; padding:18px 0; display:flex; justify-content:space-between; gap:12px; align-items:center; color:#fff; }}
@@ -1322,7 +1542,7 @@ def _mock_interview_page(user_email: str) -> str:
     .topbar button {{ background:#175cd3; color:#fff; }}
     .user-chip {{ padding:8px 12px; border:1px solid rgba(255,255,255,.32); border-radius:999px; background:rgba(255,255,255,.14); font-size:13px; font-weight:800; }}
     main {{ width:min(1180px, calc(100% - 48px)); margin:20px auto 48px; }}
-    .hero-panel {{ display:grid; grid-template-columns:minmax(280px, 1fr) 320px; gap:24px; align-items:end; padding:28px; border:1px solid rgba(255,255,255,.28); border-radius:8px; background:rgba(255,255,255,.92); box-shadow:0 24px 70px rgba(0,0,0,.26); backdrop-filter:blur(18px); }}
+    .hero-panel {{ display:grid; grid-template-columns:minmax(280px, 1fr) 360px; gap:24px; align-items:end; padding:28px; border:1px solid rgba(255,255,255,.28); border-radius:8px; background:rgba(255,255,255,.92); box-shadow:0 24px 70px rgba(0,0,0,.26); backdrop-filter:blur(18px); }}
     h1 {{ margin:8px 0 10px; font-size:clamp(32px, 5vw, 54px); line-height:1.03; letter-spacing:0; }}
     .eyebrow {{ display:inline-flex; padding:7px 10px; border-radius:999px; color:#175cd3; background:#eaf2ff; font-size:13px; font-weight:900; }}
     .muted {{ color:var(--muted); line-height:1.55; }}
@@ -1330,15 +1550,42 @@ def _mock_interview_page(user_email: str) -> str:
     .prep-card strong {{ display:block; font-size:34px; line-height:1; }}
     .chips {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }}
     .chip {{ display:inline-flex; align-items:center; min-height:30px; padding:6px 10px; border-radius:999px; background:#fff; border:1px solid var(--line); color:#344054; font-size:12px; font-weight:800; }}
-    .grid {{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:16px; margin-top:20px; }}
-    .group {{ border:1px solid rgba(216,224,236,.9); border-radius:8px; background:rgba(255,255,255,.94); padding:18px; box-shadow:0 16px 40px rgba(16,24,40,.14); }}
-    .group-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:10px; }}
-    h2 {{ margin:0; font-size:20px; }}
-    .tag {{ display:inline-flex; min-height:26px; align-items:center; padding:5px 9px; border-radius:999px; background:#ecfdf3; color:#087443; font-size:12px; font-weight:900; white-space:nowrap; }}
-    ol {{ margin:0; padding-left:22px; }}
-    li {{ margin:10px 0; line-height:1.45; }}
-    .empty {{ padding:20px; border:1px dashed #b8c5d8; border-radius:8px; background:rgba(255,255,255,.88); }}
-    @media (max-width: 820px) {{ .hero-panel, .grid {{ grid-template-columns:1fr; }} .topbar {{ width:min(100% - 32px, 720px); flex-wrap:wrap; }} main {{ width:min(100% - 32px, 720px); }} }}
+    .layout {{ display:grid; grid-template-columns:360px minmax(0,1fr); gap:18px; margin-top:20px; align-items:start; }}
+    .panel {{ border:1px solid rgba(216,224,236,.92); border-radius:8px; background:var(--panel); padding:18px; box-shadow:0 16px 40px rgba(16,24,40,.16); }}
+    h2, h3 {{ margin:0; }}
+    h2 {{ font-size:22px; }}
+    h3 {{ font-size:17px; }}
+    label {{ display:block; font-weight:850; color:#344054; margin:14px 0 6px; }}
+    select, textarea {{ width:100%; border:1px solid #c8d4e5; border-radius:7px; padding:11px 12px; font:inherit; color:var(--ink); background:#fff; }}
+    textarea {{ min-height:150px; resize:vertical; line-height:1.45; }}
+    .button-row {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }}
+    button, .button {{ border:0; border-radius:7px; min-height:42px; padding:10px 14px; font-weight:900; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; }}
+    .primary {{ background:var(--blue); color:#fff; }}
+    .dark {{ background:#344054; color:#fff; }}
+    .ghost {{ background:#eef4ff; color:#175cd3; }}
+    .danger {{ background:#fff1f0; color:#b42318; }}
+    button:disabled {{ opacity:.55; cursor:not-allowed; }}
+    .interviewer {{ display:grid; grid-template-columns:88px minmax(0,1fr); gap:16px; align-items:center; padding:18px; border-radius:8px; background:linear-gradient(135deg,#102542,#1d4ed8); color:#fff; }}
+    .avatar {{ width:76px; height:76px; border-radius:50%; display:grid; place-items:center; font-size:32px; font-weight:950; background:rgba(255,255,255,.18); border:1px solid rgba(255,255,255,.35); }}
+    .question-card {{ margin-top:16px; border:1px solid #d8e7ff; border-radius:8px; background:#f8fbff; padding:18px; }}
+    .question-card .tag {{ display:inline-flex; min-height:26px; align-items:center; padding:5px 9px; border-radius:999px; background:#ecfdf3; color:#087443; font-size:12px; font-weight:900; }}
+    .question-text {{ margin:12px 0 0; font-size:22px; line-height:1.35; font-weight:850; }}
+    .progress {{ height:10px; border-radius:999px; background:#e5edf8; overflow:hidden; margin-top:12px; }}
+    .progress > span {{ display:block; height:100%; width:0%; background:#175cd3; transition:width .2s ease; }}
+    .stat-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:12px; }}
+    .stat {{ border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; }}
+    .stat strong {{ display:block; font-size:24px; }}
+    .transcript {{ display:grid; gap:10px; max-height:320px; overflow:auto; padding-right:4px; }}
+    .turn {{ border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; }}
+    .turn strong {{ display:block; margin-bottom:6px; }}
+    .score {{ display:grid; grid-template-columns:170px minmax(0,1fr); gap:18px; align-items:center; }}
+    .score-circle {{ width:140px; height:140px; border-radius:50%; display:grid; place-items:center; background:conic-gradient(#175cd3 calc(var(--score,0) * 1%), #e8eef7 0); }}
+    .score-circle span {{ width:106px; height:106px; border-radius:50%; display:grid; place-items:center; background:#fff; font-size:34px; font-weight:950; }}
+    .feedback-list {{ margin:10px 0 0; padding-left:22px; }}
+    .feedback-list li {{ margin:7px 0; line-height:1.4; }}
+    .hidden {{ display:none !important; }}
+    .notice {{ margin-top:12px; padding:12px; border:1px solid #f7d394; border-radius:8px; color:#7a4b12; background:#fff8e8; }}
+    @media (max-width: 920px) {{ .hero-panel, .layout, .score {{ grid-template-columns:1fr; }} .topbar {{ width:min(100% - 32px, 720px); flex-wrap:wrap; }} main {{ width:min(100% - 32px, 720px); }} .stat-grid {{ grid-template-columns:1fr; }} }}
   </style>
 </head>
 <body>
@@ -1352,43 +1599,302 @@ def _mock_interview_page(user_email: str) -> str:
   <main>
     <section class="hero-panel">
       <div>
-        <span class="eyebrow">Interview preparation</span>
-        <h1>Mock Interview Questions</h1>
-        <p class="muted">Role-specific practice questions based on your saved target roles, skills, and latest run signals. Use these to rehearse technical depth, system design, and project storytelling.</p>
+        <span class="eyebrow">Virtual interview room</span>
+        <h1>Mock Interview Agent</h1>
+        <p class="muted">A guided interview specialist will ask role-specific questions from your saved target roles and skills, capture your answers, and produce a confidence-building scorecard at the end.</p>
         <div id="chips" class="chips"></div>
       </div>
       <aside class="prep-card">
-        <strong id="question-count">0</strong>
-        <span class="muted">questions ready for practice</span>
+        <strong id="question-count">8</strong>
+        <span class="muted">question live interview with transcript and performance review</span>
       </aside>
     </section>
-    <section id="question-grid" class="grid" aria-live="polite"></section>
+    <section class="layout">
+      <aside class="panel">
+        <h2>Interview Setup</h2>
+        <p class="muted">Choose the interview region so the agent uses a matching English voice where your browser supports it.</p>
+        <label for="region">Region or country accent</label>
+        <select id="region">
+          <option value="India">India English</option>
+          <option value="United States">US English</option>
+          <option value="United Kingdom">British English</option>
+          <option value="Australia">Australian English</option>
+          <option value="Canada">Canadian English</option>
+          <option value="Singapore">Singapore English</option>
+        </select>
+        <label for="question-limit">Interview length</label>
+        <select id="question-limit">
+          <option value="8">Standard - 8 questions</option>
+          <option value="5">Quick confidence round - 5 questions</option>
+          <option value="10">Deep practice - 10 questions</option>
+        </select>
+        <div class="button-row">
+          <button id="start-btn" class="primary" type="button">Start Interview</button>
+          <button id="stop-btn" class="danger hidden" type="button">End Interview</button>
+        </div>
+        <div class="notice">Microphone capture depends on browser permission. You can always type answers manually and submit them.</div>
+        <section id="history" style="margin-top:18px"></section>
+      </aside>
+      <section class="panel">
+        <div class="interviewer">
+          <div class="avatar">AI</div>
+          <div>
+            <h2>Specialised Interview Agent</h2>
+            <p id="agent-status" class="muted" style="color:#dbeafe;margin:6px 0 0">Ready to begin a professional mock interview.</p>
+          </div>
+        </div>
+        <div class="stat-grid">
+          <div class="stat"><strong id="timer">00:00</strong><span class="muted">elapsed</span></div>
+          <div class="stat"><strong id="progress-label">0/0</strong><span class="muted">questions</span></div>
+          <div class="stat"><strong id="accent-label">Indian English</strong><span class="muted">voice profile</span></div>
+        </div>
+        <div class="progress"><span id="progress-bar"></span></div>
+        <article id="question-card" class="question-card hidden">
+          <span id="category" class="tag">Interview</span>
+          <p id="question-text" class="question-text"></p>
+        </article>
+        <label for="answer">Your answer</label>
+        <textarea id="answer" placeholder="Speak after clicking Record Answer, or type your answer here. Use examples, technical depth, and measurable impact."></textarea>
+        <div class="button-row">
+          <button id="speak-btn" class="ghost" type="button" disabled>Replay Question</button>
+          <button id="record-btn" class="dark" type="button" disabled>Record Answer</button>
+          <button id="save-btn" class="primary" type="button" disabled>Save Answer & Next</button>
+        </div>
+        <section id="scorecard" class="panel hidden" style="margin-top:18px"></section>
+      </section>
+    </section>
+    <section class="panel" style="margin-top:18px">
+      <h2>Interview Transcript</h2>
+      <p class="muted">Your latest practice answers are stored against your signed-in user only.</p>
+      <div id="transcript" class="transcript"></div>
+    </section>
   </main>
   <script>
-    const grid = document.getElementById('question-grid');
     const chips = document.getElementById('chips');
     const count = document.getElementById('question-count');
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const speakBtn = document.getElementById('speak-btn');
+    const recordBtn = document.getElementById('record-btn');
+    const saveBtn = document.getElementById('save-btn');
+    const region = document.getElementById('region');
+    const questionLimit = document.getElementById('question-limit');
+    const answer = document.getElementById('answer');
+    const questionCard = document.getElementById('question-card');
+    const questionText = document.getElementById('question-text');
+    const category = document.getElementById('category');
+    const statusText = document.getElementById('agent-status');
+    const timer = document.getElementById('timer');
+    const progressLabel = document.getElementById('progress-label');
+    const progressBar = document.getElementById('progress-bar');
+    const accentLabel = document.getElementById('accent-label');
+    const transcript = document.getElementById('transcript');
+    const scorecard = document.getElementById('scorecard');
+    const history = document.getElementById('history');
+    let session = null;
+    let activeIndex = 0;
+    let answers = [];
+    let startedAt = null;
+    let timerId = null;
+    let recognition = null;
     function escapeHtml(value) {{
       return String(value).replace(/[&<>"']/g, (char) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}}[char]));
+    }}
+    function formatTime(seconds) {{
+      const mins = String(Math.floor(seconds / 60)).padStart(2, '0');
+      const secs = String(seconds % 60).padStart(2, '0');
+      return `${{mins}}:${{secs}}`;
+    }}
+    function tickTimer() {{
+      if (!startedAt) return;
+      timer.textContent = formatTime(Math.floor((Date.now() - startedAt) / 1000));
+    }}
+    function preferredVoice(voiceProfile) {{
+      const voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
+      return voices.find((voice) => voice.lang === voiceProfile.lang && voice.name.includes(voiceProfile.voice_hint))
+        || voices.find((voice) => voice.lang === voiceProfile.lang)
+        || voices.find((voice) => voice.lang && voice.lang.startsWith('en'))
+        || null;
+    }}
+    function speak(text) {{
+      if (!window.speechSynthesis || !session) return;
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = session.voice.lang;
+      const voice = preferredVoice(session.voice);
+      if (voice) utterance.voice = voice;
+      utterance.rate = 0.92;
+      utterance.pitch = 1;
+      window.speechSynthesis.speak(utterance);
+    }}
+    function renderQuestion() {{
+      const item = session.questions[activeIndex];
+      questionCard.classList.remove('hidden');
+      category.textContent = item.category;
+      questionText.textContent = item.question;
+      answer.value = '';
+      const total = session.questions.length;
+      progressLabel.textContent = `${{Math.min(activeIndex + 1, total)}}/${{total}}`;
+      progressBar.style.width = `${{Math.round((activeIndex / total) * 100)}}%`;
+      statusText.textContent = `Question ${{activeIndex + 1}} of ${{total}}. Listen carefully, then answer with a structured example.`;
+      speak(item.question);
+    }}
+    function renderTranscript() {{
+      transcript.innerHTML = answers.map((item, index) => `
+        <article class="turn">
+          <strong>Q${{index + 1}}. ${{escapeHtml(item.question)}}</strong>
+          <div>${{escapeHtml(item.answer || 'No answer captured.')}}</div>
+        </article>
+      `).join('') || '<div class="muted">No answers captured yet.</div>';
+    }}
+    function setInterviewActive(active) {{
+      startBtn.disabled = active;
+      stopBtn.classList.toggle('hidden', !active);
+      speakBtn.disabled = !active;
+      recordBtn.disabled = !active;
+      saveBtn.disabled = !active;
     }}
     async function loadQuestions() {{
       const response = await fetch('/api/mock-interview/questions');
       const payload = await response.json();
       if (!response.ok) {{
-        grid.innerHTML = `<div class="empty">Unable to load questions.</div>`;
+        statusText.textContent = 'Unable to load interview context.';
         return;
       }}
       count.textContent = payload.question_count || 0;
       const allChips = [...(payload.roles || []), ...(payload.skills || []).slice(0, 10)];
       chips.innerHTML = allChips.map((item) => `<span class="chip">${{escapeHtml(item)}}</span>`).join('');
-      grid.innerHTML = (payload.groups || []).map((group) => `
-        <article class="group">
-          <div class="group-head"><h2>${{escapeHtml(group.title)}}</h2><span class="tag">${{escapeHtml(group.tag)}}</span></div>
-          <ol>${{(group.questions || []).map((question) => `<li>${{escapeHtml(question)}}</li>`).join('')}}</ol>
-        </article>
-      `).join('') || '<div class="empty">Add target roles and skills on the dashboard to personalize questions.</div>';
     }}
+    async function loadHistory() {{
+      const response = await fetch('/api/mock-interview/history');
+      if (!response.ok) return;
+      const payload = await response.json();
+      const sessions = payload.sessions || [];
+      history.innerHTML = `<h3>Recent Interviews</h3>` + (sessions.length ? sessions.map((item) => `
+        <div class="turn" style="margin-top:10px">
+          <strong>${{escapeHtml(item.accent)}} · ${{item.score || 0}}/100</strong>
+          <span class="muted">${{escapeHtml(item.completed_at || item.started_at || '')}}</span>
+        </div>
+      `).join('') : '<p class="muted">No completed interviews yet.</p>');
+    }}
+    async function startInterview() {{
+      const response = await fetch('/api/mock-interview/start', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{region: region.value, question_limit: Number(questionLimit.value)}})
+      }});
+      const payload = await response.json();
+      if (!response.ok) {{
+        statusText.textContent = payload.detail || 'Unable to start interview.';
+        return;
+      }}
+      session = payload;
+      activeIndex = 0;
+      answers = [];
+      startedAt = Date.now();
+      clearInterval(timerId);
+      timerId = setInterval(tickTimer, 1000);
+      tickTimer();
+      accentLabel.textContent = session.accent;
+      setInterviewActive(true);
+      scorecard.classList.add('hidden');
+      renderTranscript();
+      renderQuestion();
+    }}
+    function setupRecognition() {{
+      const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!Recognition) return null;
+      const rec = new Recognition();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = session ? session.voice.lang : 'en-IN';
+      rec.onresult = (event) => {{
+        let text = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {{
+          text += event.results[i][0].transcript;
+        }}
+        answer.value = text.trim();
+      }};
+      rec.onerror = () => {{ statusText.textContent = 'Microphone capture was interrupted. You can type the answer manually.'; }};
+      rec.onend = () => {{ recordBtn.textContent = 'Record Answer'; }};
+      return rec;
+    }}
+    function recordAnswer() {{
+      if (recognition) {{
+        recognition.stop();
+        recognition = null;
+        recordBtn.textContent = 'Record Answer';
+        return;
+      }}
+      recognition = setupRecognition();
+      if (!recognition) {{
+        statusText.textContent = 'Speech recognition is not available in this browser. Type your answer and continue.';
+        return;
+      }}
+      recordBtn.textContent = 'Stop Recording';
+      recognition.start();
+    }}
+    async function saveAnswer(next = true) {{
+      if (!session) return;
+      if (recognition) {{
+        recognition.stop();
+        recognition = null;
+      }}
+      const item = session.questions[activeIndex];
+      answers.push({{question_id: item.id, category: item.category, question: item.question, answer: answer.value.trim()}});
+      renderTranscript();
+      if (next && activeIndex < session.questions.length - 1) {{
+        activeIndex += 1;
+        renderQuestion();
+      }} else {{
+        await finishInterview();
+      }}
+    }}
+    async function finishInterview() {{
+      if (!session) return;
+      clearInterval(timerId);
+      progressBar.style.width = '100%';
+      setInterviewActive(false);
+      statusText.textContent = 'Interview completed. Building your performance scorecard.';
+      const response = await fetch('/api/mock-interview/complete', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{session_id: session.session_id, questions: session.questions, answers}})
+      }});
+      const payload = await response.json();
+      if (!response.ok) {{
+        statusText.textContent = payload.detail || 'Unable to save interview.';
+        return;
+      }}
+      renderScorecard(payload.scorecard);
+      loadHistory();
+    }}
+    function renderScorecard(card) {{
+      scorecard.classList.remove('hidden');
+      scorecard.innerHTML = `
+        <div class="score">
+          <div class="score-circle" style="--score:${{card.score || 0}}"><span>${{card.score || 0}}</span></div>
+          <div>
+            <h2>${{escapeHtml(card.confidence)}} interview readiness</h2>
+            <p class="muted">${{escapeHtml(card.summary)}}</p>
+          </div>
+        </div>
+        <div class="layout" style="grid-template-columns:1fr 1fr;margin-top:16px">
+          <div><h3>Strengths</h3><ul class="feedback-list">${{(card.strengths || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
+          <div><h3>Next improvements</h3><ul class="feedback-list">${{(card.improvements || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
+        </div>
+      `;
+      statusText.textContent = 'Scorecard ready. Review your transcript and practice again when ready.';
+    }}
+    startBtn.addEventListener('click', startInterview);
+    stopBtn.addEventListener('click', () => finishInterview());
+    speakBtn.addEventListener('click', () => session && speak(session.questions[activeIndex].question));
+    recordBtn.addEventListener('click', recordAnswer);
+    saveBtn.addEventListener('click', () => saveAnswer(true));
+    region.addEventListener('change', () => {{ accentLabel.textContent = region.options[region.selectedIndex].text; }});
+    renderTranscript();
     loadQuestions();
+    loadHistory();
   </script>
 </body>
 </html>"""
