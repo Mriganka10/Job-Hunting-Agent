@@ -18,7 +18,7 @@ FastAPI application on port 8000
     |
     +-- RDS PostgreSQL for users, OTPs, runs, schedules, and application history
     +-- Private S3 bucket for uploaded resumes, reports, and drafts
-    +-- SES SMTP provider for real email OTP delivery
+    +-- SES API or SMTP provider for registration verification and login OTP delivery
 ```
 
 ## Job Hunt AWS Resources
@@ -59,6 +59,8 @@ The app stores production records in PostgreSQL:
 - Manual and scheduled run history.
 - Application action history.
 - Active daily schedule configuration, including the browser timezone.
+- Email verification records.
+- Mock-interview sessions, text answers, and scorecards.
 
 Local development falls back to SQLite under `data/`, but production should always use RDS PostgreSQL through `JOB_AGENT_DATABASE_URL`.
 
@@ -81,6 +83,9 @@ JOB_AGENT_SMTP_PORT='587'
 JOB_AGENT_SMTP_USERNAME='<smtp-user>'
 JOB_AGENT_SMTP_PASSWORD='<smtp-password>'
 JOB_AGENT_SMTP_FROM='<from-email>'
+JOB_AGENT_EMAIL_PROVIDER='ses'
+JOB_AGENT_SES_REGION='us-east-1'
+JOB_AGENT_SES_FROM='<verified-sender-email>'
 JOB_AGENT_S3_BUCKET='job-hunt-agent-prod-uploads-453732174568-us-east-1'
 ```
 
@@ -109,4 +114,4 @@ The current EB web process restores the latest active schedule on startup. This 
 
 ## SES And HTTPS Inputs Still Needed
 
-SES/SMTP can be enabled once a sender address or domain is verified in SES. A custom HTTPS URL can be enabled once the target domain, DNS access, and ACM certificate are available. Until then, keep `JOB_AGENT_COOKIE_SECURE=false` for the plain Elastic Beanstalk HTTP URL.
+SES API mode uses a verified sender and asks each new user to verify their email identity before requesting a login OTP. SMTP mode remains available. A custom HTTPS URL can be enabled once the target domain, DNS access, and ACM certificate are available. Until then, keep `JOB_AGENT_COOKIE_SECURE=false` for the plain Elastic Beanstalk HTTP URL.

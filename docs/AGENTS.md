@@ -7,7 +7,7 @@ File: `src/job_hunting_agent/agent.py`
 The orchestrator coordinates the full workflow:
 
 ```text
-Resume -> ATS Report -> Search Intent -> Portal Leads -> Application Actions -> Reports
+Resume -> ATS Report -> Improved Resume -> Search Intent -> Portal Leads -> Application Actions -> Reports
 ```
 
 It is intentionally deterministic in the current POC. This makes the behavior easy to test and explain before adding LLM-based matching or authenticated browser automation.
@@ -18,12 +18,14 @@ It is intentionally deterministic in the current POC. This makes the behavior ea
 | --- | --- | --- |
 | Resume parser | PDF/DOCX/text extraction plus keyword matching | Extract resume text and infer skills/roles. |
 | ATS scorer | Deterministic weighted rules | Score resume readiness and suggest improvements. |
+| Resume builder | Deterministic section reconstruction and DOCX generation | Produce a downloadable improved ATS resume without inventing experience. |
 | Search intent builder | Config-first role, skill, and location selection | Decide what to search on portals. |
 | LinkedIn adapter | Public job endpoint with search fallback | Find LinkedIn job leads. |
 | Naukri adapter | Public page scan with search fallback | Find Naukri job leads. |
 | Application service | Draft writer, SMTP sender, local ledger | Prepare or send applications and avoid duplicates. |
 | Daily scheduler | CLI sleep loop | Run the same workflow daily. |
 | Web UI scheduler | In-process background thread | Run the uploaded resume workflow daily while the server is active. |
+| Mock interview | Profile-derived question bank and deterministic scoring | Run user-scoped practice sessions with transcripts and scorecards. |
 
 ## Resume Parser
 
@@ -115,6 +117,33 @@ Responsibilities:
 - Start or stop the daily scheduler through explicit buttons.
 - Show scheduler status including next run, last run, errors, and short run history.
 - Show application and email audit counts.
+- Authenticate users through OTP and isolate profiles, runs, schedules, downloads, and interviews by email.
+- Generate and serve improved resume downloads.
+- Provide the mock-interview studio with optional client-side camera and speech features.
+
+## Improved Resume Builder
+
+File: `src/job_hunting_agent/resume_builder.py`
+
+Responsibilities:
+
+- Reconstruct recognizable resume sections while preserving extracted experience entries.
+- Incorporate truthful ATS keyword and action-language improvements.
+- Write a consistently formatted DOCX artifact.
+
+This builder is deterministic. It does not tailor against a specific job description and must not be described as LLM-generated.
+
+## Mock Interview Agent
+
+Files: `src/job_hunting_agent/web.py` and `src/job_hunting_agent/db.py`
+
+Responsibilities:
+
+- Generate behavioral, role, and skill questions from the signed-in user's saved profile.
+- Persist interview sessions, text answers, scorecards, and recent history.
+- Support optional browser speech synthesis, speech recognition, and local camera preview.
+
+Camera frames are not uploaded or stored. Unsupported or denied browser media features fall back to typed answers.
 
 ## Report Writer
 

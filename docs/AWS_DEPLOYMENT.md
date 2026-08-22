@@ -30,9 +30,11 @@ EC2 instance running FastAPI/Uvicorn
   - run history
   - application ledger/history
   - active daily schedule configuration
+  - email verification state
+  - mock-interview sessions, answers, and scorecards
 - Browser-timezone-aware daily scheduling so AWS UTC server time does not shift an India-time schedule.
 - Active schedule restore on application startup.
-- Private S3 mirroring for uploaded resumes, reports, drafts, and run artifacts.
+- Private S3 mirroring for uploaded resumes, improved resumes, reports, drafts, and run artifacts.
 - Local SQLite fallback for development and tests.
 - `Procfile` for Elastic Beanstalk process startup.
 - `requirements.txt` for Elastic Beanstalk Python dependency install.
@@ -66,6 +68,9 @@ JOB_AGENT_SECRET_KEY=long-random-secret
 JOB_AGENT_DATABASE_URL=postgresql://user:password@rds-endpoint:5432/job_agent
 JOB_AGENT_COOKIE_SECURE=true
 JOB_AGENT_DEV_RETURN_OTP=false
+JOB_AGENT_EMAIL_PROVIDER=ses
+JOB_AGENT_SES_REGION=us-east-1
+JOB_AGENT_SES_FROM=verified-sender@example.com
 JOB_AGENT_SMTP_HOST=smtp.example.com
 JOB_AGENT_SMTP_PORT=587
 JOB_AGENT_SMTP_USERNAME=agent@example.com
@@ -148,6 +153,11 @@ The script checks that the current AWS CLI identity is account `453732174568`, c
 
 ## SES/SMTP OTP Delivery
 
+The latest web flow supports two providers:
+
+- `JOB_AGENT_EMAIL_PROVIDER=smtp` sends login OTPs with the SMTP variables below.
+- `JOB_AGENT_EMAIL_PROVIDER=ses` uses the SES v2 API. New users register their address, complete the SES verification link, and then request a login OTP. Configure `JOB_AGENT_SES_FROM` and `JOB_AGENT_SES_REGION`; the EB instance role needs least-privilege permissions for SES identity status/creation and email sending.
+
 The app sends OTP emails through SMTP environment variables. For Amazon SES in `us-east-1`, use:
 
 ```bash
@@ -195,6 +205,7 @@ This branch makes the app production-oriented for authentication and database-ba
 - EventBridge/SQS/ECS worker execution for multi-user or multi-instance scheduling.
 - Admin controls for disabling users and reviewing run activity.
 - Rate limiting for OTP requests.
+- Retention/deletion controls for resumes and mock-interview transcripts.
 - CSRF protection for state-changing form actions.
 - CAPTCHA or abuse protection on the login page.
 - Formal privacy policy and data retention controls.

@@ -14,6 +14,11 @@ Status: implemented.
 - Web UI for resume upload and profile URLs.
 - In-process daily web scheduler.
 - Basic tests.
+- Email OTP authentication with signed, HTTP-only sessions.
+- SQLite/PostgreSQL persistence for users, profiles, runs, schedules, and application history.
+- User-isolated local and optional S3 artifact storage.
+- Improved ATS resume generation and DOCX download.
+- Role- and skill-aware virtual mock interviews with optional camera preview, browser speech, transcripts, scorecards, and recent history.
 
 ## Phase 2: Better Matching
 
@@ -43,10 +48,11 @@ Status: implemented.
 
 ## Phase 5: Web Dashboard
 
-- Expand the current FastAPI UI into a fuller dashboard for ATS score, job leads, drafts, approvals, and application history.
-- Add authentication.
-- Add database persistence.
-- Add scheduled background jobs.
+Status: partially implemented.
+
+- Continue expanding the FastAPI dashboard beyond its current ATS results, job leads, drafts, downloads, scheduler, and interview studio.
+- Add an approval queue and richer application-history views.
+- Replace the current database-persisted in-process scheduler with a durable worker/queue for multi-instance deployments.
 
 ## Phase 6: Production Hardening
 
@@ -64,3 +70,4 @@ Status: implemented.
 - Add screening question answer drafts.
 - Add embeddings-based job matching.
 - Add prompt and output evaluation tests.
+- Replace deterministic resume/interview feedback with evaluated AI assistance only where it improves quality without inventing candidate facts.
