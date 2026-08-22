@@ -12,7 +12,7 @@
 ```bash
 git clone https://github.com/Mriganka10/Job-Hunting-Agent.git
 cd Job-Hunting-Agent
-git checkout feature/prototype_development_v1
+git checkout feature/prototype_development_v4
 ```
 
 ## Create Virtual Environment
@@ -123,12 +123,25 @@ The UI supports:
 - Draft or email application mode.
 - Immediate agent run.
 - Daily schedule while the server process is running.
+- Improved ATS resume generation and DOCX download.
+- Virtual mock interviews tailored to saved roles and skills.
+- Optional camera preview, browser text-to-speech/speech recognition, typed-answer fallback, transcripts, scorecards, and recent interview history.
 
 Local OTP behavior:
 
 - If SMTP environment variables are not configured, the OTP is printed in the server logs.
 - With `JOB_AGENT_DEV_RETURN_OTP=true`, the local browser also shows the OTP for easier testing.
-- In production, set `JOB_AGENT_DEV_RETURN_OTP=false`, `JOB_AGENT_COOKIE_SECURE=true`, and configure SMTP.
+- In production, set `JOB_AGENT_DEV_RETURN_OTP=false`, `JOB_AGENT_COOKIE_SECURE=true`, and configure SMTP or Amazon SES.
+
+Amazon SES API mode:
+
+```bash
+export JOB_AGENT_EMAIL_PROVIDER="ses"
+export JOB_AGENT_SES_REGION="ap-south-1"
+export JOB_AGENT_SES_FROM="verified-sender@example.com"
+```
+
+In SES mode, a new user first registers their email, follows the AWS verification link, and then requests a login OTP. The runtime AWS identity needs SES v2 permissions to create/check email identities and send email.
 
 Production database:
 
@@ -152,13 +165,15 @@ Health check:
 curl http://127.0.0.1:8000/health
 ```
 
-Use the health response to confirm:
+The public health response confirms service availability without exposing user data. After signing in, `GET /api/dashboard` provides the current user's:
 
 - `scheduler.running`
 - `scheduler.daily_at`
 - `scheduler.next_run_at`
 - `scheduler.last_run_at`
 - `scheduler.history`
+
+Open `http://127.0.0.1:8000/mock-interview` after signing in to use the interview studio. Camera and speech capabilities depend on browser support and permission; typing answers always remains available. Camera video is previewed locally and is not uploaded by the current implementation.
 
 ## Run Tests
 
@@ -180,6 +195,9 @@ Generated files:
 - `data/reports/latest_run.json`
 - `data/applications.jsonl`
 - `data/drafts/*.md`
+- `data/improved_resume/*.docx`
+
+Web runs use an authenticated user-specific data directory. When `JOB_AGENT_S3_BUCKET` is configured, uploads and generated artifacts are also mirrored under private user-specific S3 prefixes.
 
 ## Common Issues
 

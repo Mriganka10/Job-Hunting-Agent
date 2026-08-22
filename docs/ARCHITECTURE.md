@@ -13,6 +13,7 @@ Job Hunting Agent
         |
         +-- Resume Parser
         +-- ATS Scoring Engine
+        +-- Improved Resume Builder (DOCX)
         +-- Job Search Orchestrator
         |       |
         |       +-- LinkedIn Adapter
@@ -24,8 +25,10 @@ Job Hunting Agent
         |       +-- SMTP Email Sender
         |       +-- Application Ledger
         |
+        +-- Mock Interview Service
+        |
         v
-Reports and Local Data
+Database + Reports + Local/S3 Artifacts
 ```
 
 ## Runtime Components
@@ -57,6 +60,9 @@ Responsibilities:
 - Start or stop an email-scoped in-process daily scheduler while the web server is active.
 - Expose public `GET /health` without user data and authenticated `GET /api/dashboard`, `POST /api/run`, and scheduler endpoints.
 - Render only the signed-in user's latest manual or scheduled run.
+- Generate and serve an improved ATS resume for an authorized run.
+- Provide a virtual mock-interview studio with profile-derived questions, browser camera/speech enhancements, deterministic scoring, and persisted history.
+- Support SMTP OTP login or SES identity registration/verification plus OTP delivery.
 
 ### Agent Orchestrator
 
@@ -71,6 +77,27 @@ Responsibilities:
 - Deduplicate job leads.
 - Apply to jobs through the application service.
 - Write the latest run summary.
+- Generate an improved DOCX resume from extracted sections and ATS feedback.
+
+### Improved Resume Builder
+
+File: `src/job_hunting_agent/resume_builder.py`
+
+The builder preserves extracted professional experience and other recognizable resume sections, normalizes formatting, strengthens selected action verbs, and writes a DOCX artifact. It is deterministic and is not job-description-specific or LLM-generated. Web downloads are authorized by run ownership and can use a short-lived S3 URL when object storage is enabled.
+
+### Authentication and Persistence
+
+Files: `src/job_hunting_agent/web.py`, `src/job_hunting_agent/db.py`, and `src/job_hunting_agent/storage.py`
+
+- Signed, HTTP-only cookies identify users by normalized email.
+- One-time codes are hashed and expire; production can deliver them by SMTP or SES.
+- SQLite is the local default and PostgreSQL is the production target.
+- Profiles, verification status, runs, schedules, application history, and mock-interview sessions are user-scoped.
+- S3 mirroring is optional; local working files remain necessary for parsing and generation.
+
+### Mock Interview Service
+
+The authenticated interview studio builds deterministic behavioral, role, and skill questions from the saved profile. It persists session questions, submitted text answers, and scorecards. Browser camera preview, speech synthesis, and speech recognition are optional client-side enhancements; no camera recording is uploaded or stored.
 
 ### Resume Parser
 
@@ -158,7 +185,8 @@ The `data/` folder is ignored by Git because it can contain private candidate an
 8. Application service checks the ledger.
 9. Drafts are written or emails are sent.
 10. Reports and application records are written under `data/`.
-11. Web UI returns ATS score, improvement suggestions, job leads, and application action details.
+11. A full run also produces an improved DOCX resume and optionally mirrors artifacts to S3.
+12. Web UI returns ATS score, improvement suggestions, job leads, application action details, and an authorized resume download.
 
 ## Production Architecture Target
 
@@ -166,9 +194,7 @@ Future production architecture should add:
 
 - Browser automation with stored login sessions.
 - Human approval queue before any portal submission.
-- Database-backed job and application tracking.
 - Secrets manager for email and portal credentials.
-- Web dashboard for review and scheduling.
 - Persistent scheduler backed by a worker process or queue.
 - Stronger matching using embeddings and LLM-based job/resume comparison.
 - Audit trail for every search, draft, approval, and submission.

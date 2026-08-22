@@ -34,6 +34,8 @@ The system may process:
 - LinkedIn and Naukri profile URLs.
 - SMTP credentials.
 - Future portal login cookies or session data.
+- Mock-interview questions, typed or speech-transcribed answers, and scorecards.
+- Generated improved resumes and download links.
 
 All such data should be treated as private.
 
@@ -63,6 +65,7 @@ All such data should be treated as private.
 - Avoid logging full resume text.
 - Avoid storing unnecessary recruiter communications.
 - Add retention rules for drafts and run summaries.
+- Add retention rules for improved resumes and mock-interview sessions.
 - Encrypt local data for production use.
 
 ### Email Safety
@@ -96,6 +99,7 @@ The web UI now includes email OTP sign-in and a signed HTTP-only session cookie.
 - Set `JOB_AGENT_COOKIE_SECURE=true`.
 - Set `JOB_AGENT_DEV_RETURN_OTP=false`.
 - Configure SMTP for OTP delivery.
+- Or configure SES API delivery with `JOB_AGENT_EMAIL_PROVIDER=ses`, a verified sender, least-privilege IAM permissions, and the correct SES region.
 - Use PostgreSQL through `JOB_AGENT_DATABASE_URL`.
 - Set `JOB_AGENT_S3_BUCKET` so uploaded resumes and generated artifacts are mirrored to private S3.
 - Keep S3 objects and local working directories separated by authenticated user identity.
@@ -108,6 +112,8 @@ The web UI now includes email OTP sign-in and a signed HTTP-only session cookie.
 - Move schedule execution into EventBridge/SQS/ECS before running multiple EB instances or many client schedules.
 - Store secrets in a secret manager.
 - Protect `data/uploads`, `data/drafts`, and `data/reports`.
+- Treat browser speech transcripts as sensitive candidate data. The current camera feature is local preview only; keep it that way unless explicit recording consent, retention, and deletion controls are added.
+- Add OTP request and verification attempt rate limits before public rollout.
 
 ## Legal and Ethical Disclaimer
 

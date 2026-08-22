@@ -18,6 +18,9 @@ The system can:
 8. Track application actions in a local ledger.
 9. Run once or daily from the CLI.
 10. Run from a local web UI with resume upload and profile URL fields.
+11. Authenticate users by email OTP and isolate their saved data.
+12. Generate and download an improved ATS resume in DOCX format.
+13. Run role- and skill-aware virtual mock interviews with transcripts and scorecards.
 
 This is not yet a full production portal automation product. It is a working technical POC for the core intelligence, UI, and workflow layer.
 
@@ -84,7 +87,7 @@ Basic commands:
 ```bash
 git clone https://github.com/Mriganka10/Job-Hunting-Agent.git
 cd Job-Hunting-Agent
-git checkout feature/prototype_development_v1
+git checkout feature/prototype_development_v4
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev,docs]"
@@ -144,7 +147,7 @@ Purpose:
 
 Tell the technical team:
 
-"This is a Python POC for a resume-driven job hunting assistant. The current system has both CLI and local web UI entry points. It parses a resume, scores it for ATS readiness, searches LinkedIn and Naukri through adapters, creates application drafts, optionally sends recruiter emails through SMTP, and stores run outputs locally. The next major work is authenticated browser automation and a human approval workflow."
+"This is a Python POC for a resume-driven job hunting assistant. The current system has CLI and authenticated FastAPI web entry points. It parses and scores a resume, generates an improved DOCX, searches LinkedIn and Naukri through adapters, creates drafts, optionally sends recruiter emails, persists user-scoped history, and provides a virtual mock-interview studio. The next major work is authenticated portal automation and a human approval workflow."
 
 ## 4. Technical Team Walkthrough
 
@@ -160,7 +163,8 @@ Ask the technical team to follow these steps:
 8. Use `Schedule Daily Run` to save a resume/config and start the daily timer.
 9. Confirm schedule state through the UI or `GET /health`.
 10. Inspect `data/reports`, `data/drafts`, and `data/applications.jsonl`.
-11. Run tests with `python -m pytest -q`.
+11. Download the improved resume and complete a mock interview.
+12. Run tests with `python -m pytest -q`.
 
 ## 5. Business Demo Script
 
@@ -179,11 +183,10 @@ Use this flow for a demo:
 
 ## 6. Current Limitations
 
-- Web UI is local prototype only.
-- No database yet.
+- The web UI is still a prototype and needs production abuse/privacy hardening.
 - No authenticated portal browser automation yet.
-- No CAPTCHA or OTP handling.
-- No LLM-based resume rewriting yet.
+- Portal CAPTCHA and portal OTP flows are intentionally not bypassed; login OTP for this application is implemented.
+- Resume generation and interview scoring are deterministic, not LLM-based.
 - No job-description-specific resume tailoring yet.
 
 ## 7. Recommended Next Sprint
@@ -193,4 +196,4 @@ Use this flow for a demo:
 3. Add browser automation spike for LinkedIn Easy Apply.
 4. Add browser automation spike for Naukri profile-based applications.
 5. Add authenticated browser automation behind the current FastAPI UI.
-6. Add database-backed application history.
+6. Move scheduled execution to a durable worker/queue for multi-instance production.

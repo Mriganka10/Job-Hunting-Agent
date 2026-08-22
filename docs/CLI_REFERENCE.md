@@ -1,6 +1,6 @@
 # CLI Reference
 
-The current project is a command-line proof of concept. It does not expose an HTTP API yet.
+The project provides both a command-line interface and a FastAPI web application. The web API is primarily an authenticated backend for the bundled UI, not a versioned public API.
 
 ## Base Command
 
@@ -49,6 +49,7 @@ Purpose:
 - Draft applications or send recruiter emails.
 - Update the local application ledger.
 - Write latest run summary.
+- Generate an improved ATS resume in DOCX format.
 
 ### Run Daily
 
@@ -74,7 +75,9 @@ Purpose:
 - Submit LinkedIn and Naukri profile URLs.
 - Run the agent immediately.
 - Start or stop an in-process daily scheduler.
-- Confirm schedule state through visible status cards and `/health`.
+- Download the improved resume produced by a run.
+- Practice in the authenticated virtual mock-interview studio.
+- Confirm user-specific schedule state through the dashboard; `/health` intentionally exposes service health only.
 
 ## Configuration Reference
 
@@ -127,7 +130,7 @@ password = ""
 from_email = "you@example.com"
 ```
 
-## Future API Target
+## Web API
 
 A future web version can expose:
 
@@ -140,12 +143,31 @@ A future web version can expose:
 
 Portal submission endpoints should remain approval-gated.
 
-Current web endpoints:
+Public endpoints:
 
 - `GET /`
+- `GET /login`
+- `GET /register`
 - `GET /health`
+- `POST /api/auth/request-otp`
+- `POST /api/auth/register-email`
+- `POST /api/auth/verify`
+- `POST /api/auth/logout`
+
+Authenticated endpoints:
+
+- `GET /api/dashboard`
+- `GET /api/runs`
 - `POST /api/run`
 - `POST /api/scheduler/start`
 - `POST /api/scheduler/stop`
+- `GET /api/runs/{run_id}/improved-resume`
+- `GET /mock-interview`
+- `GET /api/mock-interview/questions`
+- `POST /api/mock-interview/start`
+- `POST /api/mock-interview/complete`
+- `GET /api/mock-interview/history`
 
 `POST /api/run` runs immediately. `POST /api/scheduler/start` saves the uploaded resume/config and schedules the future daily run without running immediately.
+
+The versioned application/submission endpoints listed above remain future targets; portal submission must stay approval-gated.
