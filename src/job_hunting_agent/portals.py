@@ -24,6 +24,7 @@ class SearchIntent:
     roles: tuple[str, ...]
     skills: tuple[str, ...]
     locations: tuple[str, ...]
+    experience_years: float = 0.0
 
     @property
     def query(self) -> str:
@@ -50,7 +51,7 @@ class LinkedInAdapter(PortalAdapter):
         locations = intent.locations or ("India",)
         for role in intent.roles:
             for location in locations[:2]:
-                leads.extend(self._fetch_public_jobs(role, location, config))
+                leads.extend(self._fetch_public_jobs(role, location, config, intent.experience_years))
                 if len(leads) >= config.max_jobs_per_portal:
                     return leads[: config.max_jobs_per_portal]
         return leads[: config.max_jobs_per_portal] or _fallback_search_links(
@@ -58,11 +59,12 @@ class LinkedInAdapter(PortalAdapter):
         )
 
     def _fetch_public_jobs(
-        self, role: str, location: str, config: SearchConfig
+        self, role: str, location: str, config: SearchConfig, experience_years: float = 0.0
     ) -> list[JobLead]:
         url = (
             "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-            f"?keywords={quote_plus(role)}&location={quote_plus(location)}&f_TPR=r86400&start=0"
+            f"?keywords={quote_plus(role)}&location={quote_plus(location)}"
+            f"&f_TPR=r{max(1, config.freshness_days) * 86400}&f_E={quote_plus(_linkedin_experience_filter(experience_years))}&start=0"
         )
         try:
             response = requests.get(url, headers=HEADERS, timeout=TIMEOUT_SECONDS)
@@ -85,7 +87,7 @@ class LinkedInAdapter(PortalAdapter):
                         company=_clean_html(company) or "LinkedIn",
                         location=_clean_html(job_location) or location,
                         url=job_url,
-                        description=f"LinkedIn public listing matched {role}",
+                        description=f"LinkedIn public listing matched {role} ({_experience_label(experience_years)})",
                     )
                 )
             if len(leads) >= config.max_jobs_per_portal:
@@ -103,7 +105,7 @@ class NaukriAdapter(PortalAdapter):
         locations = intent.locations or ("india",)
         for role in intent.roles:
             for location in locations[:2]:
-                leads.extend(self._fetch_public_jobs(role, location, config))
+                leads.extend(self._fetch_public_jobs(role, location, config, intent.experience_years))
                 if len(leads) >= config.max_jobs_per_portal:
                     return leads[: config.max_jobs_per_portal]
         return leads[: config.max_jobs_per_portal] or _fallback_search_links(
@@ -111,9 +113,9 @@ class NaukriAdapter(PortalAdapter):
         )
 
     def _fetch_public_jobs(
-        self, role: str, location: str, config: SearchConfig
+        self, role: str, location: str, config: SearchConfig, experience_years: float = 0.0
     ) -> list[JobLead]:
-        url = _naukri_search_url(role, location, config)
+        url = _naukri_search_url(role, location, config, experience_years)
         try:
             response = requests.get(url, headers=HEADERS, timeout=TIMEOUT_SECONDS)
             response.raise_for_status()
@@ -134,7 +136,7 @@ class NaukriAdapter(PortalAdapter):
                         company="Naukri",
                         location=location,
                         url=job_url,
-                        description=f"Naukri public listing matched {role}",
+                        description=f"Naukri public listing matched {role} ({_experience_label(experience_years)})",
                     )
                 )
             if len(leads) >= config.max_jobs_per_portal:
@@ -146,7 +148,7 @@ def build_search_intent(resume: Resume, profile: CandidateProfile) -> SearchInte
     roles = profile.target_roles or resume.inferred_roles or ("Software Engineer",)
     skills = profile.skills or resume.inferred_skills
     locations = profile.locations or ("Remote",)
-    return SearchIntent(tuple(roles), tuple(skills), tuple(locations))
+    return SearchIntent(tuple(roles), tuple(skills), tuple(locations), max(0.0, profile.experience_years))
 
 
 def get_adapters(names: tuple[str, ...]) -> list[PortalAdapter]:
@@ -166,7 +168,7 @@ def _fallback_search_links(
     leads: list[JobLead] = []
     for role in intent.roles[: config.max_jobs_per_portal]:
         for location in (intent.locations or ("India",))[:2]:
-            url = url_builder(role, location, config)
+            url = url_builder(role, location, config, intent.experience_years)
             leads.append(
                 JobLead(
                     portal=portal,
@@ -174,23 +176,41 @@ def _fallback_search_links(
                     company=f"{portal.title()} search results",
                     location=location,
                     url=url,
-                    description=f"Search results for {role} in {location}",
+                    description=f"Search results for {role} in {location} ({_experience_label(intent.experience_years)})",
                 )
             )
     return leads[: config.max_jobs_per_portal]
 
 
-def _linkedin_search_url(role: str, location: str, config: SearchConfig) -> str:
+def _linkedin_search_url(role: str, location: str, config: SearchConfig, experience_years: float = 0.0) -> str:
     return (
         "https://www.linkedin.com/jobs/search/"
-        f"?keywords={quote_plus(role)}&location={quote_plus(location)}&f_TPR=r86400"
+        f"?keywords={quote_plus(role)}&location={quote_plus(location)}"
+        f"&f_TPR=r{max(1, config.freshness_days) * 86400}&f_E={quote_plus(_linkedin_experience_filter(experience_years))}"
     )
 
 
-def _naukri_search_url(role: str, location: str, config: SearchConfig) -> str:
+def _naukri_search_url(role: str, location: str, config: SearchConfig, experience_years: float = 0.0) -> str:
     slug = quote_plus(role).replace("+", "-").lower()
     loc = quote_plus(location).replace("+", "-").lower()
-    return f"https://www.naukri.com/{slug}-jobs-in-{loc}?jobAge={config.freshness_days}"
+    years = max(0, min(round(experience_years), 30))
+    return f"https://www.naukri.com/{slug}-jobs-in-{loc}?jobAge={config.freshness_days}&experience={years}"
+
+
+def _linkedin_experience_filter(experience_years: float) -> str:
+    if experience_years < 1:
+        return "1,2"
+    if experience_years < 3:
+        return "2,3"
+    if experience_years < 7:
+        return "3,4"
+    return "4,5"
+
+
+def _experience_label(experience_years: float) -> str:
+    if experience_years < 1:
+        return "internship/entry level"
+    return f"about {experience_years:g} years experience"
 
 
 def _first_match(text: str, pattern: str) -> str:

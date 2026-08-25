@@ -643,6 +643,7 @@ async def run_now(
     target_roles: Annotated[str, Form()] = "",
     locations: Annotated[str, Form()] = "",
     skills: Annotated[str, Form()] = "",
+    experience_years: Annotated[float, Form()] = 0,
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
@@ -660,11 +661,15 @@ async def run_now(
         target_roles=target_roles,
         locations=locations,
         skills=skills,
+        experience_years=experience_years,
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
     ))
     _save_profile(user_email, config, stored_resume)
-    result = run_agent(str(stored_resume.local_path), config, trigger="manual", user_email=user_email)
+    try:
+        result = run_agent(str(stored_resume.local_path), config, trigger="manual", user_email=user_email)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if stored_resume.uri:
         result["resume_uri"] = stored_resume.uri
     if start_daily:
@@ -696,6 +701,7 @@ async def start_scheduler(
     target_roles: Annotated[str, Form()] = "",
     locations: Annotated[str, Form()] = "",
     skills: Annotated[str, Form()] = "",
+    experience_years: Annotated[float, Form()] = 0,
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
@@ -714,6 +720,7 @@ async def start_scheduler(
         target_roles=target_roles,
         locations=locations,
         skills=skills,
+        experience_years=experience_years,
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
     ))
@@ -926,6 +933,7 @@ def _profile_for_user(user_email: str) -> dict:
         "target_roles": "",
         "locations": "",
         "skills": "",
+        "experience_years": 0,
         "max_jobs_per_portal": 10,
         "application_mode": "draft",
         "daily_at": "",
@@ -947,6 +955,7 @@ def _profile_view(payload: dict, stored: dict) -> dict:
         "target_roles": ", ".join(profile.get("target_roles") or ()),
         "locations": ", ".join(profile.get("locations") or ()),
         "skills": ", ".join(profile.get("skills") or ()),
+        "experience_years": max(0.0, float(profile.get("experience_years", 0) or 0)),
         "max_jobs_per_portal": int(search.get("max_jobs_per_portal", 10)),
         "application_mode": application.get("mode", "draft"),
         "resume_name": stored.get("resume_name") or Path(stored.get("resume_path") or "").name,
@@ -1265,6 +1274,7 @@ def build_config_from_form(
     skills: str,
     application_mode: str,
     max_jobs_per_portal: int,
+    experience_years: float = 0,
 ) -> AppConfig:
     if application_mode not in {"draft", "email"}:
         raise HTTPException(status_code=400, detail="application_mode must be draft or email.")
@@ -1278,6 +1288,7 @@ def build_config_from_form(
             target_roles=_split_csv(target_roles),
             locations=_split_csv(locations),
             skills=_split_csv(skills),
+            experience_years=max(0.0, min(float(experience_years or 0), 50.0)),
         ),
         search=SearchConfig(max_jobs_per_portal=max(1, min(max_jobs_per_portal, 50))),
         application=ApplicationConfig(mode=application_mode, data_dir=str(DATA_DIR)),
@@ -1351,6 +1362,7 @@ def _config_from_payload(payload: dict) -> AppConfig:
             target_roles=tuple(profile.get("target_roles", ())),
             locations=tuple(profile.get("locations", ())),
             skills=tuple(profile.get("skills", ())),
+            experience_years=max(0.0, float(profile.get("experience_years", 0) or 0)),
         ),
         search=SearchConfig(
             max_jobs_per_portal=int(search.get("max_jobs_per_portal", 10)),
@@ -2252,6 +2264,9 @@ def _page(user_email: str, profile: dict) -> str:
         <textarea id="locations" name="locations">__LOCATIONS__</textarea>
         <label for="skills">Skills</label>
         <textarea id="skills" name="skills">__SKILLS__</textarea>
+        <label for="experience_years">Professional Experience (years)</label>
+        <input id="experience_years" name="experience_years" type="number" min="0" max="50" step="0.5" value="__EXPERIENCE_YEARS__">
+        <p class="muted">Enter 0 if you are a fresher. This sets portal experience filters; it does not invent experience in the ATS report or improved resume.</p>
         <div class="row">
           <div><label for="max_jobs_per_portal">Max Jobs Per Portal</label><input id="max_jobs_per_portal" name="max_jobs_per_portal" type="number" min="1" max="50" value="__MAX_JOBS__"></div>
           <div><label for="application_mode">Application Mode</label><select id="application_mode" name="application_mode">__APPLICATION_OPTIONS__</select></div>
@@ -2315,35 +2330,53 @@ def _page(user_email: str, profile: dict) -> str:
       data.set('daily_timezone', timezoneInput.value);
       return data;
     }
+    async function responsePayload(response) {
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) return response.json();
+      const message = (await response.text()).trim();
+      return { detail: message || `Request failed with status ${response.status}.` };
+    }
+    function showRequestError(error, fallback) {
+      summary.className = 'note';
+      summary.textContent = error instanceof Error && error.message ? error.message : fallback;
+    }
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       summary.textContent = 'Running ATS scoring, portal search, and application drafting...';
       summary.className = 'muted';
       details.innerHTML = '';
-      const data = enrichFormData();
-      const response = await fetch('/api/run', { method: 'POST', body: data });
-      const payload = await response.json();
-      if (!response.ok) {
-        summary.textContent = payload.detail || 'Run failed.';
-        return;
+      try {
+        const data = enrichFormData();
+        const response = await fetch('/api/run', { method: 'POST', body: data });
+        const payload = await responsePayload(response);
+        if (!response.ok) {
+          showRequestError(new Error(payload.detail || 'Run failed.'), 'Run failed.');
+          return;
+        }
+        render(payload, 'manual');
+        refreshDashboard();
+      } catch (error) {
+        showRequestError(error, 'Run failed. Check the server terminal and try again.');
       }
-      render(payload, 'manual');
-      refreshDashboard();
     });
     document.getElementById('schedule-run').addEventListener('click', async () => {
       summary.className = 'muted';
       summary.textContent = 'Uploading resume and scheduling the daily agent run...';
       details.innerHTML = '';
-      const data = enrichFormData();
-      const response = await fetch('/api/scheduler/start', { method: 'POST', body: data });
-      const payload = await response.json();
-      if (!response.ok) {
-        summary.textContent = payload.detail || 'Schedule failed.';
-        return;
+      try {
+        const data = enrichFormData();
+        const response = await fetch('/api/scheduler/start', { method: 'POST', body: data });
+        const payload = await responsePayload(response);
+        if (!response.ok) {
+          showRequestError(new Error(payload.detail || 'Schedule failed.'), 'Schedule failed.');
+          return;
+        }
+        renderScheduler(payload.scheduler);
+        summary.innerHTML = `<p class="muted">Daily run scheduled. The agent will run at the configured time while this server process is active.</p>`;
+        refreshDashboard();
+      } catch (error) {
+        showRequestError(error, 'Scheduling failed. Check the server terminal and try again.');
       }
-      renderScheduler(payload.scheduler);
-      summary.innerHTML = `<p class="muted">Daily run scheduled. The agent will run at the configured time while this server process is active.</p>`;
-      refreshDashboard();
     });
     document.getElementById('stop-scheduler').addEventListener('click', async () => {
       const response = await fetch('/api/scheduler/stop', { method: 'POST' });
@@ -2503,6 +2536,7 @@ def _page(user_email: str, profile: dict) -> str:
         "__TARGET_ROLES__": profile.get("target_roles", ""),
         "__LOCATIONS__": profile.get("locations", ""),
         "__SKILLS__": profile.get("skills", ""),
+        "__EXPERIENCE_YEARS__": str(profile.get("experience_years", 0)),
         "__MAX_JOBS__": str(profile.get("max_jobs_per_portal", 10)),
         "__DAILY_AT__": profile.get("daily_at", ""),
         "__RESUME_STATUS__": (

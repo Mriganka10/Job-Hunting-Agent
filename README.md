@@ -6,6 +6,7 @@ Resume-first job-search assistant that evaluates ATS readiness, generates an imp
 
 - Parses a PDF, DOCX, TXT, or Markdown resume.
 - Scores the resume for ATS readiness and role fit.
+- Reports detected sections, matched and missing configured skills, and a transparent category score breakdown.
 - Suggests resume improvements and generates a downloadable ATS-friendly DOCX.
 - Searches configured portals such as LinkedIn and Naukri.
 - Keeps a local ledger so the same job is not applied twice.
@@ -79,6 +80,7 @@ Edit `config.toml` after copying `config.example.toml`.
 - `profile.target_roles`: preferred job titles.
 - `profile.locations`: preferred cities or remote.
 - `profile.skills`: extra skills to search for if the resume is sparse.
+- `profile.experience_years`: professional experience used to request suitable portal seniority; use `0` for a fresher.
 - `profile.linkedin_profile_url` and `profile.naukri_profile_url`: profile links included in application drafts/emails and available to future authenticated portal adapters.
 - `application.mode`: `draft` or `email`.
 - `email`: SMTP settings used only when `application.mode = "email"`.

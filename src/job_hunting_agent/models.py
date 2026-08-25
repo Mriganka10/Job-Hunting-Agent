@@ -14,6 +14,7 @@ class CandidateProfile:
     target_roles: tuple[str, ...] = ()
     locations: tuple[str, ...] = ()
     skills: tuple[str, ...] = ()
+    experience_years: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,9 @@ class AtsReport:
     strengths: tuple[str, ...]
     improvements: tuple[str, ...]
     missing_keywords: tuple[str, ...]
+    detected_sections: tuple[str, ...] = ()
+    matched_keywords: tuple[str, ...] = ()
+    score_breakdown: tuple[tuple[str, int, int], ...] = ()
 
 
 @dataclass(frozen=True)

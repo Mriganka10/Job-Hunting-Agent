@@ -56,6 +56,7 @@ def load_config(path: str | Path) -> AppConfig:
             target_roles=tuple(profile_data.get("target_roles", ())),
             locations=tuple(profile_data.get("locations", ())),
             skills=tuple(profile_data.get("skills", ())),
+            experience_years=max(0.0, float(profile_data.get("experience_years", 0) or 0)),
         ),
         search=SearchConfig(
             max_jobs_per_portal=int(search_data.get("max_jobs_per_portal", 10)),
