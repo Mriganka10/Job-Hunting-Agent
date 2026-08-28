@@ -11,6 +11,7 @@ import secrets
 import smtplib
 import threading
 import time
+from xml.sax.saxutils import escape as xml_escape
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -18,8 +19,9 @@ from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import requests
 from fastapi import BackgroundTasks, Body, Cookie, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .agent import JobHuntingAgent
@@ -62,6 +64,8 @@ COOKIE_SECURE = os.getenv("JOB_AGENT_COOKIE_SECURE", "false").lower() == "true"
 DEV_RETURN_OTP = os.getenv("JOB_AGENT_DEV_RETURN_OTP", "true").lower() == "true"
 EMAIL_PROVIDER = os.getenv("JOB_AGENT_EMAIL_PROVIDER", "smtp").strip().lower()
 SES_REGION = os.getenv("JOB_AGENT_SES_REGION", os.getenv("AWS_REGION", "ap-south-1"))
+AZURE_SPEECH_KEY = os.getenv("JOB_AGENT_AZURE_SPEECH_KEY", "").strip()
+AZURE_SPEECH_REGION = os.getenv("JOB_AGENT_AZURE_SPEECH_REGION", "").strip()
 EMAIL_PATTERN = re.compile(
     r"^(?=.{6,254}$)(?!.*\.\.)[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,63}$",
     re.IGNORECASE,
@@ -576,8 +580,13 @@ def start_mock_interview(
     interview = _mock_interview_payload(profile, latest_payload)
     region = str(payload.get("region") or "India")
     accent = str(payload.get("accent") or _accent_for_region(region)["label"])
-    question_limit = max(4, min(int(payload.get("question_limit") or 8), 12))
-    questions = _interview_question_sequence(interview["groups"], question_limit)
+    requested_limit = max(4, min(int(payload.get("question_limit") or 8), 12))
+    interview_mode = str(payload.get("interview_mode") or _interview_mode_for_limit(requested_limit)).strip().lower()
+    mode_limits = {"quick": 5, "standard": 8, "deep": 10}
+    if interview_mode not in mode_limits:
+        raise HTTPException(status_code=400, detail="Interview mode must be quick, standard, or deep.")
+    question_limit = mode_limits[interview_mode]
+    questions = _interview_question_sequence(interview["groups"], question_limit, interview_mode)
     session_id = create_mock_interview_session(
         user_email,
         region=region,
@@ -591,6 +600,8 @@ def start_mock_interview(
         "region": region,
         "accent": accent,
         "voice": _accent_for_region(region),
+        "tts_provider": "azure" if AZURE_SPEECH_KEY and AZURE_SPEECH_REGION else "browser",
+        "interview_mode": interview_mode,
         "roles": interview["roles"],
         "skills": interview["skills"],
         "questions": questions,
@@ -643,6 +654,8 @@ async def run_now(
     target_roles: Annotated[str, Form()] = "",
     locations: Annotated[str, Form()] = "",
     skills: Annotated[str, Form()] = "",
+    experience_years: Annotated[float, Form()] = 0,
+    job_description: Annotated[str, Form()] = "",
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
@@ -660,11 +673,16 @@ async def run_now(
         target_roles=target_roles,
         locations=locations,
         skills=skills,
+        experience_years=experience_years,
+        job_description=job_description,
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
     ))
     _save_profile(user_email, config, stored_resume)
-    result = run_agent(str(stored_resume.local_path), config, trigger="manual", user_email=user_email)
+    try:
+        result = run_agent(str(stored_resume.local_path), config, trigger="manual", user_email=user_email)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if stored_resume.uri:
         result["resume_uri"] = stored_resume.uri
     if start_daily:
@@ -696,6 +714,8 @@ async def start_scheduler(
     target_roles: Annotated[str, Form()] = "",
     locations: Annotated[str, Form()] = "",
     skills: Annotated[str, Form()] = "",
+    experience_years: Annotated[float, Form()] = 0,
+    job_description: Annotated[str, Form()] = "",
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
@@ -714,6 +734,8 @@ async def start_scheduler(
         target_roles=target_roles,
         locations=locations,
         skills=skills,
+        experience_years=experience_years,
+        job_description=job_description,
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
     ))
@@ -926,6 +948,8 @@ def _profile_for_user(user_email: str) -> dict:
         "target_roles": "",
         "locations": "",
         "skills": "",
+        "experience_years": 0,
+        "job_description": "",
         "max_jobs_per_portal": 10,
         "application_mode": "draft",
         "daily_at": "",
@@ -947,6 +971,8 @@ def _profile_view(payload: dict, stored: dict) -> dict:
         "target_roles": ", ".join(profile.get("target_roles") or ()),
         "locations": ", ".join(profile.get("locations") or ()),
         "skills": ", ".join(profile.get("skills") or ()),
+        "experience_years": max(0.0, float(profile.get("experience_years", 0) or 0)),
+        "job_description": str(profile.get("job_description", "") or ""),
         "max_jobs_per_portal": int(search.get("max_jobs_per_portal", 10)),
         "application_mode": application.get("mode", "draft"),
         "resume_name": stored.get("resume_name") or Path(stored.get("resume_path") or "").name,
@@ -1091,111 +1117,180 @@ def _mock_interview_questions_for(roles: tuple[str, ...], skills: tuple[str, ...
     return groups
 
 
-def _interview_question_sequence(groups: list[dict], limit: int) -> list[dict]:
-    questions: list[dict] = []
+def _interview_mode_for_limit(limit: int) -> str:
+    if limit <= 5:
+        return "quick"
+    if limit >= 10:
+        return "deep"
+    return "standard"
+
+
+def _interview_question_sequence(groups: list[dict], limit: int, mode: str = "standard") -> list[dict]:
+    """Build a varied, non-repeating session with mode-specific depth and category coverage."""
+    rng = secrets.SystemRandom()
+    pools: list[dict] = []
     for group in groups:
-        first_question = next(iter(group.get("questions") or []), "")
-        if first_question:
-            questions.append(
-                {
-                    "id": f"q{len(questions) + 1}",
-                    "category": group.get("title", "Interview"),
-                    "tag": group.get("tag", ""),
-                    "question": first_question,
-                }
-            )
-        if len(questions) >= limit:
-            return questions[:limit]
-    for group in groups:
-        for question in (group.get("questions") or [])[1:]:
-            questions.append(
-                {
-                    "id": f"q{len(questions) + 1}",
-                    "category": group.get("title", "Interview"),
-                    "tag": group.get("tag", ""),
-                    "question": question,
-                }
-            )
-            if len(questions) >= limit:
-                return questions[:limit]
-    return questions[:limit]
+        candidates = list(dict.fromkeys(group.get("questions") or []))
+        rng.shuffle(candidates)
+        pools.append({**group, "questions": candidates})
+
+    behavioral = [group for group in pools if "Behavioral" in group.get("title", "")]
+    technical = [group for group in pools if group not in behavioral]
+    if mode == "quick":
+        ordered_groups = behavioral + technical
+    elif mode == "deep":
+        ordered_groups = list(reversed(technical)) + behavioral
+    else:
+        ordered_groups = technical + behavioral
+
+    selected: list[tuple[dict, str]] = []
+    # First pass guarantees breadth. Later passes add depth without repeating text.
+    for group in ordered_groups:
+        if group.get("questions"):
+            selected.append((group, group["questions"].pop(0)))
+        if len(selected) >= limit:
+            break
+    while len(selected) < limit and any(group.get("questions") for group in ordered_groups):
+        available = [group for group in ordered_groups if group.get("questions")]
+        rng.shuffle(available)
+        for group in available:
+            selected.append((group, group["questions"].pop(0)))
+            if len(selected) >= limit:
+                break
+    return [
+        {
+            "id": f"q{index}",
+            "category": group.get("title", "Interview"),
+            "tag": group.get("tag", ""),
+            "question": question,
+        }
+        for index, (group, question) in enumerate(selected[:limit], start=1)
+    ]
 
 
 def _accent_for_region(region: str) -> dict:
     normalized = region.strip().lower()
     accents = {
-        "india": {"label": "Indian English", "lang": "en-IN", "voice_hint": "India"},
-        "united states": {"label": "US English", "lang": "en-US", "voice_hint": "United States"},
-        "usa": {"label": "US English", "lang": "en-US", "voice_hint": "United States"},
-        "united kingdom": {"label": "British English", "lang": "en-GB", "voice_hint": "United Kingdom"},
-        "uk": {"label": "British English", "lang": "en-GB", "voice_hint": "United Kingdom"},
-        "australia": {"label": "Australian English", "lang": "en-AU", "voice_hint": "Australia"},
-        "canada": {"label": "Canadian English", "lang": "en-CA", "voice_hint": "Canada"},
-        "singapore": {"label": "Singapore English", "lang": "en-SG", "voice_hint": "Singapore"},
+        "india": {"label": "Indian English", "lang": "en-IN", "azure_voice": "en-IN-NeerjaNeural", "female_voice_hints": ["Heera", "Veena", "Aditi", "Raveena", "Neerja", "Kavya", "Swara"], "male_voice_hints": ["Ravi", "Prabhat", "Kunal"]},
+        "united states": {"label": "US English", "lang": "en-US", "azure_voice": "en-US-JennyNeural", "female_voice_hints": ["Zira", "Jenny", "Aria", "Samantha", "Ava", "Joanna", "Salli"], "male_voice_hints": ["David", "Mark", "Guy", "Christopher", "Eric"]},
+        "usa": {"label": "US English", "lang": "en-US", "azure_voice": "en-US-JennyNeural", "female_voice_hints": ["Zira", "Jenny", "Aria", "Samantha", "Ava", "Joanna", "Salli"], "male_voice_hints": ["David", "Mark", "Guy", "Christopher", "Eric"]},
+        "united kingdom": {"label": "British English", "lang": "en-GB", "azure_voice": "en-GB-SoniaNeural", "female_voice_hints": ["Hazel", "Sonia", "Libby", "Susan", "Amy", "Emma"], "male_voice_hints": ["George", "Ryan", "Arthur", "Brian"]},
+        "uk": {"label": "British English", "lang": "en-GB", "azure_voice": "en-GB-SoniaNeural", "female_voice_hints": ["Hazel", "Sonia", "Libby", "Susan", "Amy", "Emma"], "male_voice_hints": ["George", "Ryan", "Arthur", "Brian"]},
+        "australia": {"label": "Australian English", "lang": "en-AU", "azure_voice": "en-AU-NatashaNeural", "female_voice_hints": ["Karen", "Catherine", "Olivia", "Nicole", "Natasha"], "male_voice_hints": ["Lee", "William", "Darren"]},
+        "canada": {"label": "Canadian English", "lang": "en-CA", "azure_voice": "en-CA-ClaraNeural", "female_voice_hints": ["Clara", "Linda"], "male_voice_hints": ["Liam"]},
+        "singapore": {"label": "Singapore English", "lang": "en-SG", "azure_voice": "en-SG-LunaNeural", "female_voice_hints": ["Luna", "Seraphina", "Jia"], "male_voice_hints": ["Wayne"]},
     }
-    return accents.get(normalized, {"label": "Neutral English", "lang": "en-US", "voice_hint": "English"})
+    return accents.get(normalized, {"label": "Neutral English", "lang": "en-US", "azure_voice": "en-US-JennyNeural", "female_voice_hints": ["Zira", "Jenny", "Samantha"], "male_voice_hints": ["David", "Mark", "Guy"]})
+
+
+@app.post("/api/mock-interview/speech")
+def mock_interview_speech(
+    payload: Annotated[dict, Body()],
+    job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> Response:
+    user_email = require_user(job_agent_session)
+    if not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
+        raise HTTPException(status_code=503, detail="Azure neural speech is not configured.")
+    session_id = int(payload.get("session_id") or 0)
+    question_id = str(payload.get("question_id") or "")
+    session = mock_interview_session(user_email, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found.")
+    question = next((item for item in session.get("questions") or [] if str(item.get("id") or "") == question_id), None)
+    if not question:
+        raise HTTPException(status_code=404, detail="Interview question not found.")
+    voice = _accent_for_region(str(session.get("region") or "India"))
+    try:
+        audio = _azure_speech_audio(str(question.get("question") or ""), voice)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Neural interviewer voice is temporarily unavailable.") from exc
+    return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=300"})
+
+
+def _azure_speech_audio(text: str, voice: dict) -> bytes:
+    endpoint = f"https://{AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1"
+    language = str(voice.get("lang") or "en-US")
+    voice_name = str(voice.get("azure_voice") or "en-US-JennyNeural")
+    ssml = (
+        f"<speak version='1.0' xml:lang='{language}'>"
+        f"<voice xml:lang='{language}' xml:gender='Female' name='{voice_name}'>"
+        f"{xml_escape(text[:1200])}</voice></speak>"
+    )
+    response = requests.post(
+        endpoint,
+        headers={
+            "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY,
+            "Content-Type": "application/ssml+xml",
+            "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+            "User-Agent": "job-hunting-agent",
+        },
+        data=ssml.encode("utf-8"),
+        timeout=20,
+    )
+    response.raise_for_status()
+    return response.content
 
 
 def _score_mock_interview(answers: list[dict], questions: list[dict]) -> dict:
+    answers_by_id = {str(item.get("question_id") or ""): item for item in answers if item.get("question_id")}
     scored_answers: list[dict] = []
-    total = 0
     answered = 0
-    for index, answer in enumerate(answers):
+    seen_answers: set[str] = set()
+    for index, question_item in enumerate(questions):
+        answer = answers_by_id.get(str(question_item.get("id") or ""))
+        if answer is None and index < len(answers):
+            answer = answers[index]
+        answer = answer or {}
         text = str(answer.get("answer") or "").strip()
-        question = str(answer.get("question") or (questions[index].get("question") if index < len(questions) else ""))
-        words = [word.strip(".,;:!?()[]{}").lower() for word in text.split() if word.strip()]
-        unique_words = len(set(words))
-        word_count = len(words)
-        score = 0
+        question = str(question_item.get("question") or "")
+        rubric = _answer_rubric(text, question)
+        score = round(
+            rubric.get("Relevance", 0) * 0.30
+            + rubric.get("Structure", 0) * 0.20
+            + rubric.get("Specificity", 0) * 0.20
+            + rubric.get("Technical depth", 0) * 0.20
+            + rubric.get("Communication", 0) * 0.10
+        ) if rubric else 0
         signals: list[str] = []
         improvements: list[str] = []
-        if word_count >= 45:
-            score += 25
-            signals.append("Gave enough context for the interviewer to evaluate depth.")
-        elif word_count >= 20:
-            score += 16
-            signals.append("Answered the question, but could add more implementation detail.")
-            improvements.append("Add context, action, and outcome so the answer feels complete.")
-        else:
-            score += 6
-            improvements.append("Expand short answers with a clear project example and tradeoffs.")
-        if any(token in text.lower() for token in ("because", "therefore", "tradeoff", "trade-off", "root cause", "impact", "result", "measured", "reduced", "improved", "automated", "designed", "implemented")):
-            score += 25
-            signals.append("Explained reasoning, decisions, or measurable impact.")
-        else:
-            improvements.append("Use a structured flow: situation, decision, implementation, impact.")
-        if any(char.isdigit() for char in text) or any(token in text.lower() for token in ("sla", "latency", "cost", "volume", "users", "records", "gb", "tb", "percent", "%")):
-            score += 20
-            signals.append("Included measurable or operational detail.")
-        else:
-            improvements.append("Add numbers where truthful: data volume, SLA, latency, defect reduction, or timeline.")
-        if unique_words >= 30:
-            score += 15
-        elif unique_words >= 15:
-            score += 9
-        else:
-            improvements.append("Avoid repeating generic wording; be specific about tools, systems, and ownership.")
-        question_terms = {word for word in question.lower().replace("/", " ").replace("-", " ").split() if len(word) > 4}
-        overlap = sum(1 for term in question_terms if term in text.lower())
-        if overlap >= 2:
-            score += 15
-            signals.append("Stayed aligned to the question.")
-        else:
-            improvements.append("Echo the core question topic before answering so alignment is obvious.")
-        score = max(0, min(100, score))
+        feedback = {
+            "Relevance": ("Stayed focused on the question and its technical intent.", "Answer the exact question first and connect the example to its core topic."),
+            "Structure": ("Used a clear context-to-action-to-outcome flow.", "Organize the answer as context, responsibility, action, and outcome."),
+            "Specificity": ("Used concrete evidence rather than only general claims.", "Add a truthful example with scope, ownership, constraints, and measurable evidence."),
+            "Technical depth": ("Explained implementation choices and technical reasoning.", "Explain the tools used, implementation decision, trade-off, and why it worked."),
+            "Communication": ("The response was sufficiently detailed and readable.", "Give a focused 45–150 word answer and avoid fragments, repetition, or filler."),
+        }
+        for dimension, dimension_score in rubric.items():
+            positive, corrective = feedback[dimension]
+            if dimension_score >= 75:
+                signals.append(positive)
+            elif dimension_score < 55:
+                improvements.append(corrective)
+        answer_fingerprint = " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
+        if text and rubric.get("Relevance", 0) < 50:
+            score = min(score, 60)
+        if answer_fingerprint and answer_fingerprint in seen_answers:
+            score = min(score, 45)
+            improvements.insert(0, "Do not reuse the same response for different questions; give evidence that directly answers this prompt.")
+        if answer_fingerprint:
+            seen_answers.add(answer_fingerprint)
         if text:
             answered += 1
-        total += score
         scored_answers.append(
             {
                 "question": question,
                 "answer": text,
                 "score": score,
+                "rubric": rubric,
                 "signals": signals,
-                "improvements": improvements[:3],
+                "improvements": improvements[:5],
             }
         )
-    average = round(total / len(scored_answers)) if scored_answers else 0
+    average = round(sum(item["score"] for item in scored_answers) / len(scored_answers)) if scored_answers else 0
+    rubric_summary = {
+        dimension: round(sum(item["rubric"].get(dimension, 0) for item in scored_answers) / len(scored_answers))
+        for dimension in ("Relevance", "Structure", "Specificity", "Technical depth", "Communication")
+    } if scored_answers else {}
     confidence = "Strong" if average >= 78 else "Developing" if average >= 58 else "Needs practice"
     return {
         "score": average,
@@ -1205,7 +1300,51 @@ def _score_mock_interview(answers: list[dict], questions: list[dict]) -> dict:
         "summary": _interview_summary(average, answered, len(scored_answers)),
         "strengths": _scorecard_strengths(scored_answers),
         "improvements": _scorecard_improvements(scored_answers),
+        "rubric": rubric_summary,
         "answers": scored_answers,
+    }
+
+
+def _answer_rubric(text: str, question: str) -> dict[str, int]:
+    if not text.strip():
+        return {name: 0 for name in ("Relevance", "Structure", "Specificity", "Technical depth", "Communication")}
+    lower = text.casefold()
+    words = re.findall(r"[a-z0-9+#.-]+", lower)
+    word_count = len(words)
+    unique_ratio = len(set(words)) / max(1, word_count)
+    stopwords = {"about", "after", "before", "could", "explain", "would", "their", "there", "which", "where", "while", "with", "from", "that", "this", "what", "when", "your", "have", "into"}
+    question_terms = {word for word in re.findall(r"[a-z0-9+#.-]+", question.casefold()) if len(word) > 3 and word not in stopwords}
+    overlap = sum(1 for term in question_terms if term in lower)
+    relevance = min(100, 35 + overlap * 13) if question_terms else 65
+
+    context_markers = ("situation", "context", "challenge", "problem", "responsible", "task", "required")
+    action_markers = ("i built", "i designed", "i implemented", "i created", "i analyzed", "i led", "i decided", "my role", "we used")
+    outcome_markers = ("result", "outcome", "impact", "reduced", "improved", "increased", "saved", "delivered")
+    structure = 25 + 25 * any(marker in lower for marker in context_markers) + 25 * any(marker in lower for marker in action_markers) + 25 * any(marker in lower for marker in outcome_markers)
+
+    evidence = any(char.isdigit() for char in text) or any(term in lower for term in ("percent", "%", "users", "records", "hours", "days", "sla", "latency", "cost", "revenue", "gb", "tb"))
+    ownership = any(term in lower for term in ("i ", "my ", "personally", "owned", "responsible"))
+    example = any(term in lower for term in ("for example", "in one project", "at my", "during", "when we", "the project"))
+    specificity = min(100, 25 + 30 * evidence + 25 * ownership + 20 * example)
+
+    technical_markers = ("architecture", "pipeline", "database", "query", "api", "python", "sql", "spark", "aws", "azure", "gcp", "model", "deployment", "testing", "monitoring", "schema", "index", "partition", "algorithm")
+    reasoning_markers = ("because", "therefore", "trade-off", "tradeoff", "instead", "chose", "decision", "root cause", "constraint")
+    technical_hits = sum(1 for marker in technical_markers if marker in lower)
+    technical_depth = min(100, 25 + technical_hits * 10 + 25 * any(marker in lower for marker in reasoning_markers))
+
+    if 45 <= word_count <= 180:
+        length_score = 75
+    elif 25 <= word_count < 45 or 181 <= word_count <= 240:
+        length_score = 55
+    else:
+        length_score = 30
+    communication = min(100, length_score + (15 if unique_ratio >= 0.55 else 5) + (10 if text.count(".") + text.count("?") >= 2 else 0))
+    return {
+        "Relevance": int(relevance),
+        "Structure": int(structure),
+        "Specificity": int(specificity),
+        "Technical depth": int(technical_depth),
+        "Communication": int(communication),
     }
 
 
@@ -1265,6 +1404,8 @@ def build_config_from_form(
     skills: str,
     application_mode: str,
     max_jobs_per_portal: int,
+    experience_years: float = 0,
+    job_description: str = "",
 ) -> AppConfig:
     if application_mode not in {"draft", "email"}:
         raise HTTPException(status_code=400, detail="application_mode must be draft or email.")
@@ -1278,6 +1419,8 @@ def build_config_from_form(
             target_roles=_split_csv(target_roles),
             locations=_split_csv(locations),
             skills=_split_csv(skills),
+            experience_years=max(0.0, min(float(experience_years or 0), 50.0)),
+            job_description=job_description.strip(),
         ),
         search=SearchConfig(max_jobs_per_portal=max(1, min(max_jobs_per_portal, 50))),
         application=ApplicationConfig(mode=application_mode, data_dir=str(DATA_DIR)),
@@ -1351,6 +1494,8 @@ def _config_from_payload(payload: dict) -> AppConfig:
             target_roles=tuple(profile.get("target_roles", ())),
             locations=tuple(profile.get("locations", ())),
             skills=tuple(profile.get("skills", ())),
+            experience_years=max(0.0, float(profile.get("experience_years", 0) or 0)),
+            job_description=str(profile.get("job_description", "") or ""),
         ),
         search=SearchConfig(
             max_jobs_per_portal=int(search.get("max_jobs_per_portal", 10)),
@@ -1699,9 +1844,9 @@ def _mock_interview_page(user_email: str) -> str:
         <div>
           <label for="question-limit">Interview length</label>
           <select id="question-limit">
-            <option value="8">Standard - 8 questions</option>
-            <option value="5">Quick confidence round - 5 questions</option>
-            <option value="10">Deep practice - 10 questions</option>
+            <option value="standard">Standard - 8 balanced questions</option>
+            <option value="quick">Quick confidence round - 5 foundation questions</option>
+            <option value="deep">Deep practice - 10 advanced questions</option>
           </select>
         </div>
         <div class="setup-actions">
@@ -1790,7 +1935,11 @@ def _mock_interview_page(user_email: str) -> str:
     let startedAt = null;
     let timerId = null;
     let recognition = null;
+    let recognitionActive = false;
+    let recognitionBase = '';
+    let recognitionRestartTimer = null;
     let mediaStream = null;
+    let interviewerAudio = null;
     function escapeHtml(value) {{
       return String(value).replace(/[&<>"']/g, (char) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}}[char]));
     }}
@@ -1833,20 +1982,73 @@ def _mock_interview_page(user_email: str) -> str:
     }}
     function preferredVoice(voiceProfile) {{
       const voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
-      return voices.find((voice) => voice.lang === voiceProfile.lang && voice.name.includes(voiceProfile.voice_hint))
-        || voices.find((voice) => voice.lang === voiceProfile.lang)
-        || voices.find((voice) => voice.lang && voice.lang.startsWith('en'))
-        || null;
+      const targetLanguage = String(voiceProfile?.lang || '').toLowerCase().replace('_', '-');
+      const hints = (voiceProfile?.female_voice_hints || []).map((hint) => hint.toLowerCase());
+      const maleHints = (voiceProfile?.male_voice_hints || []).map((hint) => hint.toLowerCase());
+      const globalFemaleHints = ['heera','veena','aditi','raveena','neerja','kavya','swara','zira','jenny','aria','samantha','ava','joanna','salli','hazel','sonia','libby','susan','amy','emma','karen','catherine','olivia','nicole','natasha','clara','linda','luna','seraphina'];
+      const exactVoices = voices.filter((voice) => String(voice.lang || '').toLowerCase().replace('_', '-') === targetLanguage);
+      const knownFemaleExact = exactVoices.find((voice) => {{
+        const name = String(voice.name || '').toLowerCase();
+        return hints.some((hint) => name.includes(hint));
+      }});
+      if (knownFemaleExact) return knownFemaleExact;
+      const nonMaleExact = exactVoices.find((voice) => {{
+        const name = String(voice.name || '').toLowerCase();
+        return !maleHints.some((hint) => name.includes(hint));
+      }});
+      if (nonMaleExact) return nonMaleExact;
+      return voices.find((voice) => {{
+        const language = String(voice.lang || '').toLowerCase().replace('_', '-');
+        const name = String(voice.name || '').toLowerCase();
+        return language.startsWith('en-') && globalFemaleHints.some((hint) => name.includes(hint));
+      }}) || null;
     }}
-    function speak(text) {{
+    async function waitForVoices() {{
+      if (!window.speechSynthesis || window.speechSynthesis.getVoices().length) return;
+      await new Promise((resolve) => {{
+        const timeout = setTimeout(resolve, 1200);
+        window.speechSynthesis.addEventListener('voiceschanged', () => {{ clearTimeout(timeout); resolve(); }}, {{ once: true }});
+      }});
+    }}
+    async function speak(text, questionId) {{
+      if (session?.tts_provider === 'azure') {{
+        try {{
+          if (interviewerAudio) interviewerAudio.pause();
+          const response = await fetch('/api/mock-interview/speech', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{session_id: session.session_id, question_id: questionId}})
+          }});
+          if (response.ok) {{
+            const audioUrl = URL.createObjectURL(await response.blob());
+            interviewerAudio = new Audio(audioUrl);
+            interviewerAudio.addEventListener('ended', () => URL.revokeObjectURL(audioUrl), {{once:true}});
+            accentLabel.textContent = `${{session.accent}} · Sarah neural`;
+            await interviewerAudio.play();
+            return;
+          }}
+        }} catch (error) {{
+          statusText.textContent = 'Neural speech was unavailable; trying an installed browser voice.';
+        }}
+      }}
       if (!window.speechSynthesis || !session) return;
       window.speechSynthesis.cancel();
+      const voice = preferredVoice(session.voice);
+      if (!voice) {{
+        speakBtn.disabled = true;
+        accentLabel.textContent = `${{session.accent}} · compatible voice unavailable`;
+        statusText.textContent = `No compatible ${{session.accent}} or known female English voice was exposed by this browser. Install the Windows language speech pack, restart the browser, and try again.`;
+        return;
+      }}
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = session.voice.lang;
-      const voice = preferredVoice(session.voice);
-      if (voice) utterance.voice = voice;
+      utterance.voice = voice;
       utterance.rate = 0.92;
       utterance.pitch = 1;
+      const selectedLanguage = String(voice.lang || '').toLowerCase().replace('_', '-');
+      const requestedLanguage = String(session.voice.lang || '').toLowerCase().replace('_', '-');
+      const fallbackLabel = selectedLanguage === requestedLanguage ? '' : ' · female fallback';
+      accentLabel.textContent = `${{session.accent}} · ${{voice.name}}${{fallbackLabel}}`;
       window.speechSynthesis.speak(utterance);
     }}
     function renderQuestion() {{
@@ -1854,13 +2056,14 @@ def _mock_interview_page(user_email: str) -> str:
       category.textContent = item.category;
       questionText.textContent = item.question;
       answer.value = '';
+      recognitionBase = '';
       const total = session.questions.length;
       questionCountPill.textContent = `${{activeIndex + 1}}/${{total}}`;
       progressLabel.textContent = `${{Math.min(activeIndex + 1, total)}}/${{total}}`;
       progressBar.style.width = `${{Math.round((activeIndex / total) * 100)}}%`;
       codeBox.textContent = `Focus: ${{item.tag || item.category}}\n\nPrompt type: ${{item.category}}\n\nListen fully, pause, then answer with a real project example.`;
       statusText.textContent = `Question ${{activeIndex + 1}} of ${{total}} · Listening...`;
-      speak(item.question);
+      speak(item.question, item.id);
     }}
     function renderTranscript() {{
       transcript.innerHTML = answers.map((item, index) => `
@@ -1873,7 +2076,7 @@ def _mock_interview_page(user_email: str) -> str:
     function setInterviewActive(active) {{
       startBtn.disabled = active;
       stopBtn.classList.toggle('hidden', !active);
-      speakBtn.disabled = !active;
+      speakBtn.disabled = !active || (session?.tts_provider !== 'azure' && !preferredVoice(session?.voice || {{}}));
       recordBtn.disabled = !active;
       saveBtn.disabled = !active;
     }}
@@ -1906,13 +2109,14 @@ def _mock_interview_page(user_email: str) -> str:
       const response = await fetch('/api/mock-interview/start', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{region: region.value, question_limit: Number(questionLimit.value)}})
+        body: JSON.stringify({{region: region.value, interview_mode: questionLimit.value}})
       }});
       const payload = await response.json();
       if (!response.ok) {{
         statusText.textContent = payload.detail || 'Unable to start interview.';
         return;
       }}
+      await waitForVoices();
       session = payload;
       activeIndex = 0;
       answers = [];
@@ -1932,22 +2136,48 @@ def _mock_interview_page(user_email: str) -> str:
       const rec = new Recognition();
       rec.continuous = true;
       rec.interimResults = true;
+      rec.maxAlternatives = 3;
       rec.lang = session ? session.voice.lang : 'en-IN';
       rec.onresult = (event) => {{
-        let text = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {{
-          text += event.results[i][0].transcript;
+        let finalText = '';
+        let interimText = '';
+        for (let i = 0; i < event.results.length; i++) {{
+          const segment = event.results[i][0].transcript.trim();
+          if (event.results[i].isFinal) finalText += `${{segment}} `;
+          else interimText += `${{segment}} `;
         }}
-        answer.value = text.trim();
+        answer.value = [recognitionBase, finalText.trim(), interimText.trim()].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
       }};
-      rec.onerror = () => {{ statusText.textContent = 'Microphone capture was interrupted. You can type the answer manually.'; }};
-      rec.onend = () => {{ recordBtn.textContent = 'Record'; recordingState.textContent = 'Idle'; }};
+      rec.onerror = (event) => {{
+        if (event.error === 'no-speech') return;
+        if (event.error !== 'aborted') {{
+          recognitionActive = false;
+          statusText.textContent = `Microphone recognition stopped (${{event.error}}). Your captured text is preserved and you can continue typing.`;
+        }}
+      }};
+      rec.onend = () => {{
+        recognitionBase = answer.value.trim();
+        if (recognitionActive) {{
+          recordingState.textContent = 'Listening · pause-safe';
+          clearTimeout(recognitionRestartTimer);
+          recognitionRestartTimer = setTimeout(() => {{
+            if (!recognitionActive) return;
+            recognition = setupRecognition();
+            try {{ recognition.start(); }} catch (error) {{ recognitionActive = false; }}
+          }}, 250);
+        }} else {{
+          recordBtn.textContent = 'Record';
+          recordingState.textContent = 'Idle';
+          recognition = null;
+        }}
+      }};
       return rec;
     }}
     function recordAnswer() {{
-      if (recognition) {{
+      if (recognitionActive) {{
+        recognitionActive = false;
+        clearTimeout(recognitionRestartTimer);
         recognition.stop();
-        recognition = null;
         recordBtn.textContent = 'Record';
         recordingState.textContent = 'Idle';
         return;
@@ -1957,15 +2187,18 @@ def _mock_interview_page(user_email: str) -> str:
         statusText.textContent = 'Speech recognition is not available in this browser. Type your answer and continue.';
         return;
       }}
+      recognitionBase = answer.value.trim();
+      recognitionActive = true;
       recordBtn.textContent = 'Stop';
-      recordingState.textContent = 'Recording';
+      recordingState.textContent = 'Listening · pause-safe';
       recognition.start();
     }}
     async function saveAnswer(next = true) {{
       if (!session) return;
       if (recognition) {{
+        recognitionActive = false;
+        clearTimeout(recognitionRestartTimer);
         recognition.stop();
-        recognition = null;
       }}
       const item = session.questions[activeIndex];
       answers.push({{question_id: item.id, category: item.category, question: item.question, answer: answer.value.trim()}});
@@ -2010,15 +2243,16 @@ def _mock_interview_page(user_email: str) -> str:
           <div><h3>Strengths</h3><ul class="feedback-list">${{(card.strengths || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
           <div><h3>Next improvements</h3><ul class="feedback-list">${{(card.improvements || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
         </div>
+        <div style="margin-top:16px"><h3>Scoring rubric</h3><div class="stat-grid">${{Object.entries(card.rubric || {{}}).map(([name, value]) => `<div class="stat"><strong>${{value}}</strong><span>${{escapeHtml(name)}} / 100</span></div>`).join('')}}</div></div>
       `;
       statusText.textContent = 'Scorecard ready. Review your transcript and practice again when ready.';
     }}
     startBtn.addEventListener('click', startInterview);
     stopBtn.addEventListener('click', () => finishInterview());
-    speakBtn.addEventListener('click', () => session && speak(session.questions[activeIndex].question));
+    speakBtn.addEventListener('click', () => session && speak(session.questions[activeIndex].question, session.questions[activeIndex].id));
     recordBtn.addEventListener('click', recordAnswer);
     saveBtn.addEventListener('click', () => saveAnswer(true));
-    clearBtn.addEventListener('click', () => {{ answer.value = ''; }});
+    clearBtn.addEventListener('click', () => {{ answer.value = ''; recognitionBase = ''; }});
     cameraBtn.addEventListener('click', enableCamera);
     region.addEventListener('change', () => {{ accentLabel.textContent = region.options[region.selectedIndex].text; }});
     renderTranscript();
@@ -2252,6 +2486,11 @@ def _page(user_email: str, profile: dict) -> str:
         <textarea id="locations" name="locations">__LOCATIONS__</textarea>
         <label for="skills">Skills</label>
         <textarea id="skills" name="skills">__SKILLS__</textarea>
+        <label for="experience_years">Professional Experience (years)</label>
+        <input id="experience_years" name="experience_years" type="number" min="0" max="50" step="0.5" value="__EXPERIENCE_YEARS__">
+        <p class="muted">Enter 0 if you are a fresher. This sets portal experience filters; it does not invent experience in the ATS report or improved resume.</p>
+        <label for="job_description">Job Description (optional)</label>
+        <textarea id="job_description" name="job_description" rows="8" placeholder="Paste the target job description for keyword, semantic relevance, and missing-skill analysis.">__JOB_DESCRIPTION__</textarea>
         <div class="row">
           <div><label for="max_jobs_per_portal">Max Jobs Per Portal</label><input id="max_jobs_per_portal" name="max_jobs_per_portal" type="number" min="1" max="50" value="__MAX_JOBS__"></div>
           <div><label for="application_mode">Application Mode</label><select id="application_mode" name="application_mode">__APPLICATION_OPTIONS__</select></div>
@@ -2315,35 +2554,53 @@ def _page(user_email: str, profile: dict) -> str:
       data.set('daily_timezone', timezoneInput.value);
       return data;
     }
+    async function responsePayload(response) {
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) return response.json();
+      const message = (await response.text()).trim();
+      return { detail: message || `Request failed with status ${response.status}.` };
+    }
+    function showRequestError(error, fallback) {
+      summary.className = 'note';
+      summary.textContent = error instanceof Error && error.message ? error.message : fallback;
+    }
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       summary.textContent = 'Running ATS scoring, portal search, and application drafting...';
       summary.className = 'muted';
       details.innerHTML = '';
-      const data = enrichFormData();
-      const response = await fetch('/api/run', { method: 'POST', body: data });
-      const payload = await response.json();
-      if (!response.ok) {
-        summary.textContent = payload.detail || 'Run failed.';
-        return;
+      try {
+        const data = enrichFormData();
+        const response = await fetch('/api/run', { method: 'POST', body: data });
+        const payload = await responsePayload(response);
+        if (!response.ok) {
+          showRequestError(new Error(payload.detail || 'Run failed.'), 'Run failed.');
+          return;
+        }
+        render(payload, 'manual');
+        refreshDashboard();
+      } catch (error) {
+        showRequestError(error, 'Run failed. Check the server terminal and try again.');
       }
-      render(payload, 'manual');
-      refreshDashboard();
     });
     document.getElementById('schedule-run').addEventListener('click', async () => {
       summary.className = 'muted';
       summary.textContent = 'Uploading resume and scheduling the daily agent run...';
       details.innerHTML = '';
-      const data = enrichFormData();
-      const response = await fetch('/api/scheduler/start', { method: 'POST', body: data });
-      const payload = await response.json();
-      if (!response.ok) {
-        summary.textContent = payload.detail || 'Schedule failed.';
-        return;
+      try {
+        const data = enrichFormData();
+        const response = await fetch('/api/scheduler/start', { method: 'POST', body: data });
+        const payload = await responsePayload(response);
+        if (!response.ok) {
+          showRequestError(new Error(payload.detail || 'Schedule failed.'), 'Schedule failed.');
+          return;
+        }
+        renderScheduler(payload.scheduler);
+        summary.innerHTML = `<p class="muted">Daily run scheduled. The agent will run at the configured time while this server process is active.</p>`;
+        refreshDashboard();
+      } catch (error) {
+        showRequestError(error, 'Scheduling failed. Check the server terminal and try again.');
       }
-      renderScheduler(payload.scheduler);
-      summary.innerHTML = `<p class="muted">Daily run scheduled. The agent will run at the configured time while this server process is active.</p>`;
-      refreshDashboard();
     });
     document.getElementById('stop-scheduler').addEventListener('click', async () => {
       const response = await fetch('/api/scheduler/stop', { method: 'POST' });
@@ -2414,7 +2671,10 @@ def _page(user_email: str, profile: dict) -> str:
       `;
       const improvements = report.improvements.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
       const missing = report.missing_keywords.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
-      const jobs = payload.jobs.slice(0, 12).map((job) => `<tr><td>${escapeHtml(job.portal)}</td><td>${escapeHtml(job.title)}</td><td>${escapeHtml(job.company)}</td><td><a href="${job.url}" target="_blank" rel="noreferrer">Open</a></td></tr>`).join('');
+      const jobs = payload.jobs.slice(0, 12).map((job) => {
+        const reasons = (job.match_reasons || []).map((reason) => `<span class="status-pill">${escapeHtml(reason)}</span>`).join(' ');
+        return `<tr><td>${escapeHtml(job.portal)}</td><td><strong>${escapeHtml(job.title)}</strong><br><span class="muted">${escapeHtml(job.location || '')}</span></td><td>${escapeHtml(job.company)}</td><td><strong>${escapeHtml(job.match_score || 0)}%</strong><br>${reasons}</td><td><a href="${job.url}" target="_blank" rel="noreferrer">Open</a></td></tr>`;
+      }).join('');
       const draftTemplate = buildDraftTemplate(payload.applications);
       details.innerHTML = `
         <section class="result-section">
@@ -2427,7 +2687,8 @@ def _page(user_email: str, profile: dict) -> str:
         </section>
         <section class="result-section">
           <h3>Job Leads</h3>
-          <div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role</th><th>Company</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>
+          <p class="muted">Ranked using target roles, combined profile/resume skills, location, experience, resume summary, and the optional job description.</p>
+          <div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role & Location</th><th>Company</th><th>Match</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>
         </section>
         <section class="result-section">
           <h3>Reusable Draft Message</h3>
@@ -2503,6 +2764,8 @@ def _page(user_email: str, profile: dict) -> str:
         "__TARGET_ROLES__": profile.get("target_roles", ""),
         "__LOCATIONS__": profile.get("locations", ""),
         "__SKILLS__": profile.get("skills", ""),
+        "__EXPERIENCE_YEARS__": str(profile.get("experience_years", 0)),
+        "__JOB_DESCRIPTION__": profile.get("job_description", ""),
         "__MAX_JOBS__": str(profile.get("max_jobs_per_portal", 10)),
         "__DAILY_AT__": profile.get("daily_at", ""),
         "__RESUME_STATUS__": (

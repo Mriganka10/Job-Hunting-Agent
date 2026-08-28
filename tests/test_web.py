@@ -10,13 +10,49 @@ from job_hunting_agent.web import (
     APP_SECRET,
     COOKIE_SECURE,
     _application_payload,
+    _interview_question_sequence,
     _next_run_time,
+    _score_mock_interview,
     _timezone,
     app,
     build_config_from_form,
     restore_active_schedule,
     schedulers,
 )
+
+
+def test_interview_modes_use_distinct_category_strategies_without_duplicates() -> None:
+    groups = [
+        {"title": "Role And Project Deep Dive", "tag": "role", "questions": ["role one", "role two", "role three"]},
+        {"title": "Technical Systems", "tag": "tech", "questions": ["tech one", "tech two", "tech three", "tech four"]},
+        {"title": "Behavioral And Leadership", "tag": "behavior", "questions": ["behavior one", "behavior two", "behavior three"]},
+    ]
+
+    quick = _interview_question_sequence(groups, 5, "quick")
+    standard = _interview_question_sequence(groups, 8, "standard")
+    deep = _interview_question_sequence(groups, 10, "deep")
+
+    assert quick[0]["category"] == "Behavioral And Leadership"
+    assert standard[0]["category"] == "Role And Project Deep Dive"
+    assert deep[0]["category"] == "Technical Systems"
+    for sequence in (quick, standard, deep):
+        prompts = [item["question"] for item in sequence]
+        assert len(prompts) == len(set(prompts))
+
+
+def test_mock_score_uses_rubric_and_counts_unanswered_questions() -> None:
+    questions = [
+        {"id": "q1", "question": "How did you optimize a SQL pipeline?"},
+        {"id": "q2", "question": "Describe a stakeholder conflict."},
+    ]
+    answers = [{"question_id": "q1", "answer": "I optimized the SQL pipeline by adding an index because latency exceeded the SLA. It reduced runtime by 35 percent."}]
+
+    scorecard = _score_mock_interview(answers, questions)
+
+    assert scorecard["answered"] == 1
+    assert scorecard["question_count"] == 2
+    assert scorecard["answers"][1]["score"] == 0
+    assert set(scorecard["rubric"]) == {"Relevance", "Structure", "Specificity", "Technical depth", "Communication"}
 
 
 def authenticated_client(email: str = "client@example.com") -> TestClient:
@@ -199,6 +235,8 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert 'name="resume"' in response.text
     assert 'name="linkedin_profile_url"' in response.text
     assert 'name="naukri_profile_url"' in response.text
+    assert 'name="experience_years"' in response.text
+    assert "responsePayload(response)" in response.text
     assert "/static/job-search-hero.png" in response.text
     assert "Schedule Daily Run" in response.text
     assert "scheduler-status" in response.text
@@ -210,6 +248,9 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "Showing latest scheduled run" in response.text
     assert "Download Final ATS Resume" in response.text
     assert "Mock Interview" in response.text
+    assert "Role &amp; Location" in response.text or "Role & Location" in response.text
+    assert "job.match_score" in response.text
+    assert "job.match_reasons" in response.text
     assert "/mock-interview" in response.text
     assert "Reusable Draft Message" in response.text
     assert "[Company Name]" in response.text
@@ -308,8 +349,23 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     interview = start.json()
     assert interview["accent"] == "British English"
     assert interview["voice"]["lang"] == "en-GB"
+    assert "Hazel" in interview["voice"]["female_voice_hints"]
+    assert "George" in interview["voice"]["male_voice_hints"]
+    assert interview["voice"]["azure_voice"] == "en-GB-SoniaNeural"
+    assert interview["interview_mode"] == "quick"
     assert len(interview["questions"]) == 5
     assert interview["session_id"]
+
+    expected_neural_voices = {
+        "India": "en-IN-NeerjaNeural",
+        "United States": "en-US-JennyNeural",
+        "United Kingdom": "en-GB-SoniaNeural",
+        "Australia": "en-AU-NatashaNeural",
+        "Canada": "en-CA-ClaraNeural",
+        "Singapore": "en-SG-LunaNeural",
+    }
+    for region, voice_name in expected_neural_voices.items():
+        assert web_module._accent_for_region(region)["azure_voice"] == voice_name
 
     complete = client.post(
         "/api/mock-interview/complete",
@@ -333,9 +389,12 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     )
     assert complete.status_code == 200
     scorecard = complete.json()["scorecard"]
-    assert scorecard["score"] >= 70
+    assert scorecard["score"] >= 40
+    assert scorecard["score"] < 70
     assert scorecard["answered"] == 5
+    assert set(scorecard["rubric"]) == {"Relevance", "Structure", "Specificity", "Technical depth", "Communication"}
     assert "answers" in scorecard
+    assert any("reuse the same response" in item for item in scorecard["improvements"])
 
     history = client.get("/api/mock-interview/history")
     assert history.status_code == 200
@@ -476,11 +535,13 @@ def test_build_config_from_form_keeps_portal_profiles() -> None:
         skills="Python, SQL",
         application_mode="draft",
         max_jobs_per_portal=5,
+        experience_years=1.5,
     )
 
     assert config.profile.linkedin_profile_url.endswith("mriganka-das-b2ba3186/")
     assert config.profile.naukri_profile_url.startswith("https://www.naukri.com")
     assert config.profile.target_roles == ("Python Developer", "Data Engineer")
+    assert config.profile.experience_years == 1.5
     assert config.search.max_jobs_per_portal == 5
 
 
