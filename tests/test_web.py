@@ -365,7 +365,7 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
         "Singapore": "en-SG-LunaNeural",
     }
     for region, voice_name in expected_neural_voices.items():
-        assert web_module._accent_for_region(region)["azure_voice"] == voice_name
+        assert web._accent_for_region(region)["azure_voice"] == voice_name
 
     complete = client.post(
         "/api/mock-interview/complete",
