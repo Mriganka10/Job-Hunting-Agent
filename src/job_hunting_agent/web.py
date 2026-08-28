@@ -11,6 +11,7 @@ import secrets
 import smtplib
 import threading
 import time
+from xml.sax.saxutils import escape as xml_escape
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -18,8 +19,9 @@ from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import requests
 from fastapi import BackgroundTasks, Body, Cookie, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .agent import JobHuntingAgent
@@ -62,6 +64,8 @@ COOKIE_SECURE = os.getenv("JOB_AGENT_COOKIE_SECURE", "false").lower() == "true"
 DEV_RETURN_OTP = os.getenv("JOB_AGENT_DEV_RETURN_OTP", "true").lower() == "true"
 EMAIL_PROVIDER = os.getenv("JOB_AGENT_EMAIL_PROVIDER", "smtp").strip().lower()
 SES_REGION = os.getenv("JOB_AGENT_SES_REGION", os.getenv("AWS_REGION", "ap-south-1"))
+AZURE_SPEECH_KEY = os.getenv("JOB_AGENT_AZURE_SPEECH_KEY", "").strip()
+AZURE_SPEECH_REGION = os.getenv("JOB_AGENT_AZURE_SPEECH_REGION", "").strip()
 EMAIL_PATTERN = re.compile(
     r"^(?=.{6,254}$)(?!.*\.\.)[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,63}$",
     re.IGNORECASE,
@@ -596,6 +600,7 @@ def start_mock_interview(
         "region": region,
         "accent": accent,
         "voice": _accent_for_region(region),
+        "tts_provider": "azure" if AZURE_SPEECH_KEY and AZURE_SPEECH_REGION else "browser",
         "interview_mode": interview_mode,
         "roles": interview["roles"],
         "skills": interview["skills"],
@@ -650,6 +655,7 @@ async def run_now(
     locations: Annotated[str, Form()] = "",
     skills: Annotated[str, Form()] = "",
     experience_years: Annotated[float, Form()] = 0,
+    job_description: Annotated[str, Form()] = "",
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
@@ -668,6 +674,7 @@ async def run_now(
         locations=locations,
         skills=skills,
         experience_years=experience_years,
+        job_description=job_description,
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
     ))
@@ -708,6 +715,7 @@ async def start_scheduler(
     locations: Annotated[str, Form()] = "",
     skills: Annotated[str, Form()] = "",
     experience_years: Annotated[float, Form()] = 0,
+    job_description: Annotated[str, Form()] = "",
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
@@ -727,6 +735,7 @@ async def start_scheduler(
         locations=locations,
         skills=skills,
         experience_years=experience_years,
+        job_description=job_description,
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
     ))
@@ -940,6 +949,7 @@ def _profile_for_user(user_email: str) -> dict:
         "locations": "",
         "skills": "",
         "experience_years": 0,
+        "job_description": "",
         "max_jobs_per_portal": 10,
         "application_mode": "draft",
         "daily_at": "",
@@ -962,6 +972,7 @@ def _profile_view(payload: dict, stored: dict) -> dict:
         "locations": ", ".join(profile.get("locations") or ()),
         "skills": ", ".join(profile.get("skills") or ()),
         "experience_years": max(0.0, float(profile.get("experience_years", 0) or 0)),
+        "job_description": str(profile.get("job_description", "") or ""),
         "max_jobs_per_portal": int(search.get("max_jobs_per_portal", 10)),
         "application_mode": application.get("mode", "draft"),
         "resume_name": stored.get("resume_name") or Path(stored.get("resume_path") or "").name,
@@ -1160,16 +1171,64 @@ def _interview_question_sequence(groups: list[dict], limit: int, mode: str = "st
 def _accent_for_region(region: str) -> dict:
     normalized = region.strip().lower()
     accents = {
-        "india": {"label": "Indian English", "lang": "en-IN", "female_voice_hints": ["Heera", "Veena", "Aditi", "Raveena", "Neerja", "Kavya", "Swara"], "male_voice_hints": ["Ravi", "Prabhat", "Kunal"]},
-        "united states": {"label": "US English", "lang": "en-US", "female_voice_hints": ["Zira", "Jenny", "Aria", "Samantha", "Ava", "Joanna", "Salli"], "male_voice_hints": ["David", "Mark", "Guy", "Christopher", "Eric"]},
-        "usa": {"label": "US English", "lang": "en-US", "female_voice_hints": ["Zira", "Jenny", "Aria", "Samantha", "Ava", "Joanna", "Salli"], "male_voice_hints": ["David", "Mark", "Guy", "Christopher", "Eric"]},
-        "united kingdom": {"label": "British English", "lang": "en-GB", "female_voice_hints": ["Hazel", "Sonia", "Libby", "Susan", "Amy", "Emma"], "male_voice_hints": ["George", "Ryan", "Arthur", "Brian"]},
-        "uk": {"label": "British English", "lang": "en-GB", "female_voice_hints": ["Hazel", "Sonia", "Libby", "Susan", "Amy", "Emma"], "male_voice_hints": ["George", "Ryan", "Arthur", "Brian"]},
-        "australia": {"label": "Australian English", "lang": "en-AU", "female_voice_hints": ["Karen", "Catherine", "Olivia", "Nicole", "Natasha"], "male_voice_hints": ["Lee", "William", "Darren"]},
-        "canada": {"label": "Canadian English", "lang": "en-CA", "female_voice_hints": ["Clara", "Linda"], "male_voice_hints": ["Liam"]},
-        "singapore": {"label": "Singapore English", "lang": "en-SG", "female_voice_hints": ["Luna", "Seraphina", "Jia"], "male_voice_hints": ["Wayne"]},
+        "india": {"label": "Indian English", "lang": "en-IN", "azure_voice": "en-IN-NeerjaNeural", "female_voice_hints": ["Heera", "Veena", "Aditi", "Raveena", "Neerja", "Kavya", "Swara"], "male_voice_hints": ["Ravi", "Prabhat", "Kunal"]},
+        "united states": {"label": "US English", "lang": "en-US", "azure_voice": "en-US-JennyNeural", "female_voice_hints": ["Zira", "Jenny", "Aria", "Samantha", "Ava", "Joanna", "Salli"], "male_voice_hints": ["David", "Mark", "Guy", "Christopher", "Eric"]},
+        "usa": {"label": "US English", "lang": "en-US", "azure_voice": "en-US-JennyNeural", "female_voice_hints": ["Zira", "Jenny", "Aria", "Samantha", "Ava", "Joanna", "Salli"], "male_voice_hints": ["David", "Mark", "Guy", "Christopher", "Eric"]},
+        "united kingdom": {"label": "British English", "lang": "en-GB", "azure_voice": "en-GB-SoniaNeural", "female_voice_hints": ["Hazel", "Sonia", "Libby", "Susan", "Amy", "Emma"], "male_voice_hints": ["George", "Ryan", "Arthur", "Brian"]},
+        "uk": {"label": "British English", "lang": "en-GB", "azure_voice": "en-GB-SoniaNeural", "female_voice_hints": ["Hazel", "Sonia", "Libby", "Susan", "Amy", "Emma"], "male_voice_hints": ["George", "Ryan", "Arthur", "Brian"]},
+        "australia": {"label": "Australian English", "lang": "en-AU", "azure_voice": "en-AU-NatashaNeural", "female_voice_hints": ["Karen", "Catherine", "Olivia", "Nicole", "Natasha"], "male_voice_hints": ["Lee", "William", "Darren"]},
+        "canada": {"label": "Canadian English", "lang": "en-CA", "azure_voice": "en-CA-ClaraNeural", "female_voice_hints": ["Clara", "Linda"], "male_voice_hints": ["Liam"]},
+        "singapore": {"label": "Singapore English", "lang": "en-SG", "azure_voice": "en-SG-LunaNeural", "female_voice_hints": ["Luna", "Seraphina", "Jia"], "male_voice_hints": ["Wayne"]},
     }
-    return accents.get(normalized, {"label": "Neutral English", "lang": "en-US", "female_voice_hints": ["Zira", "Jenny", "Samantha"], "male_voice_hints": ["David", "Mark", "Guy"]})
+    return accents.get(normalized, {"label": "Neutral English", "lang": "en-US", "azure_voice": "en-US-JennyNeural", "female_voice_hints": ["Zira", "Jenny", "Samantha"], "male_voice_hints": ["David", "Mark", "Guy"]})
+
+
+@app.post("/api/mock-interview/speech")
+def mock_interview_speech(
+    payload: Annotated[dict, Body()],
+    job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> Response:
+    user_email = require_user(job_agent_session)
+    if not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
+        raise HTTPException(status_code=503, detail="Azure neural speech is not configured.")
+    session_id = int(payload.get("session_id") or 0)
+    question_id = str(payload.get("question_id") or "")
+    session = mock_interview_session(user_email, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found.")
+    question = next((item for item in session.get("questions") or [] if str(item.get("id") or "") == question_id), None)
+    if not question:
+        raise HTTPException(status_code=404, detail="Interview question not found.")
+    voice = _accent_for_region(str(session.get("region") or "India"))
+    try:
+        audio = _azure_speech_audio(str(question.get("question") or ""), voice)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Neural interviewer voice is temporarily unavailable.") from exc
+    return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=300"})
+
+
+def _azure_speech_audio(text: str, voice: dict) -> bytes:
+    endpoint = f"https://{AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1"
+    language = str(voice.get("lang") or "en-US")
+    voice_name = str(voice.get("azure_voice") or "en-US-JennyNeural")
+    ssml = (
+        f"<speak version='1.0' xml:lang='{language}'>"
+        f"<voice xml:lang='{language}' xml:gender='Female' name='{voice_name}'>"
+        f"{xml_escape(text[:1200])}</voice></speak>"
+    )
+    response = requests.post(
+        endpoint,
+        headers={
+            "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY,
+            "Content-Type": "application/ssml+xml",
+            "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+            "User-Agent": "job-hunting-agent",
+        },
+        data=ssml.encode("utf-8"),
+        timeout=20,
+    )
+    response.raise_for_status()
+    return response.content
 
 
 def _score_mock_interview(answers: list[dict], questions: list[dict]) -> dict:
@@ -1346,6 +1405,7 @@ def build_config_from_form(
     application_mode: str,
     max_jobs_per_portal: int,
     experience_years: float = 0,
+    job_description: str = "",
 ) -> AppConfig:
     if application_mode not in {"draft", "email"}:
         raise HTTPException(status_code=400, detail="application_mode must be draft or email.")
@@ -1360,6 +1420,7 @@ def build_config_from_form(
             locations=_split_csv(locations),
             skills=_split_csv(skills),
             experience_years=max(0.0, min(float(experience_years or 0), 50.0)),
+            job_description=job_description.strip(),
         ),
         search=SearchConfig(max_jobs_per_portal=max(1, min(max_jobs_per_portal, 50))),
         application=ApplicationConfig(mode=application_mode, data_dir=str(DATA_DIR)),
@@ -1434,6 +1495,7 @@ def _config_from_payload(payload: dict) -> AppConfig:
             locations=tuple(profile.get("locations", ())),
             skills=tuple(profile.get("skills", ())),
             experience_years=max(0.0, float(profile.get("experience_years", 0) or 0)),
+            job_description=str(profile.get("job_description", "") or ""),
         ),
         search=SearchConfig(
             max_jobs_per_portal=int(search.get("max_jobs_per_portal", 10)),
@@ -1877,6 +1939,7 @@ def _mock_interview_page(user_email: str) -> str:
     let recognitionBase = '';
     let recognitionRestartTimer = null;
     let mediaStream = null;
+    let interviewerAudio = null;
     function escapeHtml(value) {{
       return String(value).replace(/[&<>"']/g, (char) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}}[char]));
     }}
@@ -1947,7 +2010,27 @@ def _mock_interview_page(user_email: str) -> str:
         window.speechSynthesis.addEventListener('voiceschanged', () => {{ clearTimeout(timeout); resolve(); }}, {{ once: true }});
       }});
     }}
-    function speak(text) {{
+    async function speak(text, questionId) {{
+      if (session?.tts_provider === 'azure') {{
+        try {{
+          if (interviewerAudio) interviewerAudio.pause();
+          const response = await fetch('/api/mock-interview/speech', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{session_id: session.session_id, question_id: questionId}})
+          }});
+          if (response.ok) {{
+            const audioUrl = URL.createObjectURL(await response.blob());
+            interviewerAudio = new Audio(audioUrl);
+            interviewerAudio.addEventListener('ended', () => URL.revokeObjectURL(audioUrl), {{once:true}});
+            accentLabel.textContent = `${{session.accent}} · Sarah neural`;
+            await interviewerAudio.play();
+            return;
+          }}
+        }} catch (error) {{
+          statusText.textContent = 'Neural speech was unavailable; trying an installed browser voice.';
+        }}
+      }}
       if (!window.speechSynthesis || !session) return;
       window.speechSynthesis.cancel();
       const voice = preferredVoice(session.voice);
@@ -1980,7 +2063,7 @@ def _mock_interview_page(user_email: str) -> str:
       progressBar.style.width = `${{Math.round((activeIndex / total) * 100)}}%`;
       codeBox.textContent = `Focus: ${{item.tag || item.category}}\n\nPrompt type: ${{item.category}}\n\nListen fully, pause, then answer with a real project example.`;
       statusText.textContent = `Question ${{activeIndex + 1}} of ${{total}} · Listening...`;
-      speak(item.question);
+      speak(item.question, item.id);
     }}
     function renderTranscript() {{
       transcript.innerHTML = answers.map((item, index) => `
@@ -1993,7 +2076,7 @@ def _mock_interview_page(user_email: str) -> str:
     function setInterviewActive(active) {{
       startBtn.disabled = active;
       stopBtn.classList.toggle('hidden', !active);
-      speakBtn.disabled = !active || !preferredVoice(session?.voice || {{}});
+      speakBtn.disabled = !active || (session?.tts_provider !== 'azure' && !preferredVoice(session?.voice || {{}}));
       recordBtn.disabled = !active;
       saveBtn.disabled = !active;
     }}
@@ -2166,7 +2249,7 @@ def _mock_interview_page(user_email: str) -> str:
     }}
     startBtn.addEventListener('click', startInterview);
     stopBtn.addEventListener('click', () => finishInterview());
-    speakBtn.addEventListener('click', () => session && speak(session.questions[activeIndex].question));
+    speakBtn.addEventListener('click', () => session && speak(session.questions[activeIndex].question, session.questions[activeIndex].id));
     recordBtn.addEventListener('click', recordAnswer);
     saveBtn.addEventListener('click', () => saveAnswer(true));
     clearBtn.addEventListener('click', () => {{ answer.value = ''; recognitionBase = ''; }});
@@ -2406,6 +2489,8 @@ def _page(user_email: str, profile: dict) -> str:
         <label for="experience_years">Professional Experience (years)</label>
         <input id="experience_years" name="experience_years" type="number" min="0" max="50" step="0.5" value="__EXPERIENCE_YEARS__">
         <p class="muted">Enter 0 if you are a fresher. This sets portal experience filters; it does not invent experience in the ATS report or improved resume.</p>
+        <label for="job_description">Job Description (optional)</label>
+        <textarea id="job_description" name="job_description" rows="8" placeholder="Paste the target job description for keyword, semantic relevance, and missing-skill analysis.">__JOB_DESCRIPTION__</textarea>
         <div class="row">
           <div><label for="max_jobs_per_portal">Max Jobs Per Portal</label><input id="max_jobs_per_portal" name="max_jobs_per_portal" type="number" min="1" max="50" value="__MAX_JOBS__"></div>
           <div><label for="application_mode">Application Mode</label><select id="application_mode" name="application_mode">__APPLICATION_OPTIONS__</select></div>
@@ -2586,7 +2671,10 @@ def _page(user_email: str, profile: dict) -> str:
       `;
       const improvements = report.improvements.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
       const missing = report.missing_keywords.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
-      const jobs = payload.jobs.slice(0, 12).map((job) => `<tr><td>${escapeHtml(job.portal)}</td><td>${escapeHtml(job.title)}</td><td>${escapeHtml(job.company)}</td><td><a href="${job.url}" target="_blank" rel="noreferrer">Open</a></td></tr>`).join('');
+      const jobs = payload.jobs.slice(0, 12).map((job) => {
+        const reasons = (job.match_reasons || []).map((reason) => `<span class="status-pill">${escapeHtml(reason)}</span>`).join(' ');
+        return `<tr><td>${escapeHtml(job.portal)}</td><td><strong>${escapeHtml(job.title)}</strong><br><span class="muted">${escapeHtml(job.location || '')}</span></td><td>${escapeHtml(job.company)}</td><td><strong>${escapeHtml(job.match_score || 0)}%</strong><br>${reasons}</td><td><a href="${job.url}" target="_blank" rel="noreferrer">Open</a></td></tr>`;
+      }).join('');
       const draftTemplate = buildDraftTemplate(payload.applications);
       details.innerHTML = `
         <section class="result-section">
@@ -2599,7 +2687,8 @@ def _page(user_email: str, profile: dict) -> str:
         </section>
         <section class="result-section">
           <h3>Job Leads</h3>
-          <div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role</th><th>Company</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>
+          <p class="muted">Ranked using target roles, combined profile/resume skills, location, experience, resume summary, and the optional job description.</p>
+          <div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role & Location</th><th>Company</th><th>Match</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>
         </section>
         <section class="result-section">
           <h3>Reusable Draft Message</h3>
@@ -2676,6 +2765,7 @@ def _page(user_email: str, profile: dict) -> str:
         "__LOCATIONS__": profile.get("locations", ""),
         "__SKILLS__": profile.get("skills", ""),
         "__EXPERIENCE_YEARS__": str(profile.get("experience_years", 0)),
+        "__JOB_DESCRIPTION__": profile.get("job_description", ""),
         "__MAX_JOBS__": str(profile.get("max_jobs_per_portal", 10)),
         "__DAILY_AT__": profile.get("daily_at", ""),
         "__RESUME_STATUS__": (

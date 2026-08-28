@@ -31,31 +31,34 @@ def write_improved_resume(resume: Resume, report: AtsReport, profile: CandidateP
 
 def _resume_sections(resume: Resume, report: AtsReport, profile: CandidateProfile) -> list[tuple[str, list[str]]]:
     target_roles = _ordered_terms((*profile.target_roles, *resume.inferred_roles))
-    skills = _ordered_terms((*profile.skills, *resume.inferred_skills, *report.missing_keywords))
-    experience_lines = _experience_items(resume.text, target_roles)
+    # Never inject a missing ATS keyword unless it is already supported by the
+    # candidate profile or resume evidence.
+    skills = _ordered_terms((*profile.skills, *resume.inferred_skills))
+    parsed_sections = resume.sections or {}
+    experience_source = f"EXPERIENCE\n{parsed_sections.get('experience', '')}" if parsed_sections.get("experience") else resume.text
+    experience_lines = _experience_items(experience_source, target_roles)
     experience_bullets = [item.removeprefix("BULLET::") for item in experience_lines if item.startswith("BULLET::")]
-    education_lines = _education_lines(resume.text)
-    project_lines = _project_bullets(resume.text, experience_bullets)
-    certifications = _certification_lines(resume.text)
-    achievements = _achievement_lines(resume.text, experience_bullets)
+    education_lines = _education_section_items(parsed_sections.get("education", "")) or _education_lines(resume.text)
+    project_lines = _section_items(parsed_sections.get("projects", ""), join_wrapped=True) or _project_bullets(resume.text, experience_bullets)
+    certifications = _section_items(parsed_sections.get("certifications", ""), join_wrapped=True) or _certification_lines(resume.text)
+    achievements = _section_items(parsed_sections.get("achievements", ""), join_wrapped=True) or _achievement_lines(resume.text, experience_bullets)
     languages = _language_lines(resume.text)
     technical_skill_lines = _technical_skill_lines(skills)
+    original_summary = (resume.sections or {}).get("summary", "").strip()
     year_text = _experience_years(resume.text)
-    summary = (
-        f"{profile.name or 'Candidate'} is a {', '.join(target_roles[:3]) if target_roles else 'technology professional'} "
-        f"with {year_text}experience across {', '.join(skills[:8]) if skills else 'business and technology delivery'}. "
-        "Focused on building reliable data solutions, modernizing workflows, improving delivery quality, and supporting data-driven teams."
+    summary = original_summary or (
+        f"{profile.name or 'Candidate'} targets {', '.join(target_roles[:3]) if target_roles else 'technology roles'}"
+        f" with {year_text}experience and demonstrated skills in {', '.join(skills[:8]) if skills else 'the areas documented in the uploaded resume'}."
     )
     contact = _contact_line(profile)
 
     return [
         ("CONTACT", [contact] if contact else []),
-        ("PROFESSIONAL SUMMARY", [summary]),
-        ("CORE SKILLS", skills[:10]),
+        ("CAREER OBJECTIVE", [summary]),
+        ("EDUCATION", education_lines),
+        ("SKILLS", technical_skill_lines or skills[:12]),
         ("PROFESSIONAL EXPERIENCE", experience_lines),
         ("PROJECTS", project_lines),
-        ("TECHNICAL SKILLS", technical_skill_lines),
-        ("EDUCATION", education_lines),
         ("CERTIFICATIONS", certifications),
         ("ACHIEVEMENTS", achievements),
         ("LANGUAGES", languages),
@@ -77,62 +80,127 @@ def _write_docx(path: Path, sections: list[tuple[str, list[str]]]) -> None:
     for heading, items in sections:
         if not items:
             continue
-        document.add_paragraph(heading, style="ResumeHeading")
-        for item in items:
-            if heading in {"CONTACT", "PROFESSIONAL SUMMARY", "TECHNICAL SKILLS"}:
-                document.add_paragraph(item, style="ResumeBody")
+        if heading == "CONTACT":
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            paragraph = document.add_paragraph(items[0], style="ResumeBody")
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.style = document.styles["ResumeContact"]
+            continue
+        heading_paragraph = document.add_paragraph(heading, style="ResumeHeading")
+        _add_bottom_border(heading_paragraph)
+        item_index = 0
+        while item_index < len(items):
+            item = items[item_index]
+            if heading in {"CONTACT", "CAREER OBJECTIVE", "SKILLS"}:
+                paragraph = document.add_paragraph(style="ResumeBody")
+                _add_labelled_text(paragraph, item)
             elif heading == "PROFESSIONAL EXPERIENCE":
                 if item.startswith("ROLE::"):
-                    paragraph = document.add_paragraph(item.removeprefix("ROLE::"), style="ResumeBody")
+                    paragraph = document.add_paragraph(item.removeprefix("ROLE::"), style="ResumeRole")
                     paragraph.runs[0].bold = True
                 elif item.startswith("META::"):
-                    document.add_paragraph(item.removeprefix("META::"), style="ResumeBody")
+                    meta = item.removeprefix("META::")
+                    if item_index + 1 < len(items) and items[item_index + 1].startswith("META::") and _looks_like_date_range(items[item_index + 1]):
+                        paragraph = document.add_paragraph(style="ResumeMeta")
+                        paragraph.add_run(meta)
+                        paragraph.add_run("\t" + items[item_index + 1].removeprefix("META::"))
+                        item_index += 1
+                    else:
+                        document.add_paragraph(meta, style="ResumeMeta")
                 elif item.startswith("BULLET::"):
                     paragraph = document.add_paragraph(_clean_sentence(item.removeprefix("BULLET::")), style="ResumeBullet")
                     paragraph.paragraph_format.keep_together = True
                 else:
                     document.add_paragraph(_clean_sentence(item), style="ResumeBody")
             else:
-                paragraph = document.add_paragraph(_clean_sentence(item), style="ResumeBullet")
+                paragraph = document.add_paragraph(style="ResumeBullet")
+                _add_labelled_text(paragraph, _clean_sentence(item), bold_dash_prefix=heading in {"EDUCATION", "PROJECTS"})
                 paragraph.paragraph_format.keep_together = True
+            item_index += 1
     document.save(path)
 
 
 def _configure_document(document) -> None:
     from docx.enum.style import WD_STYLE_TYPE
-    from docx.shared import Inches, Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Inches, Mm, Pt, RGBColor
 
     section = document.sections[0]
-    section.top_margin = Inches(1)
-    section.bottom_margin = Inches(1)
-    section.left_margin = Inches(1.25)
-    section.right_margin = Inches(1.25)
+    section.page_width = Mm(210)
+    section.page_height = Mm(297)
+    section.top_margin = Inches(0.42)
+    section.bottom_margin = Inches(0.42)
+    section.left_margin = Inches(0.55)
+    section.right_margin = Inches(0.55)
 
     styles = document.styles
     normal = styles["Normal"]
-    normal.font.name = "Calibri"
-    normal.font.size = Pt(10.5)
-    normal.paragraph_format.space_after = Pt(4)
-    normal.paragraph_format.line_spacing = 1.05
+    normal.font.name = "Arial"
+    normal.font.size = Pt(9.2)
+    normal.paragraph_format.space_after = Pt(1.5)
+    normal.paragraph_format.line_spacing = 1.0
 
     for name, font_size, bold, before, after, color in (
-        ("ResumeName", 16, True, 0, 6, "4f81bd"),
-        ("ResumeHeading", 13, True, 10, 3, "5b8fd1"),
-        ("ResumeBody", 10.5, False, 0, 5, "000000"),
-        ("ResumeBullet", 10.5, False, 0, 2, "000000"),
+        ("ResumeName", 16, True, 0, 2, "111111"),
+        ("ResumeContact", 8.3, False, 0, 3, "333333"),
+        ("ResumeHeading", 10.2, True, 5, 1.5, "111111"),
+        ("ResumeRole", 9.3, True, 1.5, 0, "111111"),
+        ("ResumeMeta", 8.8, False, 0, 1, "333333"),
+        ("ResumeBody", 9.2, False, 0, 2, "111111"),
+        ("ResumeBullet", 8.9, False, 0, 0.8, "111111"),
     ):
         style = styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
-        style.font.name = "Calibri"
+        style.font.name = "Arial"
         style.font.size = Pt(font_size)
         style.font.bold = bold
         style.font.color.rgb = RGBColor.from_string(color)
         style.paragraph_format.space_before = Pt(before)
         style.paragraph_format.space_after = Pt(after)
-        style.paragraph_format.line_spacing = 1.05
+        style.paragraph_format.line_spacing = 1.0
 
     styles["ResumeBullet"].base_style = styles["List Bullet"]
-    styles["ResumeBullet"].paragraph_format.left_indent = Inches(0.22)
-    styles["ResumeBullet"].paragraph_format.first_line_indent = Inches(-0.14)
+    styles["ResumeBullet"].paragraph_format.left_indent = Inches(0.18)
+    styles["ResumeBullet"].paragraph_format.first_line_indent = Inches(-0.12)
+    styles["ResumeName"].paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    styles["ResumeContact"].paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    styles["ResumeRole"].paragraph_format.keep_with_next = True
+    styles["ResumeHeading"].paragraph_format.keep_with_next = True
+
+    usable_width = section.page_width - section.left_margin - section.right_margin
+    styles["ResumeMeta"].paragraph_format.tab_stops.add_tab_stop(usable_width, 2)
+
+    document.core_properties.title = "ATS-Friendly Resume"
+    document.core_properties.subject = "Professional resume"
+
+
+def _add_bottom_border(paragraph) -> None:
+    """Add the thin section rule used by the supplied Canva reference."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    paragraph_properties = paragraph._p.get_or_add_pPr()
+    borders = paragraph_properties.find(qn("w:pBdr"))
+    if borders is None:
+        borders = OxmlElement("w:pBdr")
+        paragraph_properties.append(borders)
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "5")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), "777777")
+    borders.append(bottom)
+
+
+def _add_labelled_text(paragraph, text: str, *, bold_dash_prefix: bool = False) -> None:
+    """Bold compact labels/titles while keeping content as plain ATS-readable text."""
+    separator = ":" if ":" in text else (" - " if bold_dash_prefix and " - " in text else "")
+    if not separator:
+        paragraph.add_run(text)
+        return
+    prefix, suffix = text.split(separator, 1)
+    lead = paragraph.add_run(prefix.strip() + separator)
+    lead.bold = True
+    paragraph.add_run(" " + suffix.strip())
 
 
 def _experience_items(text: str, target_roles: list[str]) -> list[str]:
@@ -208,7 +276,11 @@ def _structured_experience_entries(text: str) -> list[dict[str, str | list[str]]
 
         if _looks_like_date_range(line):
             current = _ensure_entry(entries, current)
-            current["dates"] = _clean_sentence(line)
+            date_match = re.search(r"\(?\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{4}\s*(?:-|–|to)\s*(?:present|current|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{4})\)?", line, flags=re.I)
+            current["dates"] = _clean_sentence(date_match.group(0) if date_match else line)
+            company_prefix = _clean_sentence(line[:date_match.start()] if date_match else "").strip(" |,(-")
+            if company_prefix and not current["company"]:
+                current["company"] = company_prefix
             continue
 
         if re.match(r"^(?:development tools?|database|key result areas?)\s*:", line, flags=re.I):
@@ -220,7 +292,10 @@ def _structured_experience_entries(text: str) -> list[dict[str, str | list[str]]
             if current and (current["title"] or current["company"] or current["bullets"]):
                 current = None
             current = _ensure_entry(entries, current)
-            current["title"] = _clean_sentence(line)
+            role_parts = [_clean_sentence(part) for part in line.split("|", 1)]
+            current["title"] = role_parts[0]
+            if len(role_parts) > 1:
+                current["company"] = role_parts[1]
             continue
 
         if current and _looks_like_company_meta(line) and not current["company"]:
@@ -241,14 +316,14 @@ def _experience_section_lines(text: str) -> list[str]:
     heading_indexes = [
         index
         for index, line in enumerate(lines)
-        if line.lower() in {"professional experience", "work experience", "employment history", "career history"}
+        if line.lower() in {"experience", "professional experience", "work experience", "employment history", "career history"}
     ]
     if not heading_indexes:
         return lines
     start = heading_indexes[-1] + 1
     end = len(lines)
     for index in range(start, len(lines)):
-        if lines[index].lower() in {"personal details", "education", "certifications", "languages"}:
+        if lines[index].lower() in {"personal details", "education", "certification", "certifications", "achievement", "achievements", "languages"}:
             end = index
             break
     return lines[start:end]
@@ -317,7 +392,7 @@ def _section_text(text: str, headings: tuple[str, ...]) -> str:
 def _resume_lines(text: str) -> list[str]:
     normalized = text.replace("\uf0b7", "\n• ")
     normalized = re.sub(
-        r"\b(PROFESSIONAL EXPERIENCE|WORK EXPERIENCE|EMPLOYMENT HISTORY|CAREER HISTORY|PROJECTS|TECHNICAL SKILLS|EDUCATION|CERTIFICATIONS|ACHIEVEMENTS|LANGUAGES|PROFILE SUMMARY)\b",
+        r"\b(EXPERIENCE|PROFESSIONAL EXPERIENCE|WORK EXPERIENCE|EMPLOYMENT HISTORY|CAREER HISTORY|PROJECTS|TECHNICAL SKILLS|EDUCATION|CERTIFICATION|CERTIFICATIONS|ACHIEVEMENT|ACHIEVEMENTS|LANGUAGES|PROFILE SUMMARY)\b",
         r"\n\1\n",
         normalized,
         flags=re.I,
@@ -326,7 +401,39 @@ def _resume_lines(text: str) -> list[str]:
     return [_clean_sentence(line) for line in normalized.splitlines() if _clean_sentence(line)]
 
 
+def _section_items(text: str, join_wrapped: bool = False) -> list[str]:
+    lines = [_clean_sentence(line) for line in text.splitlines() if _clean_sentence(line)]
+    if not join_wrapped:
+        return _dedupe_lines(lines)[:12]
+    items: list[str] = []
+    for line in lines:
+        starts_item = bool(re.search(r"\s[-–—]\s|\b(?:intern|developer|engineer|analyst|scientist)\b.*\|", line, flags=re.I))
+        if items and not starts_item and not items[-1].endswith((".", ")")):
+            items[-1] = _clean_sentence(f"{items[-1]} {line}")
+        elif items and not starts_item and line[:1].islower():
+            items[-1] = _clean_sentence(f"{items[-1]} {line}")
+        else:
+            items.append(line)
+    return _dedupe_lines(items)[:12]
+
+
+def _education_section_items(text: str) -> list[str]:
+    lines = [_clean_sentence(line) for line in text.splitlines() if _clean_sentence(line)]
+    cleaned: list[str] = []
+    for line in lines:
+        if re.fullmatch(r"t\s*h", line, flags=re.I):
+            continue
+        if cleaned and line.lower().startswith("semester"):
+            cleaned[-1] = _clean_sentence(f"{cleaned[-1]} {line}")
+        else:
+            cleaned.append(line)
+    return _dedupe_lines(cleaned)[:16]
+
+
 def _looks_like_role(line: str) -> bool:
+    role_pattern = r"\b(engineer|developer|analyst|manager|consultant|architect|lead|specialist|administrator|scientist|associate|intern)\b"
+    if "|" in line and re.search(role_pattern, line, flags=re.I):
+        return True
     if ":" in line or "," in line or "." in line or len(line.split()) > 8:
         return False
     if re.match(
@@ -337,7 +444,7 @@ def _looks_like_role(line: str) -> bool:
         return False
     return bool(
         re.search(
-            r"\b(engineer|developer|analyst|manager|consultant|architect|lead|specialist|administrator|scientist|associate)\b",
+            role_pattern,
             line,
             flags=re.I,
         )
@@ -569,7 +676,7 @@ def _contact_line(profile: CandidateProfile) -> str:
 
 
 def _clean_sentence(value: str) -> str:
-    cleaned = value.replace("\uf0b7", " ")
+    cleaned = value.replace("\uf0b7", " ").replace("–", "-").replace("—", "-")
     cleaned = re.sub(r"\s+", " ", cleaned)
     cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
     cleaned = _repair_extraction_spacing(cleaned)

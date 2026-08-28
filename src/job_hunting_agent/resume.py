@@ -30,9 +30,17 @@ KNOWN_SKILLS = {
     "airflow",
     "terraform",
     "linux",
+    "c++", "mysql", "power bi", "tensorflow", "keras", "scikit-learn",
+    "numpy", "matplotlib", "seaborn", "opencv", "nltk", "spacy", "github",
+    "jupyter notebook", "data structures", "algorithms", "dbms",
+    "computer networks", "object detection", "image classification",
 }
 
 ROLE_HINTS = (
+    "ai developer",
+    "data scientist",
+    "data analyst",
+    "ml engineer",
     "software engineer",
     "python developer",
     "machine learning engineer",
@@ -43,11 +51,14 @@ ROLE_HINTS = (
 )
 
 SECTION_ALIASES = {
-    "summary": ("summary", "professional summary", "career summary", "profile", "profile summary", "objective", "career objective", "about me"),
+    "contact": ("contact", "contact details", "personal details"),
+    "summary": ("summary", "professional summary", "career summary", "profile", "profile summary", "objective", "career objective", "carrer objective", "about me"),
     "experience": ("experience", "work experience", "professional experience", "employment", "employment history", "work history", "internship", "internships"),
     "skills": ("skills", "technical skills", "core skills", "key skills", "competencies", "technical competencies", "technologies", "tools and technologies"),
     "education": ("education", "academic background", "academic qualifications", "educational qualifications", "qualifications"),
     "projects": ("projects", "project experience", "academic projects", "personal projects", "key projects", "portfolio"),
+    "certifications": ("certifications", "certification", "licenses and certifications", "courses", "training"),
+    "achievements": ("achievements", "achievement", "awards", "honors", "accomplishments", "achievement and certification", "achievements and certifications", "achievement certification", "achievements certifications"),
 }
 
 
@@ -72,15 +83,105 @@ def parse_resume(path: str | Path) -> Resume:
         text=normalized,
         inferred_skills=extract_skills(normalized),
         inferred_roles=extract_roles(normalized),
+        sections=extract_sections(normalized),
     )
 
 
+def extract_sections(text: str) -> dict[str, str]:
+    """Split normalized resume text into canonical ATS sections."""
+    lines = text.splitlines()
+    aliases = {
+        _heading_key(alias): section
+        for section, names in SECTION_ALIASES.items()
+        for alias in names
+    }
+    sections: dict[str, list[str]] = {name: [] for name in SECTION_ALIASES}
+    current = "contact"
+    for raw_line in lines:
+        cleaned = re.sub(r"^[\s\-–—•▪●*#|]+", "", raw_line).strip()
+        heading_part = re.split(r"\s*[:|]\s*", cleaned, maxsplit=1)[0]
+        key = _heading_key(heading_part)
+        matched = aliases.get(key)
+        if not matched and len(cleaned) <= 80:
+            matched = next((section for alias, section in aliases.items() if key.startswith(f"{alias} ")), None)
+        if matched:
+            if matched == current and cleaned != cleaned.upper():
+                sections[current].append(raw_line)
+                continue
+            current = matched
+            remainder = re.sub(rf"^{re.escape(heading_part)}\s*[:|\-–—]?\s*", "", cleaned, flags=re.I).strip()
+            if remainder:
+                sections[current].append(remainder)
+            continue
+        sections[current].append(raw_line)
+    result = {name: "\n".join(items).strip() for name, items in sections.items() if "\n".join(items).strip()}
+    result["contact"] = _contact_block(lines)
+    if not result.get("education"):
+        recovered = _recover_education(lines)
+        if recovered:
+            result["education"] = recovered
+    if result.get("achievements") and not result.get("certifications"):
+        certification_lines = [
+            line for line in result["achievements"].splitlines()
+            if re.search(r"\b(?:certif|training|course|license)\w*\b", line, flags=re.I)
+        ]
+        if certification_lines:
+            result["certifications"] = "\n".join(certification_lines)
+    if result.get("certifications") and not result.get("achievements"):
+        achievement_lines = [
+            line for line in result["certifications"].splitlines()
+            if not re.search(r"\b(?:certif|training|course|license)\w*\b", line, flags=re.I)
+        ]
+        if achievement_lines:
+            result["achievements"] = "\n".join(achievement_lines)
+    return result
+
+
 def normalize_text(text: str) -> str:
-    text = unicodedata.normalize("NFKC", text).replace("\u00ad", "")
+    text = unicodedata.normalize("NFKC", text).replace("\u00ad", "").replace("�", "-")
     text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
-    lines = [re.sub(r"[ \t\u00a0]+", " ", line).strip() for line in text.splitlines()]
+    lines = [_repair_spaced_glyphs(line) for line in text.splitlines()]
     normalized = "\n".join(line for line in lines if line)
     return re.sub(r"\n{3,}", "\n\n", normalized).strip()
+
+
+def _repair_spaced_glyphs(line: str) -> str:
+    """Repair PDFs that encode every visible character as a separate word."""
+    raw = line.replace("\u00a0", " ").strip()
+    tokens = raw.split()
+    if len(tokens) < 4:
+        return re.sub(r"[ \t]+", " ", raw)
+    glyph_tokens = sum(1 for token in tokens if len(re.sub(r"[^A-Za-z0-9]", "", token)) <= 1)
+    if glyph_tokens / len(tokens) < 0.65:
+        return re.sub(r"[ \t]+", " ", raw)
+    words = []
+    for group in re.split(r"[ \t]{2,}", raw):
+        if group.strip():
+            words.append(re.sub(r"(?<=\S)[ \t](?=\S)", "", group.strip()))
+    return " ".join(words)
+
+
+def _contact_block(lines: list[str]) -> str:
+    kept = [
+        line for line in lines[:12]
+        if re.search(r"@|\b(?:phone|email|linkedin|github)\b|https?://|\+?\d[\d\s-]{7,}", line, flags=re.I)
+        or (line.isupper() and len(line.split()) <= 5 and not re.search(r"\b(?:education|skills|projects|experience)\b", line, flags=re.I))
+    ]
+    return "\n".join(dict.fromkeys(kept)).strip()
+
+
+def _recover_education(lines: list[str]) -> str:
+    terms = re.compile(r"\b(?:b\.?tech|bachelor|master|university|college|school|secondary|cgpa|gpa|marks?|percentage|semester)\b", flags=re.I)
+    heading_keys = {_heading_key(alias) for names in SECTION_ALIASES.values() for alias in names}
+    recovered: list[str] = []
+    education_heading = next((index for index, line in enumerate(lines) if _heading_key(line) == "education"), len(lines))
+    candidate_lines = lines[:education_heading + 1]
+    for index, line in enumerate(candidate_lines):
+        if terms.search(line):
+            for nearby in candidate_lines[max(0, index - 1):min(len(candidate_lines), index + 2)]:
+                if nearby and nearby not in recovered and _heading_key(nearby) not in heading_keys:
+                    recovered.append(nearby)
+    return "\n".join(recovered[:18]).strip()
 
 
 def detect_sections(text: str) -> tuple[str, ...]:

@@ -23,6 +23,13 @@ def render_ats_report(report: AtsReport) -> str:
         lines.append("")
     if report.detected_sections:
         lines.extend(["## Detected Sections", *[f"- {section.replace('_', ' ').title()}" for section in report.detected_sections], ""])
+    if report.semantic_similarity:
+        lines.extend(["## Semantic Job Match", f"- Embedding similarity: {report.semantic_similarity:.1%}", ""])
+    if report.category_details:
+        lines.append("## Scoring Evidence")
+        for category, detail in report.category_details.items():
+            lines.append(f"- {category.replace('_', ' ').title()}: {json.dumps(detail, ensure_ascii=False)}")
+        lines.append("")
     lines.append("## Strengths")
     lines.extend(f"- {item}" for item in report.strengths or ("No strong ATS signals found yet.",))
     lines.extend(["", "## Improvements"])

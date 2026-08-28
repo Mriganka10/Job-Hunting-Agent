@@ -4,7 +4,7 @@ from .apply import apply_to_jobs
 from .ats import score_resume
 from .config import AppConfig
 from .models import ApplicationResult, AtsReport, JobLead, Resume
-from .portals import build_search_intent, get_adapters
+from .portals import build_search_intent, get_adapters, rank_job_leads
 from .reports import write_ats_report, write_run_summary
 from .resume import parse_resume
 from .resume_builder import write_improved_resume
@@ -26,7 +26,7 @@ class JobHuntingAgent:
         jobs: list[JobLead] = []
         for adapter in get_adapters(self.config.search.portals):
             jobs.extend(adapter.search(intent, self.config.search, self.config.profile))
-        return resume, report, _dedupe_jobs(jobs)
+        return resume, report, rank_job_leads(_dedupe_jobs(jobs), intent, resume, self.config.search)
 
     def run(self, resume_path: str) -> tuple[AtsReport, list[JobLead], list[ApplicationResult], dict[str, str]]:
         resume, report, jobs = self.search(resume_path)

@@ -9,6 +9,8 @@ locations = ["Bengaluru", "Hyderabad", "Remote"]
 skills = ["Python", "SQL", "FastAPI", "AWS", "Machine Learning"]
 # Use 0 for a fresher. Decimals such as 1.5 are supported.
 experience_years = 0
+# Optional. Paste a target job description for semantic ATS matching.
+job_description = ""
 
 [search]
 max_jobs_per_portal = 10

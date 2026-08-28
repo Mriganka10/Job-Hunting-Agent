@@ -15,6 +15,7 @@ class CandidateProfile:
     locations: tuple[str, ...] = ()
     skills: tuple[str, ...] = ()
     experience_years: float = 0.0
+    job_description: str = ""
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class Resume:
     text: str
     inferred_skills: tuple[str, ...]
     inferred_roles: tuple[str, ...]
+    sections: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,9 @@ class AtsReport:
     detected_sections: tuple[str, ...] = ()
     matched_keywords: tuple[str, ...] = ()
     score_breakdown: tuple[tuple[str, int, int], ...] = ()
+    category_details: dict[str, dict[str, object]] = field(default_factory=dict)
+    semantic_similarity: float = 0.0
+    llm_evaluation: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -45,6 +50,9 @@ class JobLead:
     url: str
     description: str = ""
     recruiter_email: str = ""
+    match_score: int = 0
+    match_reasons: tuple[str, ...] = ()
+    required_experience: float | None = None
     discovered_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

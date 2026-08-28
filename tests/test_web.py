@@ -248,6 +248,9 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "Showing latest scheduled run" in response.text
     assert "Download Final ATS Resume" in response.text
     assert "Mock Interview" in response.text
+    assert "Role &amp; Location" in response.text or "Role & Location" in response.text
+    assert "job.match_score" in response.text
+    assert "job.match_reasons" in response.text
     assert "/mock-interview" in response.text
     assert "Reusable Draft Message" in response.text
     assert "[Company Name]" in response.text
@@ -348,9 +351,21 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert interview["voice"]["lang"] == "en-GB"
     assert "Hazel" in interview["voice"]["female_voice_hints"]
     assert "George" in interview["voice"]["male_voice_hints"]
+    assert interview["voice"]["azure_voice"] == "en-GB-SoniaNeural"
     assert interview["interview_mode"] == "quick"
     assert len(interview["questions"]) == 5
     assert interview["session_id"]
+
+    expected_neural_voices = {
+        "India": "en-IN-NeerjaNeural",
+        "United States": "en-US-JennyNeural",
+        "United Kingdom": "en-GB-SoniaNeural",
+        "Australia": "en-AU-NatashaNeural",
+        "Canada": "en-CA-ClaraNeural",
+        "Singapore": "en-SG-LunaNeural",
+    }
+    for region, voice_name in expected_neural_voices.items():
+        assert web_module._accent_for_region(region)["azure_voice"] == voice_name
 
     complete = client.post(
         "/api/mock-interview/complete",

@@ -5,14 +5,17 @@ Resume-first job-search assistant that evaluates ATS readiness, generates an imp
 ## What It Does
 
 - Parses a PDF, DOCX, TXT, or Markdown resume.
-- Scores the resume for ATS readiness and role fit.
-- Reports detected sections, matched and missing configured skills, and a transparent category score breakdown.
-- Suggests resume improvements and generates a downloadable ATS-friendly DOCX.
+- Scores the resume with a transparent 100-point hybrid engine: Structure (20), Skills & Keywords (30), Experience & Projects (35), and Writing Quality (15).
+- Extracts Contact, Summary/Career Objective, Education, Experience, Projects, Skills, Certifications, and Achievements into canonical ATS sections.
+- Accepts an optional job description, performs exact plus embedding-based semantic matching, and reports supported matched and missing skills.
+- Uses deterministic evidence for measurable signals and an optional LLM for bullet strength, impact, relevance, and writing quality; it falls back to a deterministic writing rubric when no LLM key is configured.
+- Generates a downloadable single-column DOCX inspired by the supplied Canva hierarchy while avoiding ATS-hostile text boxes, columns, icons, and fabricated qualifications.
 - Searches configured portals such as LinkedIn and Naukri.
 - Keeps a local ledger so the same job is not applied twice.
 - Creates email-ready applications and can send them through SMTP.
 - Provides an OTP-protected web UI for resume upload, profile settings, immediate runs, downloads, and daily scheduling.
 - Includes a virtual mock-interview studio with profile-derived questions, optional camera preview and browser speech features, typed-answer fallback, transcripts, scorecards, and recent-session history.
+- Varies question selection by quick, standard, and deep modes; preserves speech transcripts across pauses; selects only a matching installed female voice for Sarah; and scores answers with a visible relevance, structure, specificity, technical-depth, and communication rubric.
 - Persists user profiles, verification state, runs, schedules, application history, and mock interviews in SQLite locally or PostgreSQL in production.
 - Supports SMTP login OTP delivery or Amazon SES registration verification and OTP delivery.
 - Isolates database records, local working files, and optional S3 artifacts by authenticated email address.
@@ -81,6 +84,8 @@ Edit `config.toml` after copying `config.example.toml`.
 - `profile.locations`: preferred cities or remote.
 - `profile.skills`: extra skills to search for if the resume is sparse.
 - `profile.experience_years`: professional experience used to request suitable portal seniority; use `0` for a fresher.
+- `profile.job_description`: optional target job description used for keyword, embedding-relevance, and missing-skill scoring.
+- `JOB_AGENT_LLM_API_KEY`: optional API key for the 15-point LLM writing-quality evaluation. Configure `JOB_AGENT_LLM_MODEL` and `JOB_AGENT_LLM_ENDPOINT` when needed; never commit the key.
 - `profile.linkedin_profile_url` and `profile.naukri_profile_url`: profile links included in application drafts/emails and available to future authenticated portal adapters.
 - `application.mode`: `draft` or `email`.
 - `email`: SMTP settings used only when `application.mode = "email"`.
@@ -91,6 +96,7 @@ Edit `config.toml` after copying `config.example.toml`.
 - `JOB_AGENT_EMAIL_PROVIDER`: `smtp` by default or `ses` for the Amazon SES v2 flow.
 - `JOB_AGENT_SES_REGION` and `JOB_AGENT_SES_FROM`: SES region and verified sender used in SES mode.
 - `JOB_AGENT_S3_BUCKET`: optional private bucket for user-scoped uploads and generated artifacts.
+- `JOB_AGENT_AZURE_SPEECH_KEY` and `JOB_AGENT_AZURE_SPEECH_REGION`: optional Azure Speech resource credentials that enable distinct neural female interviewer voices for all supported accents. Without them, the app can use only voices installed in the browser/operating system.
 
 Outputs are written under `data/` by default:
 
@@ -126,4 +132,4 @@ python -m job_hunting_agent serve --host 127.0.0.1 --port 8000
 
 ## Current Prototype Boundaries
 
-This repository contains a working, testable core agent and authenticated web prototype. Resume generation and interview scoring are deterministic rather than LLM-based, and resume improvement is not tailored to an individual job description. The next production steps are an explicit application approval queue, stronger job matching, durable worker-based scheduling for multi-instance deployments, and authenticated browser adapters per portal account. Naukri and LinkedIn application flows vary by account, job type, and region and can require login, CAPTCHA, OTP, or screening answers; the current implementation does not bypass those controls or submit through them automatically.
+This repository contains a working core agent and authenticated web prototype. ATS scoring uses deterministic evidence plus optional LLM writing evaluation, and an optional job description drives semantic matching. The next production steps are an explicit application approval queue, durable worker-based scheduling for multi-instance deployments, and authenticated browser adapters per portal account. Naukri and LinkedIn application flows vary by account, job type, and region and can require login, CAPTCHA, OTP, or screening answers; the current implementation does not bypass those controls or submit through them automatically.
