@@ -41,8 +41,8 @@ def test_write_improved_resume_creates_final_ats_docx(tmp_path: Path) -> None:
 
     text = "\n".join(paragraph.text for paragraph in Document(str(docx_path)).paragraphs)
     assert "Mriganka Das" in text
-    assert "CAREER OBJECTIVE" in text
-    assert "SKILLS" in text
+    assert "PROFESSIONAL SUMMARY" in text
+    assert "TECHNICAL SKILLS" in text
     assert "PROFESSIONAL EXPERIENCE" in text
     assert "Senior Data Engineer" in text
     assert "Tata Consultancy Services | Bengaluru" in text
@@ -66,6 +66,9 @@ def test_write_improved_resume_creates_final_ats_docx(tmp_path: Path) -> None:
     headings = [paragraph for paragraph in document.paragraphs if paragraph.style.name == "ResumeHeading"]
     assert headings
     assert all("pBdr" in paragraph._p.xml for paragraph in headings)
+    assert document.styles["Normal"].font.name == "Arial"
+    assert document.styles["ResumeName"].font.size.pt == 20
+    assert document.styles["ResumeHeading"].font.color.rgb is not None
 
 
 def test_write_improved_resume_preserves_all_detected_experience_entries(tmp_path: Path) -> None:
@@ -105,7 +108,8 @@ def test_write_improved_resume_preserves_all_detected_experience_entries(tmp_pat
     assert "Associate" in text
     assert "Consultant" in text
     assert "Software Engineer" in text
-    assert "delivered technology solutions, data workflows, and stakeholder-facing outcomes" in text
+    assert "delivered technology solutions, data workflows, and stakeholder-facing outcomes" not in text
+    assert "PROJECTS" not in text
     assert "experience referenced in professional experience" not in text
 
 
@@ -160,3 +164,133 @@ def test_write_improved_resume_keeps_metadata_out_of_achievements_and_languages(
     assert "Unix Shell Script" not in languages
     assert "Scripting Language: Unix Shell Script" not in languages
     assert "Scripting Language: Unix Shell Script" not in text.split("LANGUAGES", 1)[1]
+
+
+def test_write_improved_resume_preserves_uploaded_skill_keywords_and_optional_headings(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text=(
+            "MRIGANKA DAS\n"
+            "mriganka@example.com | https://github.com/mriganka\n"
+            "PROFESSIONAL SUMMARY\nData engineer focused on reliable analytics platforms.\n"
+            "TECHNICAL SKILLS\n"
+            "Programming: Python, Scala, Bash\n"
+            "Data Platforms: Apache NiFi, dbt, Trino, Delta Lake\n"
+            "Cloud & DevOps: AWS Glue, Terraform, GitHub Actions\n"
+            "PUBLICATIONS\nReliable Data Contracts - Engineering Journal, 2025\n"
+            "VOLUNTEER EXPERIENCE\nMentored early-career engineers in data fundamentals.\n"
+            "LANGUAGES\nEnglish, Hindi, Bengali\n"
+            "INTERESTS\nDistributed systems, technical writing\n"
+        ),
+        inferred_skills=("Python", "AWS", "Terraform"),
+        inferred_roles=("Data Engineer",),
+        sections={
+            "contact": "MRIGANKA DAS\nmriganka@example.com | https://github.com/mriganka",
+            "summary": "Data engineer focused on reliable analytics platforms.",
+            "skills": (
+                "Programming: Python, Scala, Bash\n"
+                "Data Platforms: Apache NiFi, dbt, Trino, Delta Lake\n"
+                "Cloud & DevOps: AWS Glue, Terraform, GitHub Actions"
+            ),
+            "publications": "Reliable Data Contracts - Engineering Journal, 2025",
+            "volunteering": "Mentored early-career engineers in data fundamentals.",
+            "languages": "English, Hindi, Bengali",
+            "interests": "Distributed systems, technical writing",
+        },
+    )
+    report = AtsReport(score=80, strengths=(), improvements=(), missing_keywords=())
+    profile = CandidateProfile(target_roles=("Data Engineer",))
+
+    artifact = write_improved_resume(resume, report, profile, tmp_path)
+    document = Document(artifact["docx_path"])
+    paragraphs = [paragraph.text for paragraph in document.paragraphs]
+    text = "\n".join(paragraphs)
+
+    assert paragraphs[0] == "Mriganka Das"
+    assert "Programming: Python, Scala, Bash" in text
+    assert "Data Platforms: Apache NiFi, dbt, Trino, Delta Lake" in text
+    assert "Cloud & DevOps: AWS Glue, Terraform, GitHub Actions" in text
+    assert "PUBLICATIONS & RESEARCH" in text
+    assert "VOLUNTEER & LEADERSHIP EXPERIENCE" in text
+    assert "LANGUAGES" in text
+    assert "INTERESTS" in text
+
+
+def test_builder_deduplicates_contacts_and_blocks_cross_section_contamination(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text=(
+            "JANE DOE\n"
+            "jane@example.com +91 9876543210\n"
+            "PROFILE SUMMARY\nBuilt reliable platforms for regulated teams.\n"
+            "TECHNICAL SKILLS\nCloud: AWS, Azure\nCAREER TIMELINE\n"
+            "2022 - Present | Example Services Ltd. | Engineer\n"
+            "EDUCATION\n2021: B.Tech. from Example University\n"
+            "LANGUAGES KNOWN: English, Hindi\nAddress: Private address\n"
+        ),
+        inferred_skills=("AWS", "Azure"),
+        inferred_roles=("Software Engineer",),
+        sections={
+            "contact": "jane@example.com +91 9876543210",
+            "summary": "Built reliable platforms for regulated teams.",
+            "skills": "Cloud: AWS, Azure",
+            "education": "2021: B.Tech. from Example University\n2022 - Present | Example Services Ltd. | Engineer",
+            "languages": "English, Hindi\nAddress: Private address",
+        },
+    )
+    profile = CandidateProfile(
+        name="Jane Doe",
+        email="jane@example.com",
+        phone="+91 98765 43210",
+        target_roles=("Software Engineer",),
+    )
+    artifact = write_improved_resume(resume, AtsReport(80, (), (), ()), profile, tmp_path)
+    text = "\n".join(paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs)
+
+    assert text.count("jane@example.com") == 1
+    assert text.count("98765 43210") == 1
+    assert "CAREER TIMELINE" not in text
+    assert "Example Services Ltd." not in text.split("EDUCATION", 1)[1]
+    assert "Private address" not in text
+
+
+def test_builder_parses_role_first_and_wrapped_corporate_timelines(tmp_path: Path) -> None:
+    resume = Resume(
+        path="faculty.txt",
+        text="",
+        inferred_skills=("Financial Modelling", "Prompt Engineering"),
+        inferred_roles=(),
+        sections={
+            "summary": "Finance practitioner and educator.",
+            "experience": (
+                "Founder & Director | Kairoz Corporation\n"
+                "Research and Consulting 2025 - Present\n"
+                "• Directing market research and client delivery.\n"
+                "Senior Manager - Digital Transformation & Research\n"
+                "Analytics | Evalueserve Pvt. Ltd. Jul 2014 - May 2025\n"
+                "• Led AI-enabled automation programmes.\n"
+                "Sr. Business Analyst | Verity Knowledge Solutions Sep 2012 - Jun 2014\n"
+                "• Delivered investment research."
+            ),
+            "teaching_vision": "Develop professionals who bridge finance and technology.",
+            "teaching_subjects": "• Financial Modelling\n• AI Applications in Management",
+            "skills": "Domain Expertise\nFinancial Modelling • Market Sizing\nAI & Technology\nPrompt Engineering",
+        },
+    )
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(80, (), (), ()),
+        CandidateProfile(name="Sameer Srivastava", target_roles=("Adjunct Faculty",)),
+        tmp_path,
+    )
+    text = "\n".join(paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs)
+
+    assert "TEACHING VISION" in text
+    assert "SUBJECTS AVAILABLE TO TEACH" in text
+    assert "Founder & Director" in text
+    assert "Kairoz Corporation" in text
+    assert "Senior Manager - Digital Transformation & Research Analytics" in text
+    assert "Evalueserve Pvt. Ltd." in text
+    assert "Jul 2014 - May 2025" in text
+    assert "Sr. Business Analyst" in text
+    assert "Sep 2012 - Jun 2014" in text

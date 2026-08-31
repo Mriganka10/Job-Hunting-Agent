@@ -105,3 +105,49 @@ def test_pdf_reader_retries_standard_extraction_when_layout_is_empty(tmp_path: P
     monkeypatch.setitem(sys.modules, "pypdf", fake_pypdf)
 
     assert _read_pdf(pdf_path) == "SUMMARY\nReadable resume text"
+
+
+def test_pdf_reader_prefers_logical_order_when_layout_interleaves_columns(tmp_path: Path, monkeypatch) -> None:
+    pdf_path = tmp_path / "resume.pdf"
+    pdf_path.write_bytes(b"fake")
+    standard = "PROFILE SUMMARY\nUseful summary\nTECHNICAL SKILLS\nPython\nEDUCATION\nB.Tech"
+    layout = "PROFILE SUMMARY                 TECHNICAL SKILLS\nUseful summary                    Python\nEDUCATION                         B.Tech"
+
+    class Page:
+        def extract_text(self, extraction_mode=None):
+            return layout if extraction_mode == "layout" else standard
+
+    fake_pypdf = SimpleNamespace(PdfReader=lambda _: SimpleNamespace(pages=[Page()]))
+    monkeypatch.setitem(sys.modules, "pypdf", fake_pypdf)
+
+    assert _read_pdf(pdf_path) == standard
+
+
+def test_extract_sections_supports_academic_and_corporate_resume_headings() -> None:
+    sections = extract_sections("""SAMEER SRIVASTAVA
+PROFESSIONAL SUMMARY
+Finance and analytics leader.
+TEACHING VISION
+Develop practitioners who bridge business and technology.
+SUBJECTS AVAILABLE TO TEACH
+Financial Modelling
+ACADEMIC CREDENTIALS
+MBA - Finance
+KEY CORPORATE ACHIEVEMENTS
+Improved efficiency by 37%.
+CORPORATE EXPERIENCE (15+ YEARS)
+Senior Manager | Example Ltd. | 2014 - 2025
+CORE SKILLS & TOOLS
+Domain Expertise
+Financial Modelling • Market Sizing
+Research and Consulting
+Delivered client research.
+""")
+
+    assert "teaching_vision" in sections
+    assert "teaching_subjects" in sections
+    assert "MBA - Finance" in sections["education"]
+    assert "37%" in sections["achievements"]
+    assert "Senior Manager" in sections["experience"]
+    assert "Financial Modelling" in sections["skills"]
+    assert "publications" not in sections

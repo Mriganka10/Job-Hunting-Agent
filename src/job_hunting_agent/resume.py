@@ -53,12 +53,21 @@ ROLE_HINTS = (
 SECTION_ALIASES = {
     "contact": ("contact", "contact details", "personal details"),
     "summary": ("summary", "professional summary", "career summary", "profile", "profile summary", "objective", "career objective", "carrer objective", "about me"),
-    "experience": ("experience", "work experience", "professional experience", "employment", "employment history", "work history", "internship", "internships"),
-    "skills": ("skills", "technical skills", "core skills", "key skills", "competencies", "technical competencies", "technologies", "tools and technologies"),
-    "education": ("education", "academic background", "academic qualifications", "educational qualifications", "qualifications"),
+    "experience": ("experience", "work experience", "professional experience", "corporate experience", "employment", "employment history", "work history", "professional history", "internship", "internships"),
+    "skills": ("skills", "technical skills", "core skills", "core skills and tools", "key skills", "competencies", "technical competencies", "technologies", "tools and technologies", "domain expertise"),
+    "education": ("education", "academic credentials", "academic background", "academic qualifications", "educational qualifications", "qualifications"),
     "projects": ("projects", "project experience", "academic projects", "personal projects", "key projects", "portfolio"),
     "certifications": ("certifications", "certification", "licenses and certifications", "courses", "training"),
-    "achievements": ("achievements", "achievement", "awards", "honors", "accomplishments", "achievement and certification", "achievements and certifications", "achievement certification", "achievements certifications"),
+    "achievements": ("achievements", "achievement", "key achievements", "corporate achievements", "key corporate achievements", "awards", "honors", "accomplishments", "achievement and certification", "achievements and certifications", "achievement certification", "achievements certifications"),
+    "languages": ("languages", "language", "languages known", "language proficiency"),
+    "publications": ("publications", "publication", "research publications", "research papers"),
+    "volunteering": ("volunteering", "volunteer experience", "community involvement", "leadership experience"),
+    "interests": ("interests", "areas of interest", "professional interests", "hobbies"),
+    "core_competencies": ("core competencies", "areas of expertise", "key competencies"),
+    "soft_skills": ("soft skills", "professional strengths", "personal skills", "interpersonal skills"),
+    "career_timeline": ("career timeline", "employment timeline", "career progression"),
+    "teaching_vision": ("teaching vision", "teaching philosophy", "statement of teaching philosophy"),
+    "teaching_subjects": ("subjects available to teach", "subjects taught", "courses available to teach", "courses taught", "teaching areas"),
 }
 
 
@@ -130,7 +139,13 @@ def extract_sections(text: str) -> dict[str, str]:
     if result.get("certifications") and not result.get("achievements"):
         achievement_lines = [
             line for line in result["certifications"].splitlines()
-            if not re.search(r"\b(?:certif|training|course|license)\w*\b", line, flags=re.I)
+            if re.search(
+                r"\b(?:award|winner|won|topper|honou?r|recogniz|achievement|accomplish|"
+                r"rank(?:ed)?|solved|increased|reduced|improved)\b|\d+\s*[+%]",
+                line,
+                flags=re.I,
+            )
+            and not re.search(r"\b(?:certif|training|course|license)\w*\b", line, flags=re.I)
         ]
         if achievement_lines:
             result["achievements"] = "\n".join(achievement_lines)
@@ -225,7 +240,27 @@ def _heading_key(value: str) -> str:
 def extract_skills(text: str) -> tuple[str, ...]:
     lower = text.lower()
     found = [skill.title() for skill in sorted(KNOWN_SKILLS) if skill in lower]
+    sections = extract_sections(text)
+    found.extend(_skills_from_explicit_section(sections.get("skills", "")))
     return tuple(dict.fromkeys(found))
+
+
+def _skills_from_explicit_section(text: str) -> list[str]:
+    """Extract market-specific skills from an explicit skills section."""
+    found: list[str] = []
+    for raw_line in text.splitlines():
+        line = re.sub(r"^[\s•▪●\uf0b7*\-]+", "", raw_line).strip()
+        if not line:
+            continue
+        if ":" in line:
+            label, line = line.split(":", 1)
+            if 1 <= len(label.split()) <= 5:
+                found.append(label.strip())
+        for value in re.split(r"\s*[•▪●|;,]\s*", line):
+            cleaned = value.strip(" .()")
+            if 2 <= len(cleaned) <= 80 and len(cleaned.split()) <= 8:
+                found.append(cleaned)
+    return found[:60]
 
 
 def extract_roles(text: str) -> tuple[str, ...]:
@@ -246,17 +281,17 @@ def _read_pdf(path: Path) -> str:
         raise ValueError("The PDF could not be opened. Re-export it as a standard text-based PDF or upload the DOCX version.") from exc
     pages: list[str] = []
     for page in reader.pages:
-        page_text = ""
+        standard_text = ""
+        layout_text = ""
         try:
-            page_text = page.extract_text(extraction_mode="layout") or ""
+            standard_text = page.extract_text() or ""
+        except Exception:
+            pass
+        try:
+            layout_text = page.extract_text(extraction_mode="layout") or ""
         except (TypeError, ValueError, KeyError):
             pass
-        if not page_text.strip():
-            try:
-                page_text = page.extract_text() or ""
-            except Exception:
-                page_text = ""
-        pages.append(page_text)
+        pages.append(_select_pdf_extraction(standard_text, layout_text))
     text = "\n".join(pages)
     if not text.strip():
         raise ValueError(
@@ -264,6 +299,32 @@ def _read_pdf(path: Path) -> str:
             "Run OCR or export/upload the original DOCX so the ATS can analyze the resume accurately."
         )
     return text
+
+
+def _select_pdf_extraction(standard: str, layout: str) -> str:
+    """Prefer logical reading order over visual columns when both are usable."""
+    if not standard.strip():
+        return layout
+    if not layout.strip():
+        return standard
+
+    def quality(value: str) -> int:
+        heading_keys = {
+            _heading_key(alias)
+            for names in SECTION_ALIASES.values()
+            for alias in names
+        }
+        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        headings = sum(_heading_key(line) in heading_keys for line in lines)
+        bullets = value.count("\uf0b7") + value.count("•")
+        fragmented = len(re.findall(r"\b(?:[A-Z]\s+){3,}[A-Z]+\b", value))
+        excessive_gaps = sum(bool(re.search(r"\S\s{8,}\S", line)) for line in lines)
+        return headings * 12 + min(bullets, 20) - fragmented * 8 - excessive_gaps
+
+    # Standard extraction usually follows the PDF content stream and therefore
+    # keeps two-column sections intact. Layout mode wins only when it provides a
+    # materially clearer structure.
+    return layout if quality(layout) > quality(standard) + 4 else standard
 
 
 def _read_docx(path: Path) -> str:
