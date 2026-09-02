@@ -52,7 +52,9 @@ The repository contains a working Python proof of concept with both CLI and web 
 
 Current portal support:
 
+- Remotive: documented JSON job feed with source attribution and structured posting metadata.
+- Arbeitnow: documented paginated JSON job feed with structured posting metadata.
 - LinkedIn: best-effort public job discovery with search URL fallback.
 - Naukri: best-effort public job discovery with search URL fallback.
 
-Future production versions should add authenticated portal automation, explicit human approval, job-description-specific resume tailoring, stronger job matching, and production-grade abuse/privacy controls.
+Job discovery now validates freshness, expiry and destination-link state, normalizes company aliases and job metadata, removes conservative fuzzy duplicates, and exposes owner-scoped server pagination to the web UI. Resume generation creates validated DOCX/PDF companions plus one evidence-preserving variant per lead, with a page budget and factual consistency gate. Future production versions should add authenticated portal automation, explicit human approval, additional contracted job APIs, deeper consented evidence collection, and production-grade abuse/privacy controls.

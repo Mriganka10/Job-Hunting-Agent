@@ -241,16 +241,23 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "Schedule Daily Run" in response.text
     assert "scheduler-status" in response.text
     assert "activeResult" in response.text
+    assert "function resultKey" in response.text
     assert "fetch('/api/dashboard')" in response.text
     assert "payload.latest_run?.payload" in response.text
     assert "function shouldRenderResult" in response.text
     assert "result.generated_at > activeResult.generatedAt" in response.text
     assert "Showing latest scheduled run" in response.text
-    assert "Download Final ATS Resume" in response.text
+    assert "Download ATS Resume DOCX" in response.text
+    assert "Download ATS Resume PDF" in response.text
+    assert "tailored-resumes" in response.text
     assert "Mock Interview" in response.text
     assert "Role &amp; Location" in response.text or "Role & Location" in response.text
     assert "job.match_score" in response.text
     assert "job.match_reasons" in response.text
+    assert "show-more-jobs" in response.text
+    assert "/jobs?${query.toString()}" in response.text
+    assert "activePayload.job_page.next_cursor" in response.text
+    assert "visibleJobCount" not in response.text
     assert "/mock-interview" in response.text
     assert "Reusable Draft Message" in response.text
     assert "[Company Name]" in response.text
@@ -427,6 +434,12 @@ def test_improved_resume_download_requires_run_owner(tmp_path: Path) -> None:
     other_email = f"resume-other-{uuid4().hex}@example.com"
     docx_path = tmp_path / "improved.docx"
     docx_path.write_bytes(b"docx bytes")
+    pdf_path = tmp_path / "improved.pdf"
+    pdf_path.write_bytes(b"pdf bytes")
+    tailored_docx = tmp_path / "tailored.docx"
+    tailored_docx.write_bytes(b"tailored docx")
+    tailored_pdf = tmp_path / "tailored.pdf"
+    tailored_pdf.write_bytes(b"tailored pdf")
     run_id = record_run(
         owner_email,
         {
@@ -437,7 +450,17 @@ def test_improved_resume_download_requires_run_owner(tmp_path: Path) -> None:
             "application_summary": {},
             "output_dir": str(tmp_path),
             "payload": {},
-            "improved_resume": {"docx_path": str(docx_path)},
+            "improved_resume": {
+                "docx_path": str(docx_path),
+                "pdf_path": str(pdf_path),
+                "tailored_resumes": [
+                    {
+                        "artifact_id": "job-resume-1",
+                        "docx_path": str(tailored_docx),
+                        "pdf_path": str(tailored_pdf),
+                    }
+                ],
+            },
         },
     )
 
@@ -445,7 +468,65 @@ def test_improved_resume_download_requires_run_owner(tmp_path: Path) -> None:
     other = authenticated_client(other_email)
 
     assert owner.get(f"/api/runs/{run_id}/improved-resume").status_code == 200
+    assert owner.get(f"/api/runs/{run_id}/improved-resume.pdf").status_code == 200
+    assert owner.get(f"/api/runs/{run_id}/tailored-resumes/job-resume-1/docx").status_code == 200
+    assert owner.get(f"/api/runs/{run_id}/tailored-resumes/job-resume-1/pdf").status_code == 200
     assert other.get(f"/api/runs/{run_id}/improved-resume").status_code == 404
+    assert other.get(f"/api/runs/{run_id}/improved-resume.pdf").status_code == 404
+    assert other.get(f"/api/runs/{run_id}/tailored-resumes/job-resume-1/pdf").status_code == 404
+    assert owner.get(f"/api/runs/{run_id}/tailored-resumes/missing/pdf").status_code == 404
+    assert owner.get(f"/api/runs/{run_id}/tailored-resumes/job-resume-1/txt").status_code == 400
+
+
+def test_job_pages_are_server_paginated_and_owner_scoped() -> None:
+    owner_email = f"jobs-owner-{uuid4().hex}@example.com"
+    other_email = f"jobs-other-{uuid4().hex}@example.com"
+    jobs = [
+        {
+            "stable_id": f"job-{index}",
+            "title": f"Data Engineer {index}",
+            "company": f"Company {index}",
+            "location": "Remote",
+            "url": f"https://jobs.example.com/{index}",
+        }
+        for index in range(18)
+    ]
+    run_id = record_run(
+        owner_email,
+        {
+            "trigger": "manual",
+            "generated_at": "2026-07-29T10:00:00",
+            "ats_report": {"score": 81},
+            "jobs": jobs,
+            "applications": [{"job": job, "status": "drafted"} for job in jobs[:3]],
+            "application_summary": {"drafted": 3},
+            "output_dir": "",
+        },
+    )
+    owner = authenticated_client(owner_email)
+    other = authenticated_client(other_email)
+
+    latest_payload = owner.get("/api/dashboard").json()["latest_run"]["payload"]
+    assert len(latest_payload["jobs"]) == 8
+    assert latest_payload["job_count"] == 18
+    assert len(latest_payload["applications"]) == 1
+    assert latest_payload["application_count"] == 3
+    first_cursor = latest_payload["job_page"]["next_cursor"]
+
+    second = owner.get(f"/api/runs/{run_id}/jobs", params={"cursor": first_cursor, "limit": 8})
+    assert second.status_code == 200
+    assert [job["stable_id"] for job in second.json()["jobs"]] == [f"job-{index}" for index in range(8, 16)]
+    assert second.json()["page"]["total"] == 18
+
+    third = owner.get(
+        f"/api/runs/{run_id}/jobs",
+        params={"cursor": second.json()["page"]["next_cursor"], "limit": 8},
+    )
+    assert third.status_code == 200
+    assert [job["stable_id"] for job in third.json()["jobs"]] == ["job-16", "job-17"]
+    assert third.json()["page"]["has_more"] is False
+    assert other.get(f"/api/runs/{run_id}/jobs").status_code == 404
+    assert owner.get(f"/api/runs/{run_id}/jobs", params={"cursor": f"{first_cursor}tampered"}).status_code == 400
 
 
 def test_profile_values_are_isolated_by_authenticated_email() -> None:

@@ -13,11 +13,15 @@ Job Hunting Agent
         |
         +-- Resume Parser
         +-- ATS Scoring Engine
-        +-- Improved Resume Builder (DOCX)
+        +-- Improved Resume Builder (DOCX/PDF)
         +-- Job Search Orchestrator
         |       |
+        |       +-- Remotive API Adapter
+        |       +-- Arbeitnow API Adapter
         |       +-- LinkedIn Adapter
         |       +-- Naukri Adapter
+        |       +-- Freshness / Link Validator
+        |       +-- Alias-Aware Deduplicator
         |
         +-- Application Service
         |       |
@@ -74,16 +78,19 @@ Responsibilities:
 - Generate ATS report.
 - Build job-search intent.
 - Run configured portal adapters.
-- Deduplicate job leads.
+- Independently validate freshness, expiry, and destination links.
+- Normalize company aliases and deduplicate similar job leads.
 - Apply to jobs through the application service.
 - Write the latest run summary.
 - Generate an improved DOCX resume from extracted sections and ATS feedback.
 
 ### Improved Resume Builder
 
-File: `src/job_hunting_agent/resume_builder.py`
+Files: `src/job_hunting_agent/resume_builder.py`, `src/job_hunting_agent/document_pipeline.py`, and `src/job_hunting_agent/resume_validation.py`
 
-The builder preserves extracted professional experience and other recognizable resume sections, normalizes formatting, strengthens selected action verbs, and writes a DOCX artifact. It is deterministic and is not job-description-specific or LLM-generated. Web downloads are authorized by run ownership and can use a short-lived S3 URL when object storage is enabled.
+The builder preserves extracted professional experience and other recognizable resume sections, normalizes formatting, and strengthens selected action verbs without adding unsupported facts. It writes a base DOCX/PDF pair and a separate pair for every lead. Job-specific variants reorder source-supported skills, projects, and bullets using the lead title and description; missing JD terms are reported but never injected as candidate qualifications.
+
+The document pipeline iterates through four density levels against a configurable page target. It rasterizes the final PDF, checks page geometry, ink density, clipping, machine-readable text recovery, DOCX structure, semantic section placement, and source consistency. When LibreOffice is installed, the PDF is rendered directly from the DOCX. Otherwise, a parallel PDF is generated from the exact same structured section model and the validation report records that DOCX render parity was unavailable. Web downloads are authorized by run ownership and can use short-lived S3 URLs when object storage is enabled.
 
 ### Authentication and Persistence
 
@@ -137,16 +144,24 @@ Output:
 
 ### Portal Adapters
 
-File: `src/job_hunting_agent/portals.py`
+Files: `src/job_hunting_agent/portals.py`, `src/job_hunting_agent/job_sources.py`, and `src/job_hunting_agent/job_validation.py`
 
 Current adapters:
 
+- `RemotiveAdapter`
+- `ArbeitnowAdapter`
 - `LinkedInAdapter`
 - `NaukriAdapter`
 
 Each adapter receives a `SearchIntent` built from resume inference and config. It returns normalized `JobLead` objects.
 
-The adapters use public job discovery where possible and return search links when a portal blocks scraping or changes its response.
+Remotive and Arbeitnow use documented JSON feeds and carry source provenance on every lead. LinkedIn and Naukri remain defensive public HTML adapters and return search links when a portal blocks scraping or changes its response. The validation stage independently checks posting age, explicit or inferred expiry, destination-link status, normalized employment/workplace values, and company aliases before fuzzy duplicate removal.
+
+### Job Pagination
+
+File: `src/job_hunting_agent/job_pagination.py`
+
+The complete ranked job set is retained in the server-side run record. Browser run payloads contain the first eight jobs and an opaque HMAC-signed cursor. `GET /api/runs/{run_id}/jobs` verifies authentication, run ownership, cursor signature, and run binding before returning the next page. Application objects are also trimmed in browser payloads so they cannot leak the complete job set.
 
 ### Application Service
 
@@ -180,13 +195,13 @@ The `data/` folder is ignored by Git because it can contain private candidate an
 3. Resume parser extracts and normalizes text.
 4. ATS scorer creates the score and improvement list.
 5. Search intent is built from configured roles, skills, locations, and resume inference.
-6. Portal adapters search LinkedIn and Naukri.
-7. Job leads are deduplicated.
+6. Structured API and public portal adapters search configured sources.
+7. Job leads are normalized, freshness/expiry/link checked, alias-normalized, and deduplicated.
 8. Application service checks the ledger.
 9. Drafts are written or emails are sent.
 10. Reports and application records are written under `data/`.
-11. A full run also produces an improved DOCX resume and optionally mirrors artifacts to S3.
-12. Web UI returns ATS score, improvement suggestions, job leads, application action details, and an authorized resume download.
+11. A full run produces validated base and per-job DOCX/PDF resumes and optionally mirrors artifacts to S3.
+12. Web UI receives the first job page and fetches later pages from the authenticated cursor endpoint.
 
 ## Production Architecture Target
 

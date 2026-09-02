@@ -1,9 +1,12 @@
+import json
 from pathlib import Path
 
 from docx import Document
+from pypdf import PdfReader
 
-from job_hunting_agent.models import AtsReport, CandidateProfile, Resume
+from job_hunting_agent.models import AtsReport, CandidateProfile, JobLead, Resume
 from job_hunting_agent.resume_builder import write_improved_resume
+from job_hunting_agent.resume_validation import validate_factual_consistency, validate_section_semantics
 
 
 def test_write_improved_resume_creates_final_ats_docx(tmp_path: Path) -> None:
@@ -37,12 +40,20 @@ def test_write_improved_resume_creates_final_ats_docx(tmp_path: Path) -> None:
     assert docx_path.suffix == ".docx"
     assert docx_path.parent.name == "improved_resume"
     assert docx_path.name == "Mriganka-Das-ATS-Friendly-Resume.docx"
-    assert "pdf_path" not in artifact
+    pdf_path = Path(artifact["pdf_path"])
+    validation_path = Path(artifact["validation_path"])
+    assert pdf_path.exists()
+    assert validation_path.exists()
+    assert len(PdfReader(str(pdf_path)).pages) <= 2
+    assert artifact["validation"]["passed"] is True
+    assert artifact["validation"]["visual_rendered"] is True
+    assert artifact["validation"]["factual_consistency"]["passed"] is True
+    assert json.loads(validation_path.read_text(encoding="utf-8"))["page_target_met"] is True
 
     text = "\n".join(paragraph.text for paragraph in Document(str(docx_path)).paragraphs)
     assert "Mriganka Das" in text
-    assert "CAREER OBJECTIVE" in text
-    assert "SKILLS" in text
+    assert "PROFESSIONAL SUMMARY" in text
+    assert "TECHNICAL SKILLS" in text
     assert "PROFESSIONAL EXPERIENCE" in text
     assert "Senior Data Engineer" in text
     assert "Tata Consultancy Services | Bengaluru" in text
@@ -66,6 +77,9 @@ def test_write_improved_resume_creates_final_ats_docx(tmp_path: Path) -> None:
     headings = [paragraph for paragraph in document.paragraphs if paragraph.style.name == "ResumeHeading"]
     assert headings
     assert all("pBdr" in paragraph._p.xml for paragraph in headings)
+    assert document.styles["Normal"].font.name == "Arial"
+    assert document.styles["ResumeName"].font.size.pt == 20
+    assert document.styles["ResumeHeading"].font.color.rgb is not None
 
 
 def test_write_improved_resume_preserves_all_detected_experience_entries(tmp_path: Path) -> None:
@@ -105,7 +119,8 @@ def test_write_improved_resume_preserves_all_detected_experience_entries(tmp_pat
     assert "Associate" in text
     assert "Consultant" in text
     assert "Software Engineer" in text
-    assert "delivered technology solutions, data workflows, and stakeholder-facing outcomes" in text
+    assert "delivered technology solutions, data workflows, and stakeholder-facing outcomes" not in text
+    assert "PROJECTS" not in text
     assert "experience referenced in professional experience" not in text
 
 
@@ -160,3 +175,461 @@ def test_write_improved_resume_keeps_metadata_out_of_achievements_and_languages(
     assert "Unix Shell Script" not in languages
     assert "Scripting Language: Unix Shell Script" not in languages
     assert "Scripting Language: Unix Shell Script" not in text.split("LANGUAGES", 1)[1]
+
+
+def test_write_improved_resume_preserves_uploaded_skill_keywords_and_optional_headings(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text=(
+            "MRIGANKA DAS\n"
+            "mriganka@example.com | https://github.com/mriganka\n"
+            "PROFESSIONAL SUMMARY\nData engineer focused on reliable analytics platforms.\n"
+            "TECHNICAL SKILLS\n"
+            "Programming: Python, Scala, Bash\n"
+            "Data Platforms: Apache NiFi, dbt, Trino, Delta Lake\n"
+            "Cloud & DevOps: AWS Glue, Terraform, GitHub Actions\n"
+            "PUBLICATIONS\nReliable Data Contracts - Engineering Journal, 2025\n"
+            "VOLUNTEER EXPERIENCE\nMentored early-career engineers in data fundamentals.\n"
+            "LANGUAGES\nEnglish, Hindi, Bengali\n"
+            "INTERESTS\nDistributed systems, technical writing\n"
+        ),
+        inferred_skills=("Python", "AWS", "Terraform"),
+        inferred_roles=("Data Engineer",),
+        sections={
+            "contact": "MRIGANKA DAS\nmriganka@example.com | https://github.com/mriganka",
+            "summary": "Data engineer focused on reliable analytics platforms.",
+            "skills": (
+                "Programming: Python, Scala, Bash\n"
+                "Data Platforms: Apache NiFi, dbt, Trino, Delta Lake\n"
+                "Cloud & DevOps: AWS Glue, Terraform, GitHub Actions"
+            ),
+            "publications": "Reliable Data Contracts - Engineering Journal, 2025",
+            "volunteering": "Mentored early-career engineers in data fundamentals.",
+            "languages": "English, Hindi, Bengali",
+            "interests": "Distributed systems, technical writing",
+        },
+    )
+    report = AtsReport(score=80, strengths=(), improvements=(), missing_keywords=())
+    profile = CandidateProfile(target_roles=("Data Engineer",))
+
+    artifact = write_improved_resume(resume, report, profile, tmp_path)
+    document = Document(artifact["docx_path"])
+    paragraphs = [paragraph.text for paragraph in document.paragraphs]
+    text = "\n".join(paragraphs)
+
+    assert paragraphs[0] == "Mriganka Das"
+    assert "Programming: Python, Scala, Bash" in text
+    assert "Data Platforms: Apache NiFi, dbt, Trino, Delta Lake" in text
+    assert "Cloud & DevOps: AWS Glue, Terraform, GitHub Actions" in text
+    assert "PUBLICATIONS & RESEARCH" in text
+    assert "VOLUNTEER & LEADERSHIP EXPERIENCE" in text
+    assert "LANGUAGES" in text
+    assert "INTERESTS" in text
+
+
+def test_builder_creates_concise_summary_and_corrects_education_labels(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text=(
+            "JANE DOE\n"
+            "jane@example.com | +91 9876543210\n"
+            "PROFESSIONAL SUMMARY\n"
+            "Hardworking dynamic data engineer seeking opportunity in a challenging environment with Aws, Gitlab, "
+            "SQL, Fastapi and highquality delivery experience for organization growth.\n"
+            "TECHNICAL SKILLS\n"
+            "Cloud: Aws, Gitlab, highquality data checks, SQL, Fastapi\n"
+            "PROFESSIONAL EXPERIENCE\n"
+            "Data Engineer | Example Ltd. | Jan 2021 - Present\n"
+            "Responsible for building SQL pipelines.\n"
+            "Improved pipeline runtime by 35% for 500000 records.\n"
+            "EDUCATION\n"
+            "2009: Higher Secondary Education from Example School\n"
+            "2007: Higher Secondary Education from Example School\n"
+            "SOFT SKILLS\n"
+            "Hardworking, punctual, honest, positive attitude, quick learner\n"
+        ),
+        inferred_skills=("AWS", "GitLab", "SQL", "FastAPI"),
+        inferred_roles=("Data Engineer",),
+        sections={
+            "contact": "jane@example.com | +91 9876543210",
+            "summary": (
+                "Hardworking dynamic data engineer seeking opportunity in a challenging environment with Aws, Gitlab, "
+                "SQL, Fastapi and highquality delivery experience for organization growth."
+            ),
+            "skills": "Cloud: Aws, Gitlab, highquality data checks, SQL, Fastapi",
+            "experience": (
+                "Data Engineer | Example Ltd. | Jan 2021 - Present\n"
+                "Responsible for building SQL pipelines.\n"
+                "Improved pipeline runtime by 35% for 500000 records."
+            ),
+            "education": (
+                "2009: Higher Secondary Education from Example School\n"
+                "2007: Higher Secondary Education from Example School"
+            ),
+            "soft_skills": "Hardworking, punctual, honest, positive attitude, quick learner",
+        },
+    )
+
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(70, (), (), ()),
+        CandidateProfile(name="Jane Doe", target_roles=("Data Engineer",), skills=("AWS", "GitLab", "SQL", "FastAPI"), experience_years=3),
+        tmp_path,
+    )
+    text = "\n".join(paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs)
+    summary = text.split("PROFESSIONAL SUMMARY", 1)[1].split("TECHNICAL SKILLS", 1)[0]
+
+    assert "Hardworking dynamic" not in summary
+    assert len(summary.split()) <= 90
+    assert "AWS" in text
+    assert "GitLab" in text
+    assert "FastAPI" in text
+    assert "high-quality" in text
+    assert "2009: Higher Secondary Education" in text
+    assert "2007: Secondary Education" in text
+    assert "2007: Higher Secondary Education" not in text
+    assert "SOFT SKILLS" not in text
+
+
+def test_builder_deduplicates_contacts_and_blocks_cross_section_contamination(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text=(
+            "JANE DOE\n"
+            "jane@example.com +91 9876543210\n"
+            "PROFILE SUMMARY\nBuilt reliable platforms for regulated teams.\n"
+            "TECHNICAL SKILLS\nCloud: AWS, Azure\nCAREER TIMELINE\n"
+            "2022 - Present | Example Services Ltd. | Engineer\n"
+            "EDUCATION\n2021: B.Tech. from Example University\n"
+            "LANGUAGES KNOWN: English, Hindi\nAddress: Private address\n"
+        ),
+        inferred_skills=("AWS", "Azure"),
+        inferred_roles=("Software Engineer",),
+        sections={
+            "contact": "jane@example.com +91 9876543210",
+            "summary": "Built reliable platforms for regulated teams.",
+            "skills": "Cloud: AWS, Azure",
+            "education": "2021: B.Tech. from Example University\n2022 - Present | Example Services Ltd. | Engineer",
+            "languages": "English, Hindi\nAddress: Private address",
+        },
+    )
+    profile = CandidateProfile(
+        name="Jane Doe",
+        email="jane@example.com",
+        phone="+91 98765 43210",
+        target_roles=("Software Engineer",),
+    )
+    artifact = write_improved_resume(resume, AtsReport(80, (), (), ()), profile, tmp_path)
+    text = "\n".join(paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs)
+
+    assert text.count("jane@example.com") == 1
+    assert text.count("98765 43210") == 1
+    assert "CAREER TIMELINE" not in text
+    assert "Example Services Ltd." not in text.split("EDUCATION", 1)[1]
+    assert "Private address" not in text
+
+
+def test_builder_parses_role_first_and_wrapped_corporate_timelines(tmp_path: Path) -> None:
+    resume = Resume(
+        path="faculty.txt",
+        text="",
+        inferred_skills=("Financial Modelling", "Prompt Engineering"),
+        inferred_roles=(),
+        sections={
+            "summary": "Finance practitioner and educator.",
+            "experience": (
+                "Founder & Director | Kairoz Corporation\n"
+                "Research and Consulting 2025 - Present\n"
+                "• Directing market research and client delivery.\n"
+                "Senior Manager - Digital Transformation & Research\n"
+                "Analytics | Evalueserve Pvt. Ltd. Jul 2014 - May 2025\n"
+                "• Led AI-enabled automation programmes.\n"
+                "Sr. Business Analyst | Verity Knowledge Solutions Sep 2012 - Jun 2014\n"
+                "• Delivered investment research."
+            ),
+            "teaching_vision": "Develop professionals who bridge finance and technology.",
+            "teaching_subjects": "• Financial Modelling\n• AI Applications in Management",
+            "skills": "Domain Expertise\nFinancial Modelling • Market Sizing\nAI & Technology\nPrompt Engineering",
+        },
+    )
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(80, (), (), ()),
+        CandidateProfile(name="Sameer Srivastava", target_roles=("Adjunct Faculty",)),
+        tmp_path,
+    )
+    text = "\n".join(paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs)
+
+    assert "TEACHING VISION" in text
+    assert "SUBJECTS AVAILABLE TO TEACH" in text
+    assert "Founder & Director" in text
+    assert "Kairoz Corporation" in text
+    assert "Senior Manager - Digital Transformation & Research Analytics" in text
+    assert "Evalueserve Pvt. Ltd." in text
+    assert "Jul 2014 - May 2025" in text
+    assert "Sr. Business Analyst" in text
+    assert "Sep 2012 - Jun 2014" in text
+
+
+def test_builder_repairs_wrapped_entry_level_resume_sections(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text="",
+        inferred_skills=("Python", "Machine Learning", "Deep Learning", "TensorFlow", "GitHub"),
+        inferred_roles=("AI Developer",),
+        sections={
+            "contact": "+91 9083181985\njane@example.com",
+            "summary": "Highly motivated final year student with a strong foundation in AI, ML, and Data Science.",
+            "skills": (
+                "Programming Languages : Java, Python.\n"
+                "Databases : SQL, MySQL.\n"
+                "Data Science & AI/ML : Machine Learning, Deep Learning, TensorFlow,\n"
+                "Keras, Scikit-learn.\n"
+                "Tools : Jupyter Notebook, VS Code, PyCharm, GitHub."
+            ),
+            "experience": (
+                "AI Developer - Level 1 | Kairoz\n"
+                "Corporation Pvt. Ltd. (May 2026 -\n"
+                "Present)\n"
+                "Worked on Artificial Intelligence and\n"
+                "Machine Learning related\n"
+                "projects\n"
+                ".\n"
+                "Applied Python programming for\n"
+                "development and automation tasks."
+            ),
+            "projects": (
+                "Stock Price Prediction using algorithmic trading - Build an intelligent prediction\n"
+                "framework using ML and Deep Learning. (Jun 2025 - Mar 2026)\n"
+                "Movie Recommendation System - A content-based ML project which helps\n"
+                "users find similar films. (April 2025)"
+            ),
+            "education": (
+                "2022 - 2026\n"
+                "CGPA - 8.78(till 7\n"
+                "Semester)\n"
+                "th\n"
+                "2022\n"
+                "Marks (in percentage)-\n"
+                "93.8%\n"
+                "2020\n"
+                "Marks (in percentage)-\n"
+                "93.3%\n"
+                "B.Tech in Computer Science & Engineering\n"
+                "Government College of Engineering and Leather Technology\n"
+                "Higher Secondary (XII)\n"
+                "Example High School\n"
+                "Secondary (X)\n"
+                "Example High School"
+            ),
+        },
+    )
+    profile = CandidateProfile(
+        name="Jane Doe",
+        email="jane@example.com",
+        phone="+91 9083181985",
+        linkedin_profile_url="https://www.linkedin.com/in/janedoe/",
+        target_roles=("AI Developer",),
+        locations=("PAN India",),
+        skills=("Python", "Machine Learning", "Deep Learning", "TensorFlow"),
+        experience_years=0.5,
+    )
+
+    artifact = write_improved_resume(resume, AtsReport(84, (), (), ()), profile, tmp_path)
+    paragraphs = [paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs if paragraph.text.strip()]
+    text = "\n".join(paragraphs)
+
+    assert paragraphs[1] == "jane@example.com | +91 90831 81985 | https://www.linkedin.com/in/janedoe/ | PAN India"
+    assert "2022 - 2026" not in paragraphs[1]
+    assert "Kairoz Corporation Pvt. Ltd." in text
+    assert "May 2026 - Present" in text
+    assert "Contributed to Artificial Intelligence and Machine Learning related projects." in text
+    assert "Applied Python programming for development and automation tasks." in text
+    assert "Databases: SQL, MySQL" in text
+    assert "Data Science & AI/ML: Machine Learning, Deep Learning, TensorFlow, Keras, scikit-learn" in text
+    assert "Databases: SQL, MySQL, Data Science" not in text
+    assert "Stock Price Prediction using algorithmic trading" in text
+    assert "Movie Recommendation System" in text
+    assert text.index("Stock Price Prediction using algorithmic trading") < text.index("Movie Recommendation System")
+    assert "2022 - 2026: B.Tech in Computer Science & Engineering" in text
+    assert "2022: Higher Secondary (XII)" in text
+    assert "2020: Secondary (X)" in text
+    assert "\nth\n" not in text
+
+
+def test_builder_filters_generic_core_competency_clouds(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text="",
+        inferred_skills=("Python", "SQL"),
+        inferred_roles=("Data Engineer",),
+        sections={
+            "summary": "Data engineer focused on analytics platforms.",
+            "skills": "Python, SQL",
+            "core_competencies": (
+                "Strategic Planning & Leadership • Data Engineering Solutions • "
+                "Agile Software Development Lifecycle • Quality Assurance & Control • Project Management"
+            ),
+            "experience": "Built Python and SQL pipelines for analytics workflows.",
+            "education": "B.Tech",
+        },
+    )
+
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(80, (), (), ()),
+        CandidateProfile(name="Jane Doe", target_roles=("Data Engineer",), skills=("Python", "SQL")),
+        tmp_path,
+    )
+    text = "\n".join(paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs)
+
+    assert "CORE COMPETENCIES" not in text
+
+
+def test_builder_creates_evidence_preserving_resume_for_each_job(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text=(
+            "PROFESSIONAL EXPERIENCE\n"
+            "Data Engineer | Example Ltd. | 2021 - Present\n"
+            "Built Java services for internal operations.\n"
+            "Developed Spark pipelines using Python and AWS for analytics.\n"
+            "TECHNICAL SKILLS\nProgramming: Java, Python\nData: Spark\nCloud: AWS"
+        ),
+        inferred_skills=("Java", "Python", "Spark", "AWS"),
+        inferred_roles=("Data Engineer",),
+        sections={
+            "experience": (
+                "Data Engineer | Example Ltd. | 2021 - Present\n"
+                "Built Java services for internal operations.\n"
+                "Developed Spark pipelines using Python and AWS for analytics."
+            ),
+            "skills": "Programming: Java, Python\nData: Spark\nCloud: AWS",
+        },
+    )
+    job = JobLead(
+        "api",
+        "Data Platform Engineer",
+        "Target Corp",
+        "Remote",
+        "https://example.com/job",
+        "Build Spark and AWS data pipelines with Python and Kubernetes.",
+    )
+
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(82, (), (), ()),
+        CandidateProfile(name="Jane Doe", target_roles=("Data Engineer",)),
+        tmp_path,
+        [job],
+    )
+
+    tailored = artifact["tailored_resumes"][0]
+    text = "\n".join(paragraph.text for paragraph in Document(tailored["docx_path"]).paragraphs)
+    assert "Data Platform Engineer" in text
+    assert text.index("Developed Spark pipelines") < text.index("Built Java services")
+    assert "Programming: Python, Java" in text
+    assert "Data: Spark" in text
+    assert "Programming: Data:" not in text
+    assert "Kubernetes" not in text
+    assert "kubernetes" in tailored["tailoring"]["unsupported_jd_terms_not_inserted"]
+    assert tailored["validation"]["passed"] is True
+    assert Path(tailored["pdf_path"]).exists()
+
+
+def test_factual_and_section_validators_block_unsupported_output() -> None:
+    resume = Resume("resume.txt", "Built Python pipelines for reporting.", ("Python",), ("Data Engineer",))
+    profile = CandidateProfile(target_roles=("Data Engineer",), skills=("Python",))
+    facts = validate_factual_consistency(
+        resume,
+        profile,
+        [("PROFESSIONAL EXPERIENCE", ["BULLET::Improved pipeline speed by 75% using Python."])],
+    )
+    semantics = validate_section_semantics(
+        [("EDUCATION", ["Software Engineer | Example Ltd. | 2020 - Present"])],
+    )
+
+    assert facts["passed"] is False
+    assert "75%" in facts["unsupported_numbers"]
+    assert semantics["passed"] is False
+
+
+def test_university_collaboration_is_not_misclassified_as_education() -> None:
+    collaboration = validate_section_semantics(
+        [
+            (
+                "PROFESSIONAL EXPERIENCE",
+                ["Completed an industry-focused project in collaboration with Federation University, Australia."],
+            )
+        ],
+    )
+    genuine_education = validate_section_semantics(
+        [("PROFESSIONAL EXPERIENCE", ["Completed a B.Tech degree from Example University in 2025."])],
+    )
+
+    assert collaboration["passed"] is True
+    assert genuine_education["passed"] is False
+
+
+def test_builder_separates_column_order_noise_from_certifications(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.pdf",
+        text=(
+            "CERTIFICATIONS\n8 weeks online certified training on Machine Learning (Sept 2024 - Oct 2024)\n"
+            "175+ Leetcode problems Solved.\nGATE 2026 (DA) Qualified: AIR 6574 | Score: 397\n"
+            "English Hindi Bengali"
+        ),
+        inferred_skills=("Machine Learning",),
+        inferred_roles=("AI Developer",),
+        sections={
+            "certifications": (
+                "8 weeks online certified training on Machine Learning (Sept 2024 - Oct 2024)\n"
+                "175+ Leetcode problems Solved.\nGATE 2026 (DA) Qualified: AIR 6574 | Score: 397\n"
+                "English Hindi Bengali"
+            ),
+            "achievements": "175+ Leetcode problems Solved.",
+        },
+    )
+
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(80, (), (), ()),
+        CandidateProfile(name="Agnirudra Banerjee", target_roles=("AI Developer",)),
+        tmp_path,
+    )
+    paragraphs = [paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs if paragraph.text.strip()]
+    certification_start = paragraphs.index("CERTIFICATIONS")
+    achievement_start = paragraphs.index("ACHIEVEMENTS")
+    language_start = paragraphs.index("LANGUAGES")
+    certifications = paragraphs[certification_start + 1 : achievement_start]
+    achievements = paragraphs[achievement_start + 1 : language_start]
+    languages = paragraphs[language_start + 1 :]
+
+    assert any("certified training on Machine Learning" in item for item in certifications)
+    assert all("Leetcode" not in item and "GATE" not in item and "English" not in item for item in certifications)
+    assert any("Leetcode" in item for item in achievements)
+    assert any("GATE 2026" in item for item in achievements)
+    assert languages == ["English", "Hindi", "Bengali"]
+
+
+def test_page_budget_triggers_progressive_compression(tmp_path: Path, monkeypatch) -> None:
+    import job_hunting_agent.resume_builder as builder
+
+    measured_pages = iter((4, 3, 2))
+    monkeypatch.setattr(builder, "pdf_page_count", lambda _: next(measured_pages))
+    monkeypatch.setattr(builder, "has_sparse_trailing_page", lambda _: False)
+    resume = Resume(
+        "resume.txt",
+        "PROFESSIONAL EXPERIENCE\nData Engineer | Example Ltd. | 2021 - Present\nBuilt Python pipelines for reporting.",
+        ("Python",),
+        ("Data Engineer",),
+    )
+
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(80, (), (), ()),
+        CandidateProfile(name="Jane Doe", target_roles=("Data Engineer",), skills=("Python",)),
+        tmp_path,
+    )
+
+    assert artifact["validation"]["compression_level"] == 2

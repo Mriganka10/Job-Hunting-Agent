@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .apply import apply_to_jobs
 from .ats import score_resume
 from .config import AppConfig
 from .models import ApplicationResult, AtsReport, JobLead, Resume
+from .job_validation import deduplicate_job_leads, validate_job_leads
 from .portals import build_search_intent, get_adapters, rank_job_leads
 from .reports import write_ats_report, write_run_summary
 from .resume import parse_resume
@@ -26,32 +29,27 @@ class JobHuntingAgent:
         jobs: list[JobLead] = []
         for adapter in get_adapters(self.config.search.portals):
             jobs.extend(adapter.search(intent, self.config.search, self.config.profile))
-        return resume, report, rank_job_leads(_dedupe_jobs(jobs), intent, resume, self.config.search)
+        jobs = deduplicate_job_leads(jobs)
+        jobs = validate_job_leads(jobs, self.config.search)
+        return resume, report, rank_job_leads(jobs, intent, resume, self.config.search)
 
-    def run(self, resume_path: str) -> tuple[AtsReport, list[JobLead], list[ApplicationResult], dict[str, str]]:
+    def run(self, resume_path: str) -> tuple[AtsReport, list[JobLead], list[ApplicationResult], dict[str, object]]:
         resume, report, jobs = self.search(resume_path)
-        improved_resume = write_improved_resume(resume, report, self.config.profile, self.config.application.data_dir)
+        tailored_jobs = jobs if self.config.application.tailor_each_job else []
+        improved_resume = write_improved_resume(
+            resume,
+            report,
+            self.config.profile,
+            self.config.application.data_dir,
+            tailored_jobs,
+            page_target=self.config.application.resume_page_target,
+        )
+        artifact_ids = {
+            str(artifact.get("job_id")): str(artifact.get("artifact_id"))
+            for artifact in improved_resume.get("tailored_resumes", [])
+            if isinstance(artifact, dict)
+        }
+        jobs = [replace(job, tailored_resume_id=artifact_ids.get(job.stable_id, "")) for job in jobs]
         results = apply_to_jobs(jobs, resume, report, self.config)
         write_run_summary(resume, report, jobs, results, self.config.application.data_dir)
         return report, jobs, results, improved_resume
-
-
-def _dedupe_jobs(jobs: list[JobLead]) -> list[JobLead]:
-    seen: set[str] = set()
-    deduped: list[JobLead] = []
-    for job in jobs:
-        identity = "|".join(
-            (
-                job.stable_id,
-                job.title.strip().lower(),
-                job.company.strip().lower(),
-                job.location.strip().lower(),
-            )
-        )
-        title_company_location = "|".join(identity.split("|")[1:])
-        if job.stable_id in seen or title_company_location in seen:
-            continue
-        seen.add(job.stable_id)
-        seen.add(title_company_location)
-        deduped.append(job)
-    return deduped
