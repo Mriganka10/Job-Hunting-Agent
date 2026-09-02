@@ -16,7 +16,16 @@ def write_ats_report(report: AtsReport, data_dir: str | Path) -> Path:
 
 
 def render_ats_report(report: AtsReport) -> str:
-    lines = [f"# ATS Resume Report", "", f"Score: {report.score}/100", ""]
+    lines = [
+        "# ATS Resume Report",
+        "",
+        f"Score: {report.score}/100",
+        f"Confidence: {report.confidence_label} ({report.score_confidence:.0%})",
+        f"Estimated score range: {report.score_range[0]}-{report.score_range[1]}",
+        f"Role profile: {report.role_profile} ({report.role_profile_confidence:.0%} selection confidence)",
+        f"Extraction confidence: {report.extraction_confidence:.0%}",
+        "",
+    ]
     if report.score_breakdown:
         lines.append("## Score Breakdown")
         lines.extend(f"- {name}: {points}/{maximum}" for name, points, maximum in report.score_breakdown)
@@ -24,7 +33,25 @@ def render_ats_report(report: AtsReport) -> str:
     if report.detected_sections:
         lines.extend(["## Detected Sections", *[f"- {section.replace('_', ' ').title()}" for section in report.detected_sections], ""])
     if report.semantic_similarity:
-        lines.extend(["## Semantic Job Match", f"- Embedding similarity: {report.semantic_similarity:.1%}", ""])
+        lines.extend(
+            [
+                "## Semantic Job Match",
+                f"- Similarity: {report.semantic_similarity:.1%}",
+                f"- Provider: {report.semantic_provider}",
+                "",
+            ]
+        )
+    if report.layout_analysis:
+        lines.extend(
+            [
+                "## Layout and Readability",
+                f"- Layout score: {report.layout_analysis.get('score', 0)}/100",
+                f"- Source rendered: {'yes' if report.layout_analysis.get('rendered') else 'no'}",
+                f"- Page count: {report.layout_analysis.get('page_count', 0) or 'unknown'}",
+            ]
+        )
+        lines.extend(f"- {issue}" for issue in report.layout_analysis.get("issues", []))
+        lines.append("")
     if report.category_details:
         lines.append("## Scoring Evidence")
         for category, detail in report.category_details.items():

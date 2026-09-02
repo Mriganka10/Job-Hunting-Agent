@@ -635,6 +635,21 @@ def latest_runs(user_email: str, limit: int = 10) -> list[dict[str, Any]]:
     return [_decode_row(row) for row in rows]
 
 
+def run_for_user(user_email: str, run_id: int) -> dict[str, Any] | None:
+    normalized = normalize_email(user_email)
+    with connection() as conn:
+        row = _fetchone(
+            conn,
+            """
+            SELECT id, user_email, trigger, ats_score, job_count, application_summary, output_dir, generated_at, payload, created_at
+            FROM run_records
+            WHERE user_email = ? AND id = ?
+            """,
+            (normalized, int(run_id)),
+        )
+    return _decode_row(row) if row else None
+
+
 def save_schedule(
     user_email: str,
     *,

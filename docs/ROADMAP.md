@@ -7,7 +7,7 @@ Status: implemented.
 - CLI commands for score, search, and run.
 - Resume parsing for PDF, DOCX, TXT, and MD.
 - ATS score and improvement suggestions.
-- LinkedIn and Naukri portal adapters.
+- Remotive and Arbeitnow structured API adapters plus LinkedIn and Naukri public adapters.
 - Draft generation.
 - Optional SMTP email sending.
 - Local ledger and reports.
@@ -22,12 +22,18 @@ Status: implemented.
 
 ## Phase 2: Better Matching
 
+Status: partially implemented.
+
 - Match every job against the resume.
 - Score job fit by role, skills, experience, location, and freshness.
 - Add job-description-specific missing keywords.
-- Generate tailored resume suggestions per job.
+- Generate source-grounded tailored DOCX/PDF resumes per job. Implemented.
 - Rank jobs before drafting applications.
-- Add company and duplicate detection.
+- Company alias normalization and conservative fuzzy duplicate detection are implemented.
+- Independent posting-age, expiry-date, and destination-link checks are implemented.
+- Structured salary, workplace mode, employment type, posting date, and source provenance are implemented.
+- Owner-scoped signed-cursor pagination for `Show More` is implemented.
+- Two-page targeting, progressive compression, visual PDF rendering, and factual/semantic output validation are implemented.
 
 ## Phase 3: Human Approval Workflow
 

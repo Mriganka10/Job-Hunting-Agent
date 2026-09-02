@@ -100,9 +100,10 @@ skills = ["Python", "SQL"]
 ```toml
 [search]
 max_jobs_per_portal = 10
-freshness_days = 1
+freshness_days = 7
 include_remote = true
-portals = ["linkedin", "naukri"]
+validate_job_links = true
+portals = ["remotive", "arbeitnow", "linkedin", "naukri"]
 ```
 
 ### Application
@@ -112,6 +113,8 @@ portals = ["linkedin", "naukri"]
 mode = "draft"
 cover_letter_tone = "concise"
 data_dir = "data"
+resume_page_target = 2
+tailor_each_job = true
 ```
 
 Allowed modes:

@@ -5,12 +5,17 @@ Resume-first job-search assistant that evaluates ATS readiness, generates an imp
 ## What It Does
 
 - Parses a PDF, DOCX, TXT, or Markdown resume.
-- Scores the resume with a transparent 100-point hybrid engine: Structure (20), Skills & Keywords (30), Experience & Projects (35), and Writing Quality (15).
+- Scores the resume with a transparent 100-point role-calibrated engine. Category weights adapt across software, data, AI, cloud, management, finance, academic, HR, sales, and general professional profiles.
+- Reports score confidence, an uncertainty range, extraction confidence, role-selection evidence, semantic-provider provenance, and PDF/DOCX layout diagnostics.
 - Extracts Contact, Summary/Career Objective, Education, Experience, Projects, Skills, Certifications, and Achievements into canonical ATS sections.
 - Accepts an optional job description, performs exact plus embedding-based semantic matching, and reports supported matched and missing skills.
 - Uses deterministic evidence for measurable signals and an optional LLM for bullet strength, impact, relevance, and writing quality; it falls back to a deterministic writing rubric when no LLM key is configured.
-- Generates a downloadable single-column DOCX inspired by the supplied Canva hierarchy while avoiding ATS-hostile text boxes, columns, icons, and fabricated qualifications.
-- Searches configured portals such as LinkedIn and Naukri.
+- Generates downloadable single-column DOCX and PDF companions while avoiding ATS-hostile text boxes, columns, icons, and fabricated qualifications.
+- Produces a separately tailored DOCX/PDF pair for every job lead by prioritizing only source-supported skills, projects, and experience evidence from that job description.
+- Enforces a configurable one-to-three-page budget with progressive content compression, pixel rendering, PDF text recovery, section-semantic checks, and output-to-source factual validation.
+- Searches validated Remotive and Arbeitnow feeds plus best-effort LinkedIn and Naukri public adapters.
+- Normalizes posting dates, salary, workplace mode, employment type, company aliases, expiry, and link status before ranking leads.
+- Loads additional leads through an owner-scoped, signed server cursor; `Show More` no longer downloads the full result set on the first request.
 - Keeps a local ledger so the same job is not applied twice.
 - Creates email-ready applications and can send them through SMTP.
 - Provides an OTP-protected web UI for resume upload, profile settings, immediate runs, downloads, and daily scheduling.
@@ -86,6 +91,7 @@ Edit `config.toml` after copying `config.example.toml`.
 - `profile.experience_years`: professional experience used to request suitable portal seniority; use `0` for a fresher.
 - `profile.job_description`: optional target job description used for keyword, embedding-relevance, and missing-skill scoring.
 - `JOB_AGENT_LLM_API_KEY`: optional API key for the 15-point LLM writing-quality evaluation. Configure `JOB_AGENT_LLM_MODEL` and `JOB_AGENT_LLM_ENDPOINT` when needed; never commit the key.
+- `JOB_AGENT_ENABLE_LOCAL_EMBEDDINGS`: enables a trained Sentence Transformers model after installing `.[semantic]`. An OpenAI-compatible embedding service can instead be configured with `JOB_AGENT_EMBEDDING_API_KEY`, `JOB_AGENT_EMBEDDING_ENDPOINT`, and `JOB_AGENT_EMBEDDING_MODEL`. Without either provider, matching uses a disclosed TF-IDF fallback and lowers score confidence.
 - `profile.linkedin_profile_url` and `profile.naukri_profile_url`: profile links included in application drafts/emails and available to future authenticated portal adapters.
 - `application.mode`: `draft` or `email`.
 - `email`: SMTP settings used only when `application.mode = "email"`.
@@ -104,7 +110,9 @@ Outputs are written under `data/` by default:
 - `data/reports/latest_run.json`
 - `data/applications.jsonl`
 - `data/drafts/*.md`
-- `data/improved_resume/*.docx`
+- `data/improved_resume/*.docx` and `*.pdf`
+- `data/improved_resume/tailored/*.{docx,pdf}`
+- `data/improved_resume/**/_validation/*.json` plus rendered QA pages
 
 Email confirmation is recorded in `data/applications.jsonl`. Look for `emailed`, `email_failed`, `drafted`, or `skipped`. The web UI shows one reusable recruiter draft template with a `[Company Name]` placeholder and a copy action, so a user does not need to open files from `data/drafts/` manually.
 
@@ -117,6 +125,14 @@ python -m job_hunting_agent run --resume resume.pdf --config config.toml --once
 python -m job_hunting_agent serve --host 127.0.0.1 --port 8000
 ```
 
+Run the bundled 60-case, ten-role calibration benchmark:
+
+```bash
+python scripts/calibrate_ats.py --output data/reports/ats_calibration.json
+```
+
+See [ATS Calibration](docs/ATS_CALIBRATION.md) for testing against a private, consented 50-100 resume corpus.
+
 ## Documentation
 
 - [Project Brief](docs/PROJECT_BRIEF.md)
@@ -124,6 +140,8 @@ python -m job_hunting_agent serve --host 127.0.0.1 --port 8000
 - [Setup Guide](docs/SETUP.md)
 - [CLI Reference](docs/CLI_REFERENCE.md)
 - [Agent Workflows](docs/AGENTS.md)
+- [Job Sources and Pagination](docs/JOB_SOURCES_AND_PAGINATION.md)
+- [Resume Tailoring and Render Validation](docs/RESUME_TAILORING_AND_VALIDATION.md)
 - [Security and Compliance](docs/SECURITY_AND_COMPLIANCE.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Owner Handoff Guide](docs/OWNER_HANDOFF_GUIDE.md)
@@ -132,4 +150,4 @@ python -m job_hunting_agent serve --host 127.0.0.1 --port 8000
 
 ## Current Prototype Boundaries
 
-This repository contains a working core agent and authenticated web prototype. ATS scoring uses deterministic evidence plus optional LLM writing evaluation, and an optional job description drives semantic matching. The next production steps are an explicit application approval queue, durable worker-based scheduling for multi-instance deployments, and authenticated browser adapters per portal account. Naukri and LinkedIn application flows vary by account, job type, and region and can require login, CAPTCHA, OTP, or screening answers; the current implementation does not bypass those controls or submit through them automatically.
+This repository contains a working core agent and authenticated web prototype. ATS scoring uses deterministic evidence plus optional LLM writing evaluation, and an optional job description drives semantic matching. Resume output includes a validated base DOCX/PDF pair and evidence-preserving variants for each lead. Job discovery combines structured public APIs with defensive public HTML adapters, independent freshness and expiry filtering, link checks, fuzzy duplicate removal, and server-side result paging. The next production steps are an explicit application approval queue, durable worker-based scheduling for multi-instance deployments, and authenticated browser adapters per portal account. Naukri and LinkedIn application flows vary by account, job type, and region and can require login, CAPTCHA, OTP, or screening answers; the current implementation does not bypass those controls or submit through them automatically.

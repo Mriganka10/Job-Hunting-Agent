@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import math
 import os
 import re
 import unicodedata
 
 import requests
 
+from .ats_layout import analyze_resume_layout
+from .ats_profiles import AtsRoleProfile, select_role_profile
+from .ats_semantic import SemanticMatch, semantic_similarity
 from .models import AtsReport, CandidateProfile, Resume
 from .resume import KNOWN_SKILLS, canonicalize_skill, detect_sections, extract_sections
 
@@ -56,34 +57,153 @@ MEASURABLE_RE = re.compile(
 def score_resume(resume: Resume, profile: CandidateProfile) -> AtsReport:
     sections = resume.sections or extract_sections(resume.text)
     jd = profile.job_description.strip()
+    role_profile, role_confidence, role_signals = select_role_profile(
+        profile.target_roles,
+        resume.inferred_roles,
+        jd,
+    )
+    layout = analyze_resume_layout(resume.path, resume.text)
     desired = _target_keywords(jd, profile.skills, resume.inferred_skills)
-    structure, structure_detail = _score_structure(resume.text, sections, profile)
-    keywords, matched, missing, similarity, keyword_detail = _score_keywords(resume.text, desired, jd)
-    evidence, evidence_detail = _score_experience_projects(sections, resume.text, profile.experience_years, jd)
-    writing, writing_detail = _score_writing_quality(sections, resume.text, jd, profile.target_roles)
+    weights = role_profile.category_weights
+    structure, structure_detail = _score_structure(resume.text, sections, profile, layout, weights[0])
+    keywords, matched, missing, similarity, keyword_detail = _score_keywords(
+        resume.text,
+        desired,
+        jd,
+        weights[1],
+        role_profile.priority_keywords,
+    )
+    evidence, evidence_detail = _score_experience_projects(
+        sections,
+        resume.text,
+        profile.experience_years,
+        jd,
+        role_profile,
+        weights[2],
+    )
+    writing, writing_detail = _score_writing_quality(
+        sections,
+        resume.text,
+        jd,
+        profile.target_roles,
+        weights[3],
+    )
     score = structure + keywords + evidence + writing
     strengths, improvements = [], []
     if structure_detail.get("recommendations"):
         improvements.extend(structure_detail["recommendations"])
-    if structure >= 16 and not structure_detail.get("critical_issues"):
+    if structure / weights[0] >= 0.8 and not structure_detail.get("critical_issues"):
         strengths.extend(("The resume has a clear, ATS-readable section structure.", "Resume contains the core ATS sections recruiters expect."))
-    if keywords >= 23: strengths.append("Skills and keywords align well with the target profile or job description.")
+    if keywords / weights[1] >= 0.77: strengths.append("Skills and keywords align well with the target profile or job description.")
     elif missing: improvements.append("Add missing skills only where truthful: " + ", ".join(missing[:8]) + ".")
-    if evidence >= 27: strengths.append("Experience and project evidence is relevant and supported by measurable outcomes.")
+    if evidence / weights[2] >= 0.77: strengths.append("Experience and project evidence is relevant and supported by measurable outcomes.")
     else: improvements.extend(evidence_detail["recommendations"])
-    if writing >= 12: strengths.append("Bullets are concise, action-oriented, and readable.")
+    if writing / weights[3] >= 0.8: strengths.append("Bullets are concise, action-oriented, and readable.")
     else: improvements.extend(writing_detail.get("recommendations", []))
-    breakdown = (("Structure", structure, 20), ("Skills & Keywords", keywords, 30), ("Experience & Projects", evidence, 35), ("Writing Quality", writing, 15))
+    layout_issues = [str(item) for item in layout.get("issues", [])]
+    improvements.extend(layout_issues)
+    extraction_confidence = _extraction_confidence(resume.text, sections, layout)
+    semantic_confidence = float(keyword_detail.get("semantic_confidence", 0.7 if not jd else 0.5))
+    evidence_confidence = min(1.0, 0.45 + min(0.35, float(evidence_detail.get("bullet_count", 0)) * 0.04) + (0.15 if evidence_detail.get("date_ranges_present") else 0))
+    score_confidence = _score_confidence(
+        extraction_confidence,
+        role_confidence,
+        semantic_confidence,
+        evidence_confidence,
+        bool(jd),
+    )
+    uncertainty = max(3, round((1.0 - score_confidence) * 20))
+    score_range = (max(0, score - uncertainty), min(100, score + uncertainty))
+    breakdown = tuple(
+        (name, points, maximum)
+        for name, points, maximum in zip(
+            ("Structure", "Skills & Keywords", "Experience & Projects", "Writing Quality"),
+            (structure, keywords, evidence, writing),
+            weights,
+        )
+    )
     return AtsReport(
         score=min(100, max(0, score)), strengths=tuple(dict.fromkeys(strengths)),
         improvements=tuple(dict.fromkeys(improvements)), missing_keywords=tuple(missing[:15]),
         detected_sections=detect_sections(resume.text), matched_keywords=tuple(matched), score_breakdown=breakdown,
-        category_details={"structure": structure_detail, "skills_keywords": keyword_detail, "experience_projects": evidence_detail, "writing_quality": writing_detail},
+        category_details={
+            "role_profile": {
+                "key": role_profile.key,
+                "label": role_profile.label,
+                "confidence": role_confidence,
+                "signals": list(role_signals),
+                "category_weights": list(weights),
+                "priority_keywords": list(role_profile.priority_keywords),
+                "evidence_terms": list(role_profile.evidence_terms),
+            },
+            "structure": structure_detail,
+            "skills_keywords": keyword_detail,
+            "experience_projects": evidence_detail,
+            "writing_quality": writing_detail,
+            "confidence": {
+                "score": score_confidence,
+                "range": list(score_range),
+                "extraction": extraction_confidence,
+                "role_selection": role_confidence,
+                "semantic": semantic_confidence,
+                "evidence": round(evidence_confidence, 3),
+            },
+        },
         semantic_similarity=round(similarity, 3), llm_evaluation=writing_detail,
+        role_profile=role_profile.label,
+        role_profile_confidence=role_confidence,
+        score_confidence=score_confidence,
+        confidence_label=_confidence_label(score_confidence),
+        score_range=score_range,
+        extraction_confidence=extraction_confidence,
+        semantic_provider=str(keyword_detail.get("semantic_provider", "not_applicable")),
+        layout_analysis=layout,
     )
 
 
-def _score_structure(text: str, sections: dict[str, str], profile: CandidateProfile | None = None) -> tuple[int, dict[str, object]]:
+def _extraction_confidence(text: str, sections: dict[str, str], layout: dict[str, object]) -> float:
+    core_present = sum(bool(sections.get(name)) for name in CORE_ATS_SECTIONS) / len(CORE_ATS_SECTIONS)
+    text_quality = min(1.0, len(text) / 1200)
+    line_quality = min(1.0, len([line for line in text.splitlines() if line.strip()]) / 25)
+    corruption_penalty = min(0.25, text.count("�") * 0.04 + len(re.findall(r"\b(?:[A-Z]\s+){3,}[A-Z]+\b", text)) * 0.03)
+    layout_confidence = float(layout.get("confidence", 0.45))
+    confidence = 0.38 * core_present + 0.22 * text_quality + 0.15 * line_quality + 0.25 * layout_confidence - corruption_penalty
+    return round(max(0.15, min(0.98, confidence)), 3)
+
+
+def _score_confidence(
+    extraction: float,
+    role: float,
+    semantic: float,
+    evidence: float,
+    has_job_description: bool,
+) -> float:
+    semantic_weight = 0.20 if has_job_description else 0.10
+    baseline = (
+        0.34 * extraction
+        + 0.20 * role
+        + semantic_weight * semantic
+        + 0.18 * evidence
+        + (0.08 if has_job_description else 0.18) * 0.72
+    )
+    return round(max(0.20, min(0.97, baseline)), 3)
+
+
+def _confidence_label(confidence: float) -> str:
+    if confidence >= 0.82:
+        return "High"
+    if confidence >= 0.64:
+        return "Moderate"
+    return "Low"
+
+
+def _score_structure(
+    text: str,
+    sections: dict[str, str],
+    profile: CandidateProfile | None = None,
+    layout: dict[str, object] | None = None,
+    maximum: int = 20,
+) -> tuple[int, dict[str, object]]:
     present = [name for name in SECTION_POINTS if sections.get(name)]
     missing = [name for name in CORE_ATS_SECTIONS if not sections.get(name)]
     raw = sum(points for name, points in SECTION_POINTS.items() if sections.get(name))
@@ -106,8 +226,11 @@ def _score_structure(text: str, sections: dict[str, str], profile: CandidateProf
     )
     education_issues = _education_quality_issues(sections.get("education", ""))
     contamination = _section_contamination(sections)
-    penalty = min(4.0, len(education_issues) * 1.0 + len(contamination) * 1.0 + len(missing) * 0.75)
-    score = min(20, max(0, round(raw + contact_points + order_points + parseability_points - penalty)))
+    layout = layout or {}
+    layout_penalty = min(4.0, max(0.0, (80 - float(layout.get("score", 80))) / 15))
+    penalty = min(6.0, len(education_issues) * 1.0 + len(contamination) * 1.0 + len(missing) * 0.75 + layout_penalty)
+    base_score = min(20, max(0, round(raw + contact_points + order_points + parseability_points - penalty)))
+    score = min(maximum, max(0, round(base_score * maximum / 20)))
     recommendations: list[str] = []
     if missing:
         recommendations.append("Add standard ATS sections for: " + ", ".join(name.title() for name in missing) + ".")
@@ -128,6 +251,9 @@ def _score_structure(text: str, sections: dict[str, str], profile: CandidateProf
         "contact_points": round(contact_points, 2),
         "section_order_points": order_points,
         "parseability_points": parseability_points,
+        "layout_score": layout.get("score"),
+        "layout_rendered": layout.get("rendered", False),
+        "layout_penalty": round(layout_penalty, 2),
         "education_issues": education_issues,
         "section_contamination": contamination,
         "recommendations": recommendations,
@@ -135,24 +261,52 @@ def _score_structure(text: str, sections: dict[str, str], profile: CandidateProf
     }
 
 
-def _score_keywords(text: str, desired: list[str], jd: str) -> tuple[int, list[str], list[str], float, dict[str, object]]:
+def _score_keywords(
+    text: str,
+    desired: list[str],
+    jd: str,
+    maximum: int = 30,
+    role_keywords: tuple[str, ...] = (),
+) -> tuple[int, list[str], list[str], float, dict[str, object]]:
     matched = sorted([term for term in desired if _contains_keyword(text, term)], key=str.casefold)
     missing = sorted([term for term in desired if not _contains_keyword(text, term)], key=str.casefold)
     exact_ratio = len(matched) / len(desired) if desired else 0.5
-    similarity = _embedding_similarity(text, jd) if jd else exact_ratio
+    semantic_match = semantic_similarity(text, jd) if jd else SemanticMatch(exact_ratio, "profile_keyword_overlap", 0.76)
+    similarity = semantic_match.similarity
     density = _keyword_density(text, matched)
-    score = min(30, round(18 * exact_ratio + 8 * similarity + 4 * density))
+    role_keyword_hits = [term for term in role_keywords if _contains_keyword(text, term)]
+    role_keyword_ratio = len(role_keyword_hits) / len(role_keywords) if role_keywords else 0.5
+    base_score = min(30, round(16 * exact_ratio + 7 * similarity + 4 * density + 3 * role_keyword_ratio))
+    score = min(maximum, round(base_score * maximum / 30))
     return score, matched, missing, similarity, {
         "exact_match_ratio": round(exact_ratio, 3),
         "embedding_similarity": round(similarity, 3),
+        "semantic_provider": semantic_match.provider,
+        "semantic_model": semantic_match.model,
+        "semantic_confidence": semantic_match.confidence,
+        "semantic_note": semantic_match.note,
         "keyword_density": round(density, 3),
         "matched": matched,
         "missing": missing[:15],
+        "role_baseline_keywords": list(role_keywords),
+        "role_baseline_hits": role_keyword_hits,
+        "role_baseline_ratio": round(role_keyword_ratio, 3),
     }
 
 
-def _score_experience_projects(sections: dict[str, str], text: str, years: float, jd: str) -> tuple[int, dict[str, object]]:
-    evidence = "\n".join((sections.get("experience", ""), sections.get("projects", ""))).strip()
+def _score_experience_projects(
+    sections: dict[str, str],
+    text: str,
+    years: float,
+    jd: str,
+    role_profile: AtsRoleProfile | None = None,
+    maximum: int = 35,
+) -> tuple[int, dict[str, object]]:
+    supporting_sections = role_profile.supporting_sections if role_profile else ("projects",)
+    evidence = "\n".join(
+        [sections.get("experience", ""), sections.get("projects", "")]
+        + [sections.get(name, "") for name in supporting_sections if name != "projects"]
+    ).strip()
     bullets = _bullet_lines(evidence)
     metrics = len(MEASURABLE_RE.findall(evidence))
     actions = sum(1 for line in bullets if _action_word(line) in ACTION_VERBS)
@@ -160,23 +314,32 @@ def _score_experience_projects(sections: dict[str, str], text: str, years: float
     dates = bool(DATE_RANGE_RE.search(evidence))
     weak_bullets = _weak_bullets(bullets)
     duplicate_bullets = len(bullets) - len({" ".join(_match_tokens(line)) for line in bullets})
-    score = min(
+    supporting_present = [name for name in supporting_sections if sections.get(name)]
+    evidence_terms = role_profile.evidence_terms if role_profile else ()
+    evidence_term_hits = [term for term in evidence_terms if _contains_keyword(evidence, term)]
+    supporting_points = min(4, len(supporting_present) * 2)
+    role_evidence_points = min(2, len(evidence_term_hits) * 0.5)
+    base_score = min(
         35,
         round(
             (5 if sections.get("experience") else 0)
-            + (4 if sections.get("projects") else 0)
+            + supporting_points
             + min(6, len(bullets) * 1.1)
             + min(8, metrics * 2.0)
             + min(5, actions * 1.1)
             + (2 if dates else 0)
             + 5 * relevance
+            + role_evidence_points
             - min(4, len(weak_bullets) * 0.6 + duplicate_bullets)
         ),
     )
+    score = min(maximum, max(0, round(base_score * maximum / 35)))
     recommendations = []
     if not evidence: recommendations.append("Add truthful experience, internship, or project evidence relevant to the target role.")
-    if bullets and metrics < max(1, len(bullets) // 5): recommendations.append("Quantify more bullets with truthful scale, quality, time, cost, usage, or outcome measures.")
-    if bullets and actions < max(1, len(bullets) // 3): recommendations.append("Start more experience and project bullets with strong action verbs.")
+    expected_metric_ratio = role_profile.metric_ratio if role_profile else 0.20
+    expected_action_ratio = role_profile.action_ratio if role_profile else 0.45
+    if bullets and metrics / len(bullets) < expected_metric_ratio: recommendations.append("Quantify more bullets with truthful scale, quality, time, cost, usage, or outcome measures.")
+    if bullets and actions / len(bullets) < expected_action_ratio: recommendations.append("Start more experience and project bullets with strong action verbs.")
     if weak_bullets: recommendations.append("Rewrite vague bullets with action, scope, tool, and outcome; examples needing work: " + "; ".join(item.rstrip(".") for item in weak_bullets[:3]) + ".")
     if duplicate_bullets: recommendations.append("Remove repeated experience bullets so each point adds unique evidence.")
     if not dates and sections.get("experience"): recommendations.append("Add clear month/year or year ranges for each role.")
@@ -189,15 +352,26 @@ def _score_experience_projects(sections: dict[str, str], text: str, years: float
         "weak_bullets": weak_bullets[:6],
         "duplicate_bullets": duplicate_bullets,
         "relevance": round(relevance, 3),
+        "supporting_sections": supporting_present,
+        "role_evidence_terms": list(evidence_terms),
+        "role_evidence_hits": evidence_term_hits,
+        "expected_metric_ratio": expected_metric_ratio,
+        "expected_action_ratio": expected_action_ratio,
         "recommendations": recommendations,
     }
 
 
-def _score_writing_quality(sections: dict[str, str], text: str, jd: str, target_roles: tuple[str, ...] = ()) -> tuple[int, dict[str, object]]:
+def _score_writing_quality(
+    sections: dict[str, str],
+    text: str,
+    jd: str,
+    target_roles: tuple[str, ...] = (),
+    maximum: int = 15,
+) -> tuple[int, dict[str, object]]:
     llm = _llm_quality_evaluation(sections, jd)
     if llm:
         llm["provider"] = "llm"
-        return min(15, max(0, round(float(llm.get("score", 0)) * 0.15))), llm
+        return min(maximum, max(0, round(float(llm.get("score", 0)) * maximum / 100))), llm
     bullets = _bullet_lines("\n".join((sections.get("experience", ""), sections.get("projects", "")))) or [line for line in text.splitlines() if len(line.split()) >= 6]
     denominator = max(1, len(bullets))
     concise = sum(1 for line in bullets if 8 <= len(line.split()) <= 32)
@@ -222,7 +396,7 @@ def _score_writing_quality(sections: dict[str, str], text: str, jd: str, target_
     recommendations.extend(summary_quality["recommendations"])
     if style_issues: recommendations.append("Normalize keyword formatting: " + ", ".join(style_issues[:6]) + ".")
     if noisy_sections: recommendations.append("Trim vague optional sections and keep only evidence-backed terms: " + ", ".join(noisy_sections) + ".")
-    return min(15, max(0, round(quality * 0.15))), {
+    return min(maximum, max(0, round(quality * maximum / 100))), {
         "provider": "deterministic_fallback",
         "score": max(0, round(quality)),
         "summary": summary_quality,
@@ -469,19 +643,8 @@ def _extract_jd_keywords(text: str) -> list[str]:
 
 
 def _embedding_similarity(left: str, right: str, dimensions: int = 384) -> float:
-    if not left.strip() or not right.strip(): return 0.0
-    a, b = _hashed_embedding(left, dimensions), _hashed_embedding(right, dimensions)
-    return max(0.0, min(1.0, sum(x * y for x, y in zip(a, b))))
-
-
-def _hashed_embedding(text: str, dimensions: int) -> list[float]:
-    tokens = [token for token in _match_tokens(text) if token not in STOPWORDS]
-    vector = [0.0] * dimensions
-    for feature in tokens + [f"{a}_{b}" for a, b in zip(tokens, tokens[1:])]:
-        value = int.from_bytes(hashlib.blake2b(feature.encode(), digest_size=8).digest(), "big")
-        vector[value % dimensions] += 1.0 if value & 1 else -1.0
-    norm = math.sqrt(sum(value * value for value in vector)) or 1.0
-    return [value / norm for value in vector]
+    del dimensions
+    return semantic_similarity(left, right).similarity
 
 
 def _contains_keyword(text: str, keyword: str) -> bool:

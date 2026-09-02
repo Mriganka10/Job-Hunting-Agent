@@ -10,9 +10,10 @@ from .models import CandidateProfile
 @dataclass(frozen=True)
 class SearchConfig:
     max_jobs_per_portal: int = 10
-    freshness_days: int = 1
+    freshness_days: int = 7
     include_remote: bool = True
-    portals: tuple[str, ...] = ("linkedin", "naukri")
+    validate_job_links: bool = True
+    portals: tuple[str, ...] = ("remotive", "arbeitnow", "linkedin", "naukri")
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,8 @@ class ApplicationConfig:
     mode: str = "draft"
     cover_letter_tone: str = "concise"
     data_dir: str = "data"
+    resume_page_target: int = 2
+    tailor_each_job: bool = True
 
 
 @dataclass(frozen=True)
@@ -61,14 +64,17 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         search=SearchConfig(
             max_jobs_per_portal=int(search_data.get("max_jobs_per_portal", 10)),
-            freshness_days=int(search_data.get("freshness_days", 1)),
+            freshness_days=int(search_data.get("freshness_days", 7)),
             include_remote=bool(search_data.get("include_remote", True)),
-            portals=tuple(search_data.get("portals", ("linkedin", "naukri"))),
+            validate_job_links=bool(search_data.get("validate_job_links", True)),
+            portals=tuple(search_data.get("portals", ("remotive", "arbeitnow", "linkedin", "naukri"))),
         ),
         application=ApplicationConfig(
             mode=application_data.get("mode", "draft"),
             cover_letter_tone=application_data.get("cover_letter_tone", "concise"),
             data_dir=application_data.get("data_dir", "data"),
+            resume_page_target=max(1, min(int(application_data.get("resume_page_target", 2)), 3)),
+            tailor_each_job=bool(application_data.get("tailor_each_job", True)),
         ),
         email=EmailConfig(
             smtp_host=email_data.get("smtp_host", ""),

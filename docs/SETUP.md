@@ -195,7 +195,9 @@ Generated files:
 - `data/reports/latest_run.json`
 - `data/applications.jsonl`
 - `data/drafts/*.md`
-- `data/improved_resume/*.docx`
+- `data/improved_resume/*.docx` and `*.pdf`
+- `data/improved_resume/tailored/*.{docx,pdf}`
+- `data/improved_resume/**/_validation/*.json` and rendered page PNGs
 
 Web runs use an authenticated user-specific data directory. When `JOB_AGENT_S3_BUCKET` is configured, uploads and generated artifacts are also mirrored under private user-specific S3 prefixes.
 

@@ -1,9 +1,12 @@
+import json
 from pathlib import Path
 
 from docx import Document
+from pypdf import PdfReader
 
-from job_hunting_agent.models import AtsReport, CandidateProfile, Resume
+from job_hunting_agent.models import AtsReport, CandidateProfile, JobLead, Resume
 from job_hunting_agent.resume_builder import write_improved_resume
+from job_hunting_agent.resume_validation import validate_factual_consistency, validate_section_semantics
 
 
 def test_write_improved_resume_creates_final_ats_docx(tmp_path: Path) -> None:
@@ -37,7 +40,15 @@ def test_write_improved_resume_creates_final_ats_docx(tmp_path: Path) -> None:
     assert docx_path.suffix == ".docx"
     assert docx_path.parent.name == "improved_resume"
     assert docx_path.name == "Mriganka-Das-ATS-Friendly-Resume.docx"
-    assert "pdf_path" not in artifact
+    pdf_path = Path(artifact["pdf_path"])
+    validation_path = Path(artifact["validation_path"])
+    assert pdf_path.exists()
+    assert validation_path.exists()
+    assert len(PdfReader(str(pdf_path)).pages) <= 2
+    assert artifact["validation"]["passed"] is True
+    assert artifact["validation"]["visual_rendered"] is True
+    assert artifact["validation"]["factual_consistency"]["passed"] is True
+    assert json.loads(validation_path.read_text(encoding="utf-8"))["page_target_met"] is True
 
     text = "\n".join(paragraph.text for paragraph in Document(str(docx_path)).paragraphs)
     assert "Mriganka Das" in text
@@ -473,3 +484,152 @@ def test_builder_filters_generic_core_competency_clouds(tmp_path: Path) -> None:
     text = "\n".join(paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs)
 
     assert "CORE COMPETENCIES" not in text
+
+
+def test_builder_creates_evidence_preserving_resume_for_each_job(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text=(
+            "PROFESSIONAL EXPERIENCE\n"
+            "Data Engineer | Example Ltd. | 2021 - Present\n"
+            "Built Java services for internal operations.\n"
+            "Developed Spark pipelines using Python and AWS for analytics.\n"
+            "TECHNICAL SKILLS\nProgramming: Java, Python\nData: Spark\nCloud: AWS"
+        ),
+        inferred_skills=("Java", "Python", "Spark", "AWS"),
+        inferred_roles=("Data Engineer",),
+        sections={
+            "experience": (
+                "Data Engineer | Example Ltd. | 2021 - Present\n"
+                "Built Java services for internal operations.\n"
+                "Developed Spark pipelines using Python and AWS for analytics."
+            ),
+            "skills": "Programming: Java, Python\nData: Spark\nCloud: AWS",
+        },
+    )
+    job = JobLead(
+        "api",
+        "Data Platform Engineer",
+        "Target Corp",
+        "Remote",
+        "https://example.com/job",
+        "Build Spark and AWS data pipelines with Python and Kubernetes.",
+    )
+
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(82, (), (), ()),
+        CandidateProfile(name="Jane Doe", target_roles=("Data Engineer",)),
+        tmp_path,
+        [job],
+    )
+
+    tailored = artifact["tailored_resumes"][0]
+    text = "\n".join(paragraph.text for paragraph in Document(tailored["docx_path"]).paragraphs)
+    assert "Data Platform Engineer" in text
+    assert text.index("Developed Spark pipelines") < text.index("Built Java services")
+    assert "Programming: Python, Java" in text
+    assert "Data: Spark" in text
+    assert "Programming: Data:" not in text
+    assert "Kubernetes" not in text
+    assert "kubernetes" in tailored["tailoring"]["unsupported_jd_terms_not_inserted"]
+    assert tailored["validation"]["passed"] is True
+    assert Path(tailored["pdf_path"]).exists()
+
+
+def test_factual_and_section_validators_block_unsupported_output() -> None:
+    resume = Resume("resume.txt", "Built Python pipelines for reporting.", ("Python",), ("Data Engineer",))
+    profile = CandidateProfile(target_roles=("Data Engineer",), skills=("Python",))
+    facts = validate_factual_consistency(
+        resume,
+        profile,
+        [("PROFESSIONAL EXPERIENCE", ["BULLET::Improved pipeline speed by 75% using Python."])],
+    )
+    semantics = validate_section_semantics(
+        [("EDUCATION", ["Software Engineer | Example Ltd. | 2020 - Present"])],
+    )
+
+    assert facts["passed"] is False
+    assert "75%" in facts["unsupported_numbers"]
+    assert semantics["passed"] is False
+
+
+def test_university_collaboration_is_not_misclassified_as_education() -> None:
+    collaboration = validate_section_semantics(
+        [
+            (
+                "PROFESSIONAL EXPERIENCE",
+                ["Completed an industry-focused project in collaboration with Federation University, Australia."],
+            )
+        ],
+    )
+    genuine_education = validate_section_semantics(
+        [("PROFESSIONAL EXPERIENCE", ["Completed a B.Tech degree from Example University in 2025."])],
+    )
+
+    assert collaboration["passed"] is True
+    assert genuine_education["passed"] is False
+
+
+def test_builder_separates_column_order_noise_from_certifications(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.pdf",
+        text=(
+            "CERTIFICATIONS\n8 weeks online certified training on Machine Learning (Sept 2024 - Oct 2024)\n"
+            "175+ Leetcode problems Solved.\nGATE 2026 (DA) Qualified: AIR 6574 | Score: 397\n"
+            "English Hindi Bengali"
+        ),
+        inferred_skills=("Machine Learning",),
+        inferred_roles=("AI Developer",),
+        sections={
+            "certifications": (
+                "8 weeks online certified training on Machine Learning (Sept 2024 - Oct 2024)\n"
+                "175+ Leetcode problems Solved.\nGATE 2026 (DA) Qualified: AIR 6574 | Score: 397\n"
+                "English Hindi Bengali"
+            ),
+            "achievements": "175+ Leetcode problems Solved.",
+        },
+    )
+
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(80, (), (), ()),
+        CandidateProfile(name="Agnirudra Banerjee", target_roles=("AI Developer",)),
+        tmp_path,
+    )
+    paragraphs = [paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs if paragraph.text.strip()]
+    certification_start = paragraphs.index("CERTIFICATIONS")
+    achievement_start = paragraphs.index("ACHIEVEMENTS")
+    language_start = paragraphs.index("LANGUAGES")
+    certifications = paragraphs[certification_start + 1 : achievement_start]
+    achievements = paragraphs[achievement_start + 1 : language_start]
+    languages = paragraphs[language_start + 1 :]
+
+    assert any("certified training on Machine Learning" in item for item in certifications)
+    assert all("Leetcode" not in item and "GATE" not in item and "English" not in item for item in certifications)
+    assert any("Leetcode" in item for item in achievements)
+    assert any("GATE 2026" in item for item in achievements)
+    assert languages == ["English", "Hindi", "Bengali"]
+
+
+def test_page_budget_triggers_progressive_compression(tmp_path: Path, monkeypatch) -> None:
+    import job_hunting_agent.resume_builder as builder
+
+    measured_pages = iter((4, 3, 2))
+    monkeypatch.setattr(builder, "pdf_page_count", lambda _: next(measured_pages))
+    monkeypatch.setattr(builder, "has_sparse_trailing_page", lambda _: False)
+    resume = Resume(
+        "resume.txt",
+        "PROFESSIONAL EXPERIENCE\nData Engineer | Example Ltd. | 2021 - Present\nBuilt Python pipelines for reporting.",
+        ("Python",),
+        ("Data Engineer",),
+    )
+
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(80, (), (), ()),
+        CandidateProfile(name="Jane Doe", target_roles=("Data Engineer",), skills=("Python",)),
+        tmp_path,
+    )
+
+    assert artifact["validation"]["compression_level"] == 2

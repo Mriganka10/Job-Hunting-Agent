@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 
-from .models import AtsReport, CandidateProfile, Resume
+from .document_pipeline import (
+    convert_docx_to_pdf,
+    has_sparse_trailing_page,
+    pdf_page_count,
+    validate_document_artifact,
+    write_pdf_resume,
+)
+from .models import AtsReport, CandidateProfile, JobLead, Resume
 from .resume import canonicalize_skill, normalize_ats_text
+from .resume_validation import relevance_score, tailoring_analysis, validate_factual_consistency
 
 ACTION_VERB_REPLACEMENTS = {
     "building": "Built",
@@ -21,24 +31,131 @@ ACTION_VERB_REPLACEMENTS = {
 }
 
 
-def write_improved_resume(resume: Resume, report: AtsReport, profile: CandidateProfile, data_dir: str | Path) -> dict[str, str]:
+def write_improved_resume(
+    resume: Resume,
+    report: AtsReport,
+    profile: CandidateProfile,
+    data_dir: str | Path,
+    jobs: list[JobLead] | tuple[JobLead, ...] = (),
+    *,
+    page_target: int = 2,
+) -> dict[str, object]:
     output_dir = Path(data_dir) / "improved_resume"
     output_dir.mkdir(parents=True, exist_ok=True)
     detected_name = _candidate_name(resume.text)
     base_name = _safe_filename(profile.name or detected_name or "candidate")
-    docx_path = output_dir / f"{base_name}-ATS-Friendly-Resume.docx"
-
-    sections = _resume_sections(resume, report, profile)
     display_name = profile.name.strip() or detected_name or "Candidate"
-    _write_docx(docx_path, sections, display_name)
-    return {"docx_path": str(docx_path)}
+    primary = _write_resume_artifact(
+        output_dir / f"{base_name}-ATS-Friendly-Resume",
+        resume,
+        report,
+        profile,
+        display_name,
+        page_target=max(1, min(int(page_target), 3)),
+    )
+    tailored: list[dict[str, object]] = []
+    tailored_dir = output_dir / "tailored"
+    for job in jobs:
+        artifact_id = sha256(job.stable_id.encode("utf-8")).hexdigest()[:16]
+        target_profile = replace(profile, target_roles=(job.title,))
+        stem = f"{base_name[:24]}-{artifact_id}"
+        artifact = _write_resume_artifact(
+            tailored_dir / stem,
+            resume,
+            report,
+            target_profile,
+            display_name,
+            page_target=max(1, min(int(page_target), 3)),
+            job=job,
+        )
+        artifact.update(
+            {
+                "artifact_id": artifact_id,
+                "job_id": job.stable_id,
+                "job_title": job.title,
+                "company": job.company,
+                "tailoring": tailoring_analysis(resume, profile, job),
+            }
+        )
+        tailored.append(artifact)
+    return {**primary, "artifact_id": "base", "tailored_resumes": tailored}
 
 
-def _resume_sections(resume: Resume, report: AtsReport, profile: CandidateProfile) -> list[tuple[str, list[str]]]:
+def _write_resume_artifact(
+    stem: Path,
+    resume: Resume,
+    report: AtsReport,
+    profile: CandidateProfile,
+    display_name: str,
+    *,
+    page_target: int,
+    job: JobLead | None = None,
+) -> dict[str, object]:
+    stem.parent.mkdir(parents=True, exist_ok=True)
+    docx_path = stem.with_suffix(".docx")
+    pdf_path = stem.with_suffix(".pdf")
+    validation_key = sha256(str(stem).encode("utf-8")).hexdigest()[:12]
+    validation_path = stem.parent / "_validation" / f"{validation_key}.json"
+    base_sections = _resume_sections(resume, report, profile, job=job)
+    final_sections = base_sections
+    density = 0
+    pdf_strategy = "parallel_semantic_render"
+    for density in range(4):
+        final_sections = _compress_sections(base_sections, density)
+        facts = validate_factual_consistency(resume, profile, final_sections, job)
+        if not facts["passed"]:
+            raise RuntimeError("Resume generation stopped because output-to-source validation failed: " + "; ".join(facts["blocking_issues"][:3]))
+        _write_docx(docx_path, final_sections, display_name, density=density)
+        if convert_docx_to_pdf(docx_path, pdf_path):
+            pdf_strategy = "libreoffice_docx_render"
+        else:
+            pdf_strategy = "parallel_semantic_render"
+            write_pdf_resume(pdf_path, final_sections, display_name, density=density)
+        if 0 < pdf_page_count(pdf_path) <= page_target and not has_sparse_trailing_page(pdf_path):
+            break
+    expected_parts = [display_name]
+    for heading, items in final_sections:
+        if not items:
+            continue
+        expected_parts.append(heading)
+        expected_parts.extend(
+            item.removeprefix("ROLE::").removeprefix("META::").removeprefix("BULLET::")
+            for item in items
+        )
+    expected_text = "\n".join(expected_parts)
+    facts = validate_factual_consistency(resume, profile, final_sections, job)
+    validation = validate_document_artifact(
+        docx_path,
+        pdf_path,
+        validation_path,
+        expected_text,
+        page_target=page_target,
+        factual_consistency=facts,
+        pdf_strategy=pdf_strategy,
+        density=density,
+    )
+    return {
+        "docx_path": str(docx_path),
+        "pdf_path": str(pdf_path),
+        "validation_path": str(validation_path),
+        "validation": validation,
+    }
+
+
+def _resume_sections(
+    resume: Resume,
+    report: AtsReport,
+    profile: CandidateProfile,
+    *,
+    job: JobLead | None = None,
+) -> list[tuple[str, list[str]]]:
     target_roles = _ordered_terms((*profile.target_roles, *resume.inferred_roles))
     # Never inject a missing ATS keyword unless it is already supported by the
     # candidate profile or resume evidence.
     skills = _ordered_skills((*profile.skills, *resume.inferred_skills))
+    target_text = f"{job.title} {job.description} {profile.job_description}" if job else profile.job_description
+    if target_text:
+        skills = sorted(skills, key=lambda value: relevance_score(value, target_text), reverse=True)
     parsed_sections = resume.sections or {}
     experience_source = (
         f"EXPERIENCE\n{parsed_sections['experience']}"
@@ -53,11 +170,14 @@ def _resume_sections(resume: Resume, report: AtsReport, profile: CandidateProfil
     )
     project_lines = _sanitize_section_items(_project_section_items(parsed_sections.get("projects", "")), "PROJECTS")
     certifications = _sanitize_section_items(
-        _list_section_items(parsed_sections.get("certifications", "")) or _certification_lines(resume.text),
+        _certification_section_items(parsed_sections.get("certifications", "")) or _certification_lines(resume.text),
         "CERTIFICATIONS",
     )
     achievements = _sanitize_section_items(
-        _list_section_items(parsed_sections.get("achievements", "")) or _achievement_lines(resume.text, experience_bullets),
+        [
+            *_list_section_items(parsed_sections.get("achievements", "")),
+            *_achievement_lines(resume.text, experience_bullets),
+        ],
         "ACHIEVEMENTS",
     )
     languages = _language_lines(resume.text)
@@ -66,7 +186,11 @@ def _resume_sections(resume: Resume, report: AtsReport, profile: CandidateProfil
     summary_items = _summary_section_items(original_summary, resume, profile, target_roles, skills, achievements, experience_bullets)
     contact = _contact_line(profile, parsed_sections.get("contact", ""))
 
-    languages = _language_lines(parsed_sections.get("languages", "")) or languages
+    languages = (
+        _language_lines(parsed_sections.get("languages", ""))
+        or languages
+        or _language_names_from_sections(parsed_sections)
+    )
     publications = _sanitize_section_items(_section_items(parsed_sections.get("publications", ""), join_wrapped=True), "PUBLICATIONS")
     volunteering = _sanitize_section_items(_section_items(parsed_sections.get("volunteering", ""), join_wrapped=True), "VOLUNTEERING")
     interests = _sanitize_section_items(_section_items(parsed_sections.get("interests", ""), join_wrapped=True), "INTERESTS")
@@ -77,7 +201,7 @@ def _resume_sections(resume: Resume, report: AtsReport, profile: CandidateProfil
     core_competencies = [", ".join(core_terms)] if len(core_terms) >= 3 else []
     soft_skills = [", ".join(soft_terms)] if len(soft_terms) >= 3 else []
 
-    return [
+    sections = [
         ("CONTACT", [contact] if contact else []),
         ("PROFESSIONAL SUMMARY", summary_items),
         ("TEACHING VISION", teaching_vision),
@@ -95,16 +219,111 @@ def _resume_sections(resume: Resume, report: AtsReport, profile: CandidateProfil
         ("LANGUAGES", languages),
         ("INTERESTS", interests),
     ]
+    return _tailor_section_order(sections, target_text) if target_text else sections
 
 
-def _write_docx(path: Path, sections: list[tuple[str, list[str]]], display_name: str) -> None:
+def _tailor_section_order(
+    sections: list[tuple[str, list[str]]],
+    target_text: str,
+) -> list[tuple[str, list[str]]]:
+    tailored: list[tuple[str, list[str]]] = []
+    for heading, items in sections:
+        if heading == "PROFESSIONAL EXPERIENCE":
+            items = _rank_contiguous_bullets(items, target_text)
+        elif heading == "PROJECTS":
+            items = sorted(items, key=lambda item: relevance_score(item, target_text), reverse=True)
+        elif heading == "TECHNICAL SKILLS":
+            items = [_prioritize_skill_line(item, target_text) for item in items]
+            items = sorted(items, key=lambda item: relevance_score(item, target_text), reverse=True)
+        tailored.append((heading, items))
+    return tailored
+
+
+def _rank_contiguous_bullets(items: list[str], target_text: str) -> list[str]:
+    ranked: list[str] = []
+    pending: list[str] = []
+
+    def flush() -> None:
+        if pending:
+            ranked.extend(sorted(pending, key=lambda item: relevance_score(item, target_text), reverse=True))
+            pending.clear()
+
+    for item in items:
+        if item.startswith("BULLET::"):
+            pending.append(item)
+        else:
+            flush()
+            ranked.append(item)
+    flush()
+    return ranked
+
+
+def _prioritize_skill_line(value: str, target_text: str) -> str:
+    separator = ":" if ":" in value else ""
+    label, terms_text = value.split(":", 1) if separator else ("", value)
+    terms = [term.strip() for term in re.split(r"[,;|•]+", terms_text) if term.strip()]
+    if len(terms) < 2:
+        return value
+    ordered = sorted(terms, key=lambda term: relevance_score(term, target_text), reverse=True)
+    return f"{label.strip()}: {', '.join(ordered)}" if label else ", ".join(ordered)
+
+
+def _compress_sections(
+    sections: list[tuple[str, list[str]]],
+    density: int,
+) -> list[tuple[str, list[str]]]:
+    if density <= 0:
+        return [(heading, list(items)) for heading, items in sections]
+    optional_removed = {
+        2: {"SOFT SKILLS", "INTERESTS"},
+        3: {"SOFT SKILLS", "INTERESTS", "CORE COMPETENCIES"},
+    }.get(density, set())
+    limits = {
+        1: {"PROJECTS": 5, "CERTIFICATIONS": 6, "ACHIEVEMENTS": 5, "PUBLICATIONS & RESEARCH": 5, "VOLUNTEER & LEADERSHIP EXPERIENCE": 4},
+        2: {"PROJECTS": 4, "CERTIFICATIONS": 5, "ACHIEVEMENTS": 4, "PUBLICATIONS & RESEARCH": 4, "VOLUNTEER & LEADERSHIP EXPERIENCE": 3},
+        3: {"PROJECTS": 3, "CERTIFICATIONS": 4, "ACHIEVEMENTS": 3, "PUBLICATIONS & RESEARCH": 3, "VOLUNTEER & LEADERSHIP EXPERIENCE": 2},
+    }[density]
+    compressed: list[tuple[str, list[str]]] = []
+    for heading, original_items in sections:
+        if heading in optional_removed:
+            continue
+        items = list(original_items)
+        if heading == "PROFESSIONAL SUMMARY":
+            items = [_trim_words(item, {1: 64, 2: 52, 3: 44}[density]) for item in items[:1]]
+        elif heading == "PROFESSIONAL EXPERIENCE":
+            items = _limit_experience_bullets(items, {1: 6, 2: 4, 3: 3}[density])
+        elif heading == "TECHNICAL SKILLS":
+            items = items[: {1: 7, 2: 6, 3: 5}[density]]
+        elif heading in limits:
+            items = items[: limits[heading]]
+        compressed.append((heading, items))
+    return compressed
+
+
+def _limit_experience_bullets(items: list[str], per_role: int) -> list[str]:
+    limited: list[str] = []
+    bullet_count = 0
+    for item in items:
+        if item.startswith("ROLE::"):
+            bullet_count = 0
+            limited.append(item)
+        elif item.startswith("BULLET::"):
+            if bullet_count < per_role:
+                limited.append(item)
+                bullet_count += 1
+        else:
+            limited.append(item)
+    return limited
+
+
+def _write_docx(path: Path, sections: list[tuple[str, list[str]]], display_name: str, *, density: int = 0) -> None:
     try:
         from docx import Document
     except ImportError as exc:
         raise RuntimeError("Install DOCX support with: pip install -e '.[docs]'") from exc
 
     document = Document()
-    _configure_document(document)
+    _configure_document(document, density=density)
     title = document.add_paragraph()
     title.style = document.styles["ResumeName"]
     title.add_run(display_name)
@@ -163,7 +382,7 @@ def _write_docx(path: Path, sections: list[tuple[str, list[str]]], display_name:
     document.save(path)
 
 
-def _configure_document(document) -> None:
+def _configure_document(document, *, density: int = 0) -> None:
     from docx.enum.style import WD_STYLE_TYPE
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
@@ -172,8 +391,9 @@ def _configure_document(document) -> None:
     section = document.sections[0]
     section.page_width = Mm(210)
     section.page_height = Mm(297)
-    section.top_margin = Inches(0.55)
-    section.bottom_margin = Inches(0.5)
+    compact = min(max(density, 0), 3)
+    section.top_margin = Inches(0.55 - compact * 0.03)
+    section.bottom_margin = Inches(0.5 - compact * 0.025)
     section.left_margin = Inches(0.65)
     section.right_margin = Inches(0.65)
 
@@ -182,9 +402,9 @@ def _configure_document(document) -> None:
     normal.font.name = "Arial"
     normal._element.rPr.rFonts.set(qn("w:ascii"), "Arial")
     normal._element.rPr.rFonts.set(qn("w:hAnsi"), "Arial")
-    normal.font.size = Pt(9.5)
-    normal.paragraph_format.space_after = Pt(2)
-    normal.paragraph_format.line_spacing = 1.05
+    normal.font.size = Pt(9.5 - compact * 0.2)
+    normal.paragraph_format.space_after = Pt(max(0.5, 2 - compact * 0.4))
+    normal.paragraph_format.line_spacing = max(1.0, 1.05 - compact * 0.01)
 
     for name, font_size, bold, before, after, color in (
         ("ResumeName", 20, True, 0, 2, "17365D"),
@@ -199,12 +419,12 @@ def _configure_document(document) -> None:
         style.font.name = "Arial"
         style._element.rPr.rFonts.set(qn("w:ascii"), "Arial")
         style._element.rPr.rFonts.set(qn("w:hAnsi"), "Arial")
-        style.font.size = Pt(font_size)
+        style.font.size = Pt(font_size - compact * (0.3 if name != "ResumeName" else 0.45))
         style.font.bold = bold
         style.font.color.rgb = RGBColor.from_string(color)
-        style.paragraph_format.space_before = Pt(before)
-        style.paragraph_format.space_after = Pt(after)
-        style.paragraph_format.line_spacing = 1.05
+        style.paragraph_format.space_before = Pt(max(0, before - compact * 0.8))
+        style.paragraph_format.space_after = Pt(max(0, after - compact * 0.35))
+        style.paragraph_format.line_spacing = max(1.0, 1.05 - compact * 0.01)
 
     styles["ResumeBullet"].base_style = styles["List Bullet"]
     styles["ResumeBullet"].paragraph_format.left_indent = Inches(0.18)
@@ -914,6 +1134,25 @@ def _list_section_items(text: str) -> list[str]:
     return _dedupe_lines([item for item in items if not _is_section_heading(item)])[:16]
 
 
+def _certification_section_items(text: str) -> list[str]:
+    """Remove achievements/languages appended by out-of-order PDF columns."""
+    if not text.strip():
+        return []
+    boundaries = [
+        match.start()
+        for pattern in (
+            r"\b\d+\+\s+(?:leetcode|hackerrank|coding|problems?\s+solved)",
+            r"\bGATE\s+\d{4}\b",
+            r"\b(?:English|Hindi|Bengali|Tamil|Telugu|Marathi|Gujarati|Kannada|Malayalam|Punjabi|Urdu)\s+"
+            r"(?:English|Hindi|Bengali|Tamil|Telugu|Marathi|Gujarati|Kannada|Malayalam|Punjabi|Urdu)\b",
+        )
+        for match in [re.search(pattern, text, flags=re.I)]
+        if match
+    ]
+    certification_text = text[: min(boundaries)] if boundaries else text
+    return _list_section_items(certification_text)
+
+
 def _project_section_items(text: str) -> list[str]:
     """Split project sections even when PDF extraction removed bullet markers."""
     lines = [_clean_sentence(line) for line in text.splitlines() if _clean_sentence(line)]
@@ -1247,33 +1486,18 @@ def _certification_lines(text: str) -> list[str]:
 
 
 def _achievement_lines(text: str, experience_lines: list[str]) -> list[str]:
-    recognitions = _recognition_lines(text)
-    if recognitions:
-        return recognitions
-    measurable_terms = (
-        "%",
-        "years",
-        "csv",
-        "json",
-        "parquet",
-        "reduced",
-        "optimized",
-        "improved",
-        "automated",
-        "streamlined",
-        "enhanced",
-        "delivered",
-        "implemented",
-    )
-    achievements = [
-        line
-        for line in experience_lines
-        if not _is_resume_metadata(line)
-        and (re.search(r"\d", line) or any(term in line.lower() for term in measurable_terms))
-    ]
-    if not achievements and experience_lines:
-        achievements = [line for line in experience_lines if not _is_resume_metadata(line)][:2]
-    return _dedupe_lines(achievements)[:4]
+    del experience_lines
+    # Experience evidence stays under the role where it belongs. Repeating it
+    # as a synthetic achievement weakens scan quality and obscures provenance.
+    achievements = _recognition_lines(text)
+    compact = _clean_sentence(text)
+    leetcode = re.search(r"\b\d+\+\s+Leetcode problems? Solved\b", compact, flags=re.I)
+    gate = re.search(r"\bGATE\s+\d{4}\s*\([^)]+\)\s*Qualified\s*:\s*AIR\s*\d+\s*\|\s*Score\s*:\s*\d+", compact, flags=re.I)
+    if leetcode:
+        achievements.append(_clean_sentence(leetcode.group(0)))
+    if gate:
+        achievements.append(_clean_sentence(gate.group(0)))
+    return _dedupe_lines(achievements)[:6]
 
 
 def _recognition_lines(text: str) -> list[str]:
@@ -1312,6 +1536,16 @@ def _language_lines(text: str) -> list[str]:
     language_text = re.sub(r"\s+\band\b\s+", ",", language_text, flags=re.I)
     values = [item.strip(" .;") for item in re.split(r"[,/|]", language_text) if item.strip(" .;")]
     return _dedupe_lines([_clean_sentence(value) for value in values])[:6]
+
+
+def _language_names_from_sections(sections: dict[str, str]) -> list[str]:
+    known = (
+        "English", "Hindi", "Bengali", "Tamil", "Telugu", "Marathi", "Gujarati", "Kannada",
+        "Malayalam", "Punjabi", "Urdu", "French", "German", "Spanish", "Mandarin", "Japanese",
+    )
+    text = " ".join(sections.values())
+    matches = [language for language in known if re.search(rf"\b{re.escape(language)}\b", text, flags=re.I)]
+    return matches[:6] if len(matches) >= 2 else []
 
 
 def _is_resume_metadata(value: str) -> bool:
@@ -1507,7 +1741,7 @@ def _looks_like_skill_label(value: str) -> bool:
         and re.search(
             r"\b(?:skills?|tools?|expertise|technology|technologies|databases?|platforms?|"
             r"languages?|frameworks?|systems?|methods?|competencies|devops|cloud|mlops|"
-            r"analytics|visualization|processing|fundamentals|domain|science|ai|ml|programming)\b",
+            r"analytics|visualization|processing|fundamentals|domain|data|science|ai|ml|programming)\b",
             label,
             flags=re.I,
         )
@@ -1710,7 +1944,7 @@ def _dedupe_lines(lines: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for line in lines:
-        key = line.lower()
+        key = re.sub(r"[\s.;,:]+$", "", line.casefold()).strip()
         if key not in seen:
             seen.add(key)
             result.append(line)
@@ -1721,7 +1955,7 @@ def _dedupe_prefixed_lines(lines: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for line in lines:
-        key = re.sub(r"^(?:ROLE::|META::|BULLET::)", "", line).casefold()
+        key = re.sub(r"[\s.;,:]+$", "", re.sub(r"^(?:ROLE::|META::|BULLET::)", "", line).casefold()).strip()
         if key not in seen:
             seen.add(key)
             result.append(line)

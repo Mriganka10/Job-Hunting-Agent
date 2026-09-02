@@ -131,7 +131,7 @@ Responsibilities:
 - Incorporate truthful ATS keyword and action-language improvements.
 - Write a consistently formatted DOCX artifact.
 
-This builder is deterministic. It does not tailor against a specific job description and must not be described as LLM-generated.
+This builder is deterministic and must not be described as LLM-generated. It creates a base resume and per-job variants by reordering source-supported evidence against each lead's title and description. It records unsupported JD terms instead of adding them to the candidate's qualifications.
 
 ## Mock Interview Agent
 

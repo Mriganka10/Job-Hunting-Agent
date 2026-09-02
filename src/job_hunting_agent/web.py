@@ -20,7 +20,7 @@ from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
-from fastapi import BackgroundTasks, Body, Cookie, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Body, Cookie, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -40,6 +40,7 @@ from .db import (
     mock_interview_session,
     normalize_email,
     record_run,
+    run_for_user,
     save_email_verification,
     save_user_profile,
     save_otp,
@@ -49,6 +50,7 @@ from .db import (
     user_profile,
 )
 from .models import CandidateProfile
+from .job_pagination import DEFAULT_JOB_PAGE_SIZE, paginate_jobs
 from .storage import StoredObject, download_file, mirror_artifacts, presigned_download_url, upload_file
 
 app = FastAPI(title="Job Hunting Agent")
@@ -559,6 +561,31 @@ def runs(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOK
     return {"runs": [_run_with_payload_id(run) for run in latest_runs(user_email, limit=1)]}
 
 
+@app.get("/api/runs/{run_id}/jobs")
+def paginated_run_jobs(
+    run_id: int,
+    cursor: Annotated[str, Query()] = "",
+    limit: Annotated[int, Query(ge=1, le=25)] = DEFAULT_JOB_PAGE_SIZE,
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+) -> dict:
+    user_email = require_user(job_agent_session)
+    run = run_for_user(user_email, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    payload = run.get("payload") or {}
+    try:
+        page = paginate_jobs(
+            list(payload.get("jobs") or []),
+            run_id=run_id,
+            secret=APP_SECRET,
+            cursor=cursor,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"run_id": run_id, **page}
+
+
 @app.get("/api/mock-interview/questions")
 def mock_interview_questions(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
     user_email = require_user(job_agent_session)
@@ -782,7 +809,9 @@ def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user
     if artifact_uris:
         result["artifact_uris"] = artifact_uris
     if user_email:
-        result["run_id"] = record_run(user_email, result)
+        run_id = record_run(user_email, result)
+        result["run_id"] = run_id
+        return _client_run_payload(result, run_id)
     return result
 
 
@@ -792,32 +821,91 @@ def download_improved_resume(
     job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
 ):
     user_email = require_user(job_agent_session)
-    run = next((item for item in latest_runs(user_email, limit=20) if int(item.get("id", 0)) == run_id), None)
+    run = run_for_user(user_email, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found.")
     payload = run.get("payload") or {}
     improved = payload.get("improved_resume") or {}
-    uri = improved.get("docx_uri") or ""
+    return _resume_file_response(improved, "docx")
+
+
+@app.get("/api/runs/{run_id}/improved-resume.pdf")
+def download_improved_resume_pdf(
+    run_id: int,
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+):
+    user_email = require_user(job_agent_session)
+    run = run_for_user(user_email, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    improved = (run.get("payload") or {}).get("improved_resume") or {}
+    return _resume_file_response(improved, "pdf")
+
+
+@app.get("/api/runs/{run_id}/tailored-resumes/{artifact_id}/{file_format}")
+def download_tailored_resume(
+    run_id: int,
+    artifact_id: str,
+    file_format: str,
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+):
+    user_email = require_user(job_agent_session)
+    run = run_for_user(user_email, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    improved = (run.get("payload") or {}).get("improved_resume") or {}
+    artifact = next(
+        (
+            item
+            for item in improved.get("tailored_resumes", [])
+            if isinstance(item, dict) and str(item.get("artifact_id")) == artifact_id
+        ),
+        None,
+    )
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Tailored resume artifact is not available for this run.")
+    return _resume_file_response(artifact, file_format)
+
+
+def _resume_file_response(artifact: dict, file_format: str):
+    normalized_format = file_format.casefold()
+    if normalized_format not in {"docx", "pdf"}:
+        raise HTTPException(status_code=400, detail="Resume format must be docx or pdf.")
+    uri = str(artifact.get(f"{normalized_format}_uri") or "")
     if uri:
         signed_url = presigned_download_url(uri)
         if signed_url:
             return RedirectResponse(signed_url, status_code=303)
-    path = Path(improved.get("docx_path") or "")
+    path = Path(str(artifact.get(f"{normalized_format}_path") or ""))
     if path.exists() and path.is_file():
-        return FileResponse(
-            path,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=path.name,
+        media_type = (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            if normalized_format == "docx"
+            else "application/pdf"
         )
-    raise HTTPException(status_code=404, detail="Improved resume artifact is not available for this run.")
+        return FileResponse(path, media_type=media_type, filename=path.name)
+    raise HTTPException(status_code=404, detail="Resume artifact is not available for this run.")
 
 
-def _publish_improved_resume(improved_resume: dict[str, str], user_email: str, generated_at: str) -> dict[str, str]:
+def _publish_improved_resume(improved_resume: dict[str, object], user_email: str, generated_at: str) -> dict[str, object]:
     published = dict(improved_resume)
     prefix = f"artifacts/{normalize_email(user_email)}/{generated_at}/improved_resume"
-    docx_path = improved_resume.get("docx_path")
-    if docx_path:
-        published["docx_uri"] = upload_file(docx_path, prefix)
+    for file_format in ("docx", "pdf"):
+        file_path = improved_resume.get(f"{file_format}_path")
+        if file_path:
+            published[f"{file_format}_uri"] = upload_file(str(file_path), prefix)
+    tailored: list[dict[str, object]] = []
+    for artifact in improved_resume.get("tailored_resumes", []):
+        if not isinstance(artifact, dict):
+            continue
+        item = dict(artifact)
+        artifact_prefix = f"{prefix}/tailored/{item.get('artifact_id', 'resume')}"
+        for file_format in ("docx", "pdf"):
+            file_path = item.get(f"{file_format}_path")
+            if file_path:
+                item[f"{file_format}_uri"] = upload_file(str(file_path), artifact_prefix)
+        tailored.append(item)
+    published["tailored_resumes"] = tailored
     return published
 
 
@@ -1012,8 +1100,30 @@ def _run_history_item(run: dict) -> dict:
 
 def _run_with_payload_id(run: dict) -> dict:
     payload = dict(run.get("payload") or {})
-    payload.setdefault("run_id", run.get("id"))
-    return {**run, "payload": payload}
+    run_id = int(run.get("id") or payload.get("run_id") or 0)
+    payload["run_id"] = run_id
+    return {**run, "payload": _client_run_payload(payload, run_id)}
+
+
+def _client_run_payload(payload: dict, run_id: int) -> dict:
+    client_payload = dict(payload)
+    page = paginate_jobs(
+        list(payload.get("jobs") or []),
+        run_id=run_id,
+        secret=APP_SECRET,
+        limit=DEFAULT_JOB_PAGE_SIZE,
+    )
+    client_payload["run_id"] = run_id
+    client_payload["jobs"] = page["jobs"]
+    client_payload["job_page"] = page["page"]
+    client_payload["job_count"] = page["page"]["total"]
+    applications = list(payload.get("applications") or [])
+    client_payload["applications"] = applications[:1]
+    client_payload["application_count"] = len(applications)
+    improved = dict(client_payload.get("improved_resume") or {})
+    improved.pop("tailored_resumes", None)
+    client_payload["improved_resume"] = improved
+    return client_payload
 
 
 def _mock_interview_payload(profile: dict, latest_payload: dict | None = None) -> dict:
@@ -1499,14 +1609,17 @@ def _config_from_payload(payload: dict) -> AppConfig:
         ),
         search=SearchConfig(
             max_jobs_per_portal=int(search.get("max_jobs_per_portal", 10)),
-            freshness_days=int(search.get("freshness_days", 1)),
+            freshness_days=int(search.get("freshness_days", 7)),
             include_remote=bool(search.get("include_remote", True)),
-            portals=tuple(search.get("portals", ("linkedin", "naukri"))),
+            validate_job_links=bool(search.get("validate_job_links", True)),
+            portals=tuple(search.get("portals", ("remotive", "arbeitnow", "linkedin", "naukri"))),
         ),
         application=ApplicationConfig(
             mode=application.get("mode", "draft"),
             cover_letter_tone=application.get("cover_letter_tone", "concise"),
             data_dir=application.get("data_dir", str(DATA_DIR)),
+            resume_page_target=max(1, min(int(application.get("resume_page_target", 2)), 3)),
+            tailor_each_job=bool(application.get("tailor_each_job", True)),
         ),
         email=EmailConfig(
             smtp_host=os.getenv("JOB_AGENT_SMTP_HOST", ""),
@@ -2551,7 +2664,6 @@ def _page(user_email: str, profile: dict) -> str:
     const timezoneInput = document.getElementById('daily_timezone');
     let activeResult = { key: '', generatedAt: '', source: '' };
     let activePayload = null;
-    let visibleJobCount = 8;
     function enrichFormData() {
       timezoneInput.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
       const data = new FormData(form);
@@ -2663,9 +2775,6 @@ def _page(user_email: str, profile: dict) -> str:
     }
     function render(payload, source = 'manual', options = {}) {
       const key = resultKey(payload);
-      if (!options.preserveJobCount && key !== activeResult.key) {
-        visibleJobCount = 8;
-      }
       activeResult = { key, generatedAt: payload.generated_at || activeResult.generatedAt, source };
       activePayload = payload;
       const report = payload.ats_report;
@@ -2674,10 +2783,17 @@ def _page(user_email: str, profile: dict) -> str:
         ? `<p class="muted">Showing latest scheduled run from ${escapeHtml(payload.generated_at || 'the scheduler')}.</p>`
         : '';
       const improvedResumeAction = improvedResumeDownload(payload);
+      const confidencePercent = Math.round((report.score_confidence || 0) * 100);
+      const extractionPercent = Math.round((report.extraction_confidence || 0) * 100);
+      const scoreRange = report.score_range || [report.score, report.score];
+      const layout = report.layout_analysis || {};
+      const jobPage = payload.job_page || { total: payload.jobs.length, has_more: false, next_cursor: '' };
+      const totalJobs = payload.job_count ?? jobPage.total ?? payload.jobs.length;
       summary.className = '';
       summary.innerHTML = `
         <span class="metric"><strong>${report.score}</strong><span>/100 ATS</span></span>
-        <span class="metric"><strong>${payload.jobs.length}</strong><span>jobs</span></span>
+        <span class="metric"><strong>${confidencePercent}%</strong><span>${escapeHtml(report.confidence_label || 'Low')} confidence</span></span>
+        <span class="metric"><strong>${totalJobs}</strong><span>jobs</span></span>
         <span class="metric"><strong>${appSummary.drafted || 0}</strong><span>drafts ready</span></span>
         ${resultLabel}
         <p class="muted">Outputs: ${payload.output_dir}</p>
@@ -2685,19 +2801,26 @@ def _page(user_email: str, profile: dict) -> str:
       `;
       const improvements = report.improvements.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
       const missing = report.missing_keywords.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
-      const jobLimit = Math.min(visibleJobCount, payload.jobs.length);
-      const jobs = payload.jobs.slice(0, jobLimit).map((job) => {
+      const jobs = payload.jobs.map((job) => {
         const reasons = (job.match_reasons || []).map((reason) => `<span class="status-pill">${escapeHtml(reason)}</span>`).join(' ');
-        return `<tr><td>${escapeHtml(job.portal)}</td><td><strong>${escapeHtml(job.title)}</strong><br><span class="muted">${escapeHtml(job.location || '')}</span></td><td>${escapeHtml(job.company)}</td><td><strong>${escapeHtml(job.match_score || 0)}%</strong><br>${reasons}</td><td><a href="${job.url}" target="_blank" rel="noreferrer">Open</a></td></tr>`;
+        const jobDetails = [job.workplace_mode, job.employment_type, job.salary_text, job.posted_at ? `Posted ${job.posted_at.slice(0, 10)}` : '', job.freshness_verified ? 'date verified' : 'date unverified'].filter((item) => item && item !== 'unknown').map(escapeHtml).join(' · ');
+        const sourceState = job.source_validated ? 'Validated API' : 'Public discovery';
+        const normalizedCompany = job.normalized_company && job.normalized_company !== job.company ? `<br><span class="muted">${escapeHtml(job.normalized_company)}</span>` : '';
+        const tailored = job.tailored_resume_id
+          ? `<br><a href="/api/runs/${encodeURIComponent(payload.run_id)}/tailored-resumes/${encodeURIComponent(job.tailored_resume_id)}/docx">DOCX</a> · <a href="/api/runs/${encodeURIComponent(payload.run_id)}/tailored-resumes/${encodeURIComponent(job.tailored_resume_id)}/pdf">PDF</a>`
+          : '';
+        return `<tr><td>${escapeHtml(job.portal)}<br><span class="muted">${escapeHtml(sourceState)}</span></td><td><strong>${escapeHtml(job.title)}</strong><br><span class="muted">${escapeHtml(job.location || '')}</span><br><span class="muted">${jobDetails}</span></td><td>${escapeHtml(job.company)}${normalizedCompany}</td><td><strong>${escapeHtml(job.match_score || 0)}%</strong><br>${reasons}</td><td><a href="${escapeHtml(job.url)}" target="_blank" rel="noreferrer">Open job</a>${tailored}<br><span class="muted">${escapeHtml(job.link_status || 'unchecked')}</span></td></tr>`;
       }).join('');
-      const showMoreJobs = payload.jobs.length > jobLimit
-        ? `<div class="show-more-row"><button id="show-more-jobs" type="button">Show more jobs (${payload.jobs.length - jobLimit} more)</button></div>`
+      const remainingJobs = Math.max(0, (jobPage.total || totalJobs) - payload.jobs.length);
+      const showMoreJobs = jobPage.has_more
+        ? `<div class="show-more-row"><button id="show-more-jobs" type="button">Show more jobs (${remainingJobs} remaining)</button></div>`
         : '';
       const draftTemplate = buildDraftTemplate(payload.applications);
       details.innerHTML = `
         <section class="result-section">
           <h3>Resume Signals</h3>
           ${improvedResumeAction || '<p class="muted">Run the agent to prepare a final ATS-friendly resume download.</p>'}
+          <p class="muted">${escapeHtml(report.role_profile || 'General Professional')} profile · estimated range ${escapeHtml(scoreRange[0])}-${escapeHtml(scoreRange[1])} · extraction ${extractionPercent}% · layout ${escapeHtml(layout.score ?? 'not verified')}/100 · semantic provider ${escapeHtml(report.semantic_provider || 'not applicable')}</p>
           <div class="result-grid">
             <div><strong>Resume Improvements</strong><ul class="insight-list">${improvements || '<li>No major improvements found.</li>'}</ul></div>
             <div><strong>Missing Keywords</strong><ul class="insight-list">${missing || '<li>No configured keywords are missing.</li>'}</ul></div>
@@ -2717,11 +2840,16 @@ def _page(user_email: str, profile: dict) -> str:
     }
     function improvedResumeDownload(payload) {
       if (!payload.improved_resume || !payload.run_id) return '';
+      const validation = payload.improved_resume.validation || {};
+      const validationLabel = validation.passed
+        ? `${validation.page_count || '?'} page PDF · render and factual checks passed`
+        : `Validation needs review${validation.issues?.length ? `: ${validation.issues[0]}` : ''}`;
       return `
         <div class="download-actions">
-          <a class="download-button" href="/api/runs/${encodeURIComponent(payload.run_id)}/improved-resume">Download Final ATS Resume</a>
+          <a class="download-button" href="/api/runs/${encodeURIComponent(payload.run_id)}/improved-resume">Download ATS Resume DOCX</a>
+          <a class="download-button" href="/api/runs/${encodeURIComponent(payload.run_id)}/improved-resume.pdf">Download ATS Resume PDF</a>
           <a class="download-button secondary-link" href="/mock-interview">Mock Interview Questions</a>
-          <span class="muted">Single-column DOCX resume using standard ATS section headings.</span>
+          <span class="muted">${escapeHtml(validationLabel)}. Each job row includes its separately tailored resume.</span>
         </div>
       `;
     }
@@ -2758,8 +2886,22 @@ def _page(user_email: str, profile: dict) -> str:
     document.addEventListener('click', async (event) => {
       const showMoreButton = event.target.closest('#show-more-jobs');
       if (showMoreButton) {
-        visibleJobCount += 8;
-        if (activePayload) render(activePayload, activeResult.source, { preserveJobCount: true });
+        if (!activePayload?.run_id || !activePayload?.job_page?.next_cursor) return;
+        showMoreButton.disabled = true;
+        showMoreButton.textContent = 'Loading jobs...';
+        try {
+          const query = new URLSearchParams({ cursor: activePayload.job_page.next_cursor, limit: '8' });
+          const response = await fetch(`/api/runs/${encodeURIComponent(activePayload.run_id)}/jobs?${query.toString()}`);
+          const page = await response.json();
+          if (!response.ok) throw new Error(page.detail || 'Unable to load more jobs.');
+          const known = new Set(activePayload.jobs.map((job) => `${job.portal}:${job.source_id || job.url}`.toLowerCase()));
+          const additions = page.jobs.filter((job) => !known.has(`${job.portal}:${job.source_id || job.url}`.toLowerCase()));
+          activePayload = { ...activePayload, jobs: [...activePayload.jobs, ...additions], job_page: page.page };
+          render(activePayload, activeResult.source, { preserveJobs: true });
+        } catch (error) {
+          showMoreButton.disabled = false;
+          showMoreButton.textContent = error.message;
+        }
         return;
       }
       const button = event.target.closest('.copy-draft');

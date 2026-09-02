@@ -85,6 +85,7 @@ class LinkedInAdapter(PortalAdapter):
             company = _first_match(card, r'class="[^"]*base-search-card__subtitle[^"]*"[^>]*>.*?<a[^>]*>\s*(.*?)\s*</a>')
             job_location = _first_match(card, r'class="[^"]*job-search-card__location[^"]*"[^>]*>\s*(.*?)\s*</')
             job_url = _first_match(card, r'href="(https://[^"]*linkedin\.com/jobs/view/[^"?]+)')
+            posted_at = _first_match(card, r'<time[^>]*datetime="([^"]+)"')
             if title and job_url:
                 leads.append(
                     JobLead(
@@ -94,6 +95,9 @@ class LinkedInAdapter(PortalAdapter):
                         location=_clean_html(job_location) or location,
                         url=job_url,
                         description=f"LinkedIn public listing matched {role or query} ({_experience_label(experience_years)})",
+                        posted_at=posted_at,
+                        workplace_mode="remote" if "remote" in (job_location or location).casefold() else "unknown",
+                        source_metadata={"source_type": "public_html", "freshness_requested_days": config.freshness_days},
                     )
                 )
             if len(leads) >= config.max_jobs_per_portal:
@@ -129,8 +133,12 @@ class NaukriAdapter(PortalAdapter):
 
         leads: list[JobLead] = []
         for match in re.finditer(r'"title":"(?P<title>.*?)".{0,600}?"jdURL":"(?P<url>.*?)"', response.text):
+            fragment = match.group(0)
             title = _clean_json_text(match.group("title"))
             job_url = _clean_json_text(match.group("url"))
+            company = _clean_json_text(_first_match(fragment, r'"(?:companyName|company)":"(.*?)"'))
+            job_location = _clean_json_text(_first_match(fragment, r'"(?:location|placeholders)":"(.*?)"'))
+            posted_at = _clean_json_text(_first_match(fragment, r'"(?:createdDate|postedDate|footerPlaceholderLabel)":"(.*?)"'))
             if job_url.startswith("/"):
                 job_url = f"https://www.naukri.com{job_url}"
             if title and job_url:
@@ -138,10 +146,13 @@ class NaukriAdapter(PortalAdapter):
                     JobLead(
                         portal=self.name,
                         title=title,
-                        company="Naukri",
-                        location=location,
+                        company=company or "Naukri employer",
+                        location=job_location or location,
                         url=job_url,
                         description=f"Naukri public listing matched {role or query} ({_experience_label(experience_years)})",
+                        posted_at=posted_at,
+                        workplace_mode="remote" if "remote" in (job_location or location).casefold() else "unknown",
+                        source_metadata={"source_type": "public_html", "freshness_requested_days": config.freshness_days},
                     )
                 )
             if len(leads) >= config.max_jobs_per_portal:
@@ -184,7 +195,7 @@ def rank_job_leads(
         experience_fit = _experience_fit(required, intent.experience_years, job.title)
         seniority_fit = _seniority_alignment(job.title, intent.experience_years)
         score = round(100 * (0.38 * role_fit + 0.25 * experience_fit + 0.20 * location_fit + 0.12 * skill_fit + 0.05 * relevance) * seniority_fit)
-        reasons = _match_reasons(role_fit, skill_fit, location_fit, experience_fit, required, intent)
+        reasons = _match_reasons(role_fit, skill_fit, location_fit, experience_fit, required, intent, job)
         scored.append(replace(job, match_score=max(0, min(100, score)), match_reasons=reasons, required_experience=required))
 
     eligible = [job for job in scored if _is_eligible(job, intent, config)]
@@ -277,6 +288,7 @@ def _match_reasons(
     experience_fit: float,
     required: float | None,
     intent: SearchIntent,
+    job: JobLead,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
     if role_fit >= 0.45:
@@ -293,7 +305,11 @@ def _match_reasons(
         reasons.append("Experience fit")
     elif required is not None:
         reasons.append(f"Requires about {required:g}+ years")
-    return tuple(reasons[:4]) or ("General profile relevance",)
+    if job.freshness_verified:
+        reasons.append("Posting date verified")
+    if job.source_validated:
+        reasons.append("Validated API source")
+    return tuple(reasons[:6]) or ("General profile relevance",)
 
 
 def _is_eligible(job: JobLead, intent: SearchIntent, config: SearchConfig | None) -> bool:
@@ -378,7 +394,11 @@ def _signal_tokens(value: str) -> list[str]:
 
 
 def get_adapters(names: tuple[str, ...]) -> list[PortalAdapter]:
+    from .job_sources import ArbeitnowAdapter, RemotiveAdapter
+
     registry: dict[str, PortalAdapter] = {
+        "remotive": RemotiveAdapter(),
+        "arbeitnow": ArbeitnowAdapter(),
         "linkedin": LinkedInAdapter(),
         "naukri": NaukriAdapter(),
     }
@@ -403,6 +423,9 @@ def _fallback_search_links(
                     location=location,
                     url=url,
                     description=f"Search results for {role} in {location} ({_experience_label(intent.experience_years)})",
+                    workplace_mode="remote" if "remote" in location.casefold() else "unknown",
+                    link_status="search_results",
+                    source_metadata={"source_type": "search_fallback", "freshness_requested_days": config.freshness_days},
                 )
             )
     return leads[: config.max_jobs_per_portal]

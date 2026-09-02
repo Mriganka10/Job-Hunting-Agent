@@ -21,7 +21,8 @@ def test_score_resume_identifies_missing_keywords() -> None:
 
     assert report.score >= 30
     assert "AWS" in report.missing_keywords
-    assert tuple(maximum for _, _, maximum in report.score_breakdown) == (20, 30, 35, 15)
+    assert sum(maximum for _, _, maximum in report.score_breakdown) == 100
+    assert report.role_profile == "Software Engineering"
 
 
 def test_score_resume_detects_clear_headings_without_generic_section_warning() -> None:
