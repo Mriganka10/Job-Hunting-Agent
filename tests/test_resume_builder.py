@@ -216,6 +216,70 @@ def test_write_improved_resume_preserves_uploaded_skill_keywords_and_optional_he
     assert "INTERESTS" in text
 
 
+def test_builder_creates_concise_summary_and_corrects_education_labels(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text=(
+            "JANE DOE\n"
+            "jane@example.com | +91 9876543210\n"
+            "PROFESSIONAL SUMMARY\n"
+            "Hardworking dynamic data engineer seeking opportunity in a challenging environment with Aws, Gitlab, "
+            "SQL, Fastapi and highquality delivery experience for organization growth.\n"
+            "TECHNICAL SKILLS\n"
+            "Cloud: Aws, Gitlab, highquality data checks, SQL, Fastapi\n"
+            "PROFESSIONAL EXPERIENCE\n"
+            "Data Engineer | Example Ltd. | Jan 2021 - Present\n"
+            "Responsible for building SQL pipelines.\n"
+            "Improved pipeline runtime by 35% for 500000 records.\n"
+            "EDUCATION\n"
+            "2009: Higher Secondary Education from Example School\n"
+            "2007: Higher Secondary Education from Example School\n"
+            "SOFT SKILLS\n"
+            "Hardworking, punctual, honest, positive attitude, quick learner\n"
+        ),
+        inferred_skills=("AWS", "GitLab", "SQL", "FastAPI"),
+        inferred_roles=("Data Engineer",),
+        sections={
+            "contact": "jane@example.com | +91 9876543210",
+            "summary": (
+                "Hardworking dynamic data engineer seeking opportunity in a challenging environment with Aws, Gitlab, "
+                "SQL, Fastapi and highquality delivery experience for organization growth."
+            ),
+            "skills": "Cloud: Aws, Gitlab, highquality data checks, SQL, Fastapi",
+            "experience": (
+                "Data Engineer | Example Ltd. | Jan 2021 - Present\n"
+                "Responsible for building SQL pipelines.\n"
+                "Improved pipeline runtime by 35% for 500000 records."
+            ),
+            "education": (
+                "2009: Higher Secondary Education from Example School\n"
+                "2007: Higher Secondary Education from Example School"
+            ),
+            "soft_skills": "Hardworking, punctual, honest, positive attitude, quick learner",
+        },
+    )
+
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(70, (), (), ()),
+        CandidateProfile(name="Jane Doe", target_roles=("Data Engineer",), skills=("AWS", "GitLab", "SQL", "FastAPI"), experience_years=3),
+        tmp_path,
+    )
+    text = "\n".join(paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs)
+    summary = text.split("PROFESSIONAL SUMMARY", 1)[1].split("TECHNICAL SKILLS", 1)[0]
+
+    assert "Hardworking dynamic" not in summary
+    assert len(summary.split()) <= 90
+    assert "AWS" in text
+    assert "GitLab" in text
+    assert "FastAPI" in text
+    assert "high-quality" in text
+    assert "2009: Higher Secondary Education" in text
+    assert "2007: Secondary Education" in text
+    assert "2007: Higher Secondary Education" not in text
+    assert "SOFT SKILLS" not in text
+
+
 def test_builder_deduplicates_contacts_and_blocks_cross_section_contamination(tmp_path: Path) -> None:
     resume = Resume(
         path="resume.txt",
@@ -294,3 +358,118 @@ def test_builder_parses_role_first_and_wrapped_corporate_timelines(tmp_path: Pat
     assert "Jul 2014 - May 2025" in text
     assert "Sr. Business Analyst" in text
     assert "Sep 2012 - Jun 2014" in text
+
+
+def test_builder_repairs_wrapped_entry_level_resume_sections(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text="",
+        inferred_skills=("Python", "Machine Learning", "Deep Learning", "TensorFlow", "GitHub"),
+        inferred_roles=("AI Developer",),
+        sections={
+            "contact": "+91 9083181985\njane@example.com",
+            "summary": "Highly motivated final year student with a strong foundation in AI, ML, and Data Science.",
+            "skills": (
+                "Programming Languages : Java, Python.\n"
+                "Databases : SQL, MySQL.\n"
+                "Data Science & AI/ML : Machine Learning, Deep Learning, TensorFlow,\n"
+                "Keras, Scikit-learn.\n"
+                "Tools : Jupyter Notebook, VS Code, PyCharm, GitHub."
+            ),
+            "experience": (
+                "AI Developer - Level 1 | Kairoz\n"
+                "Corporation Pvt. Ltd. (May 2026 -\n"
+                "Present)\n"
+                "Worked on Artificial Intelligence and\n"
+                "Machine Learning related\n"
+                "projects\n"
+                ".\n"
+                "Applied Python programming for\n"
+                "development and automation tasks."
+            ),
+            "projects": (
+                "Stock Price Prediction using algorithmic trading - Build an intelligent prediction\n"
+                "framework using ML and Deep Learning. (Jun 2025 - Mar 2026)\n"
+                "Movie Recommendation System - A content-based ML project which helps\n"
+                "users find similar films. (April 2025)"
+            ),
+            "education": (
+                "2022 - 2026\n"
+                "CGPA - 8.78(till 7\n"
+                "Semester)\n"
+                "th\n"
+                "2022\n"
+                "Marks (in percentage)-\n"
+                "93.8%\n"
+                "2020\n"
+                "Marks (in percentage)-\n"
+                "93.3%\n"
+                "B.Tech in Computer Science & Engineering\n"
+                "Government College of Engineering and Leather Technology\n"
+                "Higher Secondary (XII)\n"
+                "Example High School\n"
+                "Secondary (X)\n"
+                "Example High School"
+            ),
+        },
+    )
+    profile = CandidateProfile(
+        name="Jane Doe",
+        email="jane@example.com",
+        phone="+91 9083181985",
+        linkedin_profile_url="https://www.linkedin.com/in/janedoe/",
+        target_roles=("AI Developer",),
+        locations=("PAN India",),
+        skills=("Python", "Machine Learning", "Deep Learning", "TensorFlow"),
+        experience_years=0.5,
+    )
+
+    artifact = write_improved_resume(resume, AtsReport(84, (), (), ()), profile, tmp_path)
+    paragraphs = [paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs if paragraph.text.strip()]
+    text = "\n".join(paragraphs)
+
+    assert paragraphs[1] == "jane@example.com | +91 90831 81985 | https://www.linkedin.com/in/janedoe/ | PAN India"
+    assert "2022 - 2026" not in paragraphs[1]
+    assert "Kairoz Corporation Pvt. Ltd." in text
+    assert "May 2026 - Present" in text
+    assert "Contributed to Artificial Intelligence and Machine Learning related projects." in text
+    assert "Applied Python programming for development and automation tasks." in text
+    assert "Databases: SQL, MySQL" in text
+    assert "Data Science & AI/ML: Machine Learning, Deep Learning, TensorFlow, Keras, scikit-learn" in text
+    assert "Databases: SQL, MySQL, Data Science" not in text
+    assert "Stock Price Prediction using algorithmic trading" in text
+    assert "Movie Recommendation System" in text
+    assert text.index("Stock Price Prediction using algorithmic trading") < text.index("Movie Recommendation System")
+    assert "2022 - 2026: B.Tech in Computer Science & Engineering" in text
+    assert "2022: Higher Secondary (XII)" in text
+    assert "2020: Secondary (X)" in text
+    assert "\nth\n" not in text
+
+
+def test_builder_filters_generic_core_competency_clouds(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text="",
+        inferred_skills=("Python", "SQL"),
+        inferred_roles=("Data Engineer",),
+        sections={
+            "summary": "Data engineer focused on analytics platforms.",
+            "skills": "Python, SQL",
+            "core_competencies": (
+                "Strategic Planning & Leadership • Data Engineering Solutions • "
+                "Agile Software Development Lifecycle • Quality Assurance & Control • Project Management"
+            ),
+            "experience": "Built Python and SQL pipelines for analytics workflows.",
+            "education": "B.Tech",
+        },
+    )
+
+    artifact = write_improved_resume(
+        resume,
+        AtsReport(80, (), (), ()),
+        CandidateProfile(name="Jane Doe", target_roles=("Data Engineer",), skills=("Python", "SQL")),
+        tmp_path,
+    )
+    text = "\n".join(paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs)
+
+    assert "CORE COMPETENCIES" not in text

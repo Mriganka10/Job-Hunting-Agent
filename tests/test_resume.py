@@ -12,7 +12,7 @@ def test_parse_text_resume_extracts_skills(tmp_path: Path) -> None:
     resume = parse_resume(resume_path)
 
     assert "Python" in resume.inferred_skills
-    assert "Sql" in resume.inferred_skills
+    assert "SQL" in resume.inferred_skills
     assert "Python Developer" in resume.inferred_roles
 
 
@@ -40,7 +40,22 @@ def test_normalize_text_repairs_pdf_line_hyphenation_and_unicode() -> None:
 def test_normalize_text_repairs_character_spaced_pdf_glyphs() -> None:
     text = "M A C H I N E  L E A R N I N G\nP y t h o n ,  S Q L"
 
-    assert normalize_text(text) == "MACHINE LEARNING\nPython, SQL"
+    assert normalize_text(text) == "Machine Learning\nPython, SQL"
+
+
+def test_parse_resume_canonicalizes_common_ats_keyword_formatting(tmp_path: Path) -> None:
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text(
+        "Skills: Aws, Gitlab, Fastapi, SQL, highquality data checks.",
+        encoding="utf-8",
+    )
+
+    resume = parse_resume(resume_path)
+
+    assert "AWS" in resume.inferred_skills
+    assert "GitLab" in resume.inferred_skills
+    assert "FastAPI" in resume.inferred_skills
+    assert "high-quality data checks" in resume.text
 
 
 def test_extract_sections_recovers_education_before_two_column_heading() -> None:
@@ -151,3 +166,25 @@ Delivered client research.
     assert "Senior Manager" in sections["experience"]
     assert "Financial Modelling" in sections["skills"]
     assert "publications" not in sections
+
+
+def test_contact_recovery_scans_full_resume_without_treating_dates_as_phone_numbers() -> None:
+    sections = extract_sections("""EDUCATION
+2022 - 2026
+B.Tech in Computer Science
+Example College
+LANGUAGES
+English
+Hindi
+JANE DOE
++91 9083181985
+Phone
+jane@example.com
+Email
+CAREER OBJECTIVE
+AI developer focused on applied machine learning.
+""")
+
+    assert "jane@example.com" in sections["contact"]
+    assert "+91 9083181985" in sections["contact"]
+    assert "2022 - 2026" not in sections["contact"]

@@ -12,11 +12,14 @@ KNOWN_SKILLS = {
     "javascript",
     "typescript",
     "sql",
+    "pl/sql",
     "fastapi",
     "django",
     "flask",
     "react",
+    "react.js",
     "node",
+    "node.js",
     "aws",
     "azure",
     "gcp",
@@ -27,13 +30,213 @@ KNOWN_SKILLS = {
     "nlp",
     "pandas",
     "spark",
+    "pyspark",
     "airflow",
     "terraform",
     "linux",
-    "c++", "mysql", "power bi", "tensorflow", "keras", "scikit-learn",
-    "numpy", "matplotlib", "seaborn", "opencv", "nltk", "spacy", "github",
+    "unix",
+    "bash",
+    "c++", "mysql", "postgresql", "mongodb", "oracle", "power bi", "tableau",
+    "tensorflow", "keras", "pytorch", "scikit-learn",
+    "numpy", "matplotlib", "seaborn", "opencv", "nltk", "spacy", "github", "gitlab", "git",
+    "github actions",
     "jupyter notebook", "data structures", "algorithms", "dbms",
     "computer networks", "object detection", "image classification",
+    "rest api", "microservices", "ci/cd", "jenkins", "jira", "autosys",
+    "hadoop", "hive", "sqoop", "kafka", "databricks", "dbt", "trino",
+    "delta lake", "apache nifi", "excel",
+    "artificial intelligence", "ai", "ml", "generative ai", "agentic ai",
+    "rpa", "uipath", "vba", "rnn", "lstm", "eda", "dvc", "oop",
+    "operating systems", "vs code", "pycharm", "named entity recognition",
+    "text classification", "financial modelling", "market sizing",
+    "business economics", "corporate strategy", "m&a research", "m&a",
+    "investment banking research", "secondary research", "market research",
+    "stock market fundamental analysis", "technical analysis",
+    "competitive intelligence", "financial analysis", "business research",
+    "data analytics", "bloomberg", "cap iq", "factset", "thomson eikon",
+    "eikon", "dealogic", "sdc", "euromonitor", "gartner", "idc", "eiu",
+    "moody's", "fitch", "factiva", "ims", "oxford economics", "finbert",
+    "dspy", "scala", "hadoop mapreduce", "pig", "svn", "windows",
+    "solaris", "azure data factory", "azure datalake gen2",
+    "azure synapse analytics", "unix shell script", "oracle 11g",
+    "ms excel",
+}
+
+CANONICAL_SKILL_LABELS = {
+    "airflow": "Airflow",
+    "algorithms": "Algorithms",
+    "apache nifi": "Apache NiFi",
+    "agentic ai": "Agentic AI",
+    "ai": "AI",
+    "artificial intelligence": "Artificial Intelligence",
+    "autosys": "AutoSys",
+    "aws": "AWS",
+    "azure": "Azure",
+    "bash": "Bash",
+    "bloomberg": "Bloomberg",
+    "business economics": "Business Economics",
+    "business research": "Business Research",
+    "c plus plus": "C++",
+    "cap iq": "Cap IQ",
+    "ci cd": "CI/CD",
+    "competitive intelligence": "Competitive Intelligence",
+    "computer networks": "Computer Networks",
+    "corporate strategy": "Corporate Strategy",
+    "data analytics": "Data Analytics",
+    "data structures": "Data Structures",
+    "databricks": "Databricks",
+    "dbms": "DBMS",
+    "dbt": "dbt",
+    "deep learning": "Deep Learning",
+    "dealogic": "Dealogic",
+    "delta lake": "Delta Lake",
+    "django": "Django",
+    "docker": "Docker",
+    "dspy": "DSPy",
+    "dvc": "DVC",
+    "eda": "EDA",
+    "eikon": "Eikon",
+    "eiu": "EIU",
+    "excel": "Excel",
+    "euromonitor": "Euromonitor",
+    "factiva": "Factiva",
+    "factset": "FactSet",
+    "fastapi": "FastAPI",
+    "financial analysis": "Financial Analysis",
+    "financial modelling": "Financial Modelling",
+    "finbert": "FinBERT",
+    "fitch": "Fitch",
+    "flask": "Flask",
+    "gartner": "Gartner",
+    "gcp": "GCP",
+    "generative ai": "Generative AI",
+    "git": "Git",
+    "github": "GitHub",
+    "github actions": "GitHub Actions",
+    "gitlab": "GitLab",
+    "hadoop": "Hadoop",
+    "hadoop mapreduce": "Hadoop MapReduce",
+    "hive": "Hive",
+    "idc": "IDC",
+    "image classification": "Image Classification",
+    "ims": "IMS",
+    "investment banking research": "Investment Banking Research",
+    "java": "Java",
+    "javascript": "JavaScript",
+    "jenkins": "Jenkins",
+    "jira": "Jira",
+    "jupyter notebook": "Jupyter Notebook",
+    "keras": "Keras",
+    "kafka": "Kafka",
+    "kubernetes": "Kubernetes",
+    "linux": "Linux",
+    "lstm": "LSTM",
+    "m a": "M&A",
+    "m&a": "M&A",
+    "m a research": "M&A Research",
+    "m&a research": "M&A Research",
+    "machine learning": "Machine Learning",
+    "market research": "Market Research",
+    "market sizing": "Market Sizing",
+    "matplotlib": "Matplotlib",
+    "microservices": "Microservices",
+    "ml": "ML",
+    "mongodb": "MongoDB",
+    "ms excel": "MS Excel",
+    "mysql": "MySQL",
+    "named entity recognition": "Named Entity Recognition",
+    "nlp": "NLP",
+    "node": "Node.js",
+    "node js": "Node.js",
+    "nltk": "NLTK",
+    "numpy": "NumPy",
+    "object detection": "Object Detection",
+    "oop": "OOP",
+    "opencv": "OpenCV",
+    "operating systems": "Operating Systems",
+    "oracle": "Oracle",
+    "oracle 11g": "Oracle 11g",
+    "oxford economics": "Oxford Economics",
+    "pandas": "Pandas",
+    "pl sql": "PL/SQL",
+    "postgresql": "PostgreSQL",
+    "power bi": "Power BI",
+    "pig": "PIG",
+    "pyspark": "PySpark",
+    "pycharm": "PyCharm",
+    "python": "Python",
+    "pytorch": "PyTorch",
+    "react": "React",
+    "react js": "React.js",
+    "rest api": "REST API",
+    "rnn": "RNN",
+    "rpa": "RPA",
+    "scikit learn": "scikit-learn",
+    "scala": "Scala",
+    "seaborn": "Seaborn",
+    "secondary research": "Secondary Research",
+    "sdc": "SDC",
+    "spark": "Spark",
+    "spacy": "spaCy",
+    "sqoop": "Sqoop",
+    "sql": "SQL",
+    "solaris": "Solaris",
+    "svn": "SVN",
+    "tableau": "Tableau",
+    "technical analysis": "Technical Analysis",
+    "tensorflow": "TensorFlow",
+    "terraform": "Terraform",
+    "text classification": "Text Classification",
+    "thomson eikon": "Thomson Eikon",
+    "trino": "Trino",
+    "typescript": "TypeScript",
+    "unix": "Unix",
+    "unix shell script": "Unix Shell Script",
+    "uipath": "UiPath",
+    "vba": "VBA",
+    "vs code": "VS Code",
+    "windows": "Windows",
+    "azure data factory": "Azure Data Factory",
+    "azure datalake gen2": "Azure DataLake Gen2",
+    "azure synapse analytics": "Azure Synapse Analytics",
+}
+
+GENERIC_SKILL_LABELS = {
+    "additional skills",
+    "analytics",
+    "ai and technology",
+    "ai technology",
+    "big data technology",
+    "cloud",
+    "cloud and devops",
+    "cloud technology",
+    "competencies",
+    "core skills",
+    "data platforms",
+    "data visualization tool",
+    "database",
+    "databases",
+    "development tools",
+    "devops tool",
+    "domain expertise",
+    "eagle technology",
+    "frameworks",
+    "languages",
+    "methodologies",
+    "operating systems",
+    "platforms",
+    "programming",
+    "programming language",
+    "research database",
+    "research databases",
+    "scripting language",
+    "skills",
+    "source versioning control tool",
+    "technical competencies",
+    "technical skills",
+    "technologies",
+    "tools",
+    "tools and technologies",
 }
 
 ROLE_HINTS = (
@@ -155,9 +358,41 @@ def extract_sections(text: str) -> dict[str, str]:
 def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).replace("\u00ad", "").replace("�", "-")
     text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
-    lines = [_repair_spaced_glyphs(line) for line in text.splitlines()]
+    lines = [normalize_ats_text(_repair_spaced_glyphs(line)) for line in text.splitlines()]
     normalized = "\n".join(line for line in lines if line)
     return re.sub(r"\n{3,}", "\n\n", normalized).strip()
+
+
+def normalize_ats_text(value: str) -> str:
+    """Normalize common ATS keyword casing and resume extraction glitches."""
+    replacements = {
+        "highquality": "high-quality",
+        "high quality": "high-quality",
+        "powerbi": "Power BI",
+    }
+    normalized = value
+    for source, target in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
+        normalized = re.sub(
+            rf"(?<![A-Za-z0-9]){re.escape(source)}(?![A-Za-z0-9])",
+            target,
+            normalized,
+            flags=re.I,
+        )
+    for key, label in sorted(CANONICAL_SKILL_LABELS.items(), key=lambda item: len(item[0]), reverse=True):
+        if key in {"c plus plus", "ci cd", "pl sql", "react js", "node js", "scikit learn"}:
+            continue
+        normalized = re.sub(
+            rf"(?<![A-Za-z0-9+#.-]){re.escape(key)}(?![A-Za-z0-9+#.-])",
+            label,
+            normalized,
+            flags=re.I,
+        )
+    normalized = re.sub(r"\bci\s*/?\s*cd\b", "CI/CD", normalized, flags=re.I)
+    normalized = re.sub(r"\bpl\s*/\s*sql\b", "PL/SQL", normalized, flags=re.I)
+    normalized = re.sub(r"\bnode\s*\.?\s*js\b", "Node.js", normalized, flags=re.I)
+    normalized = re.sub(r"\breact\s*\.?\s*js\b", "React.js", normalized, flags=re.I)
+    normalized = re.sub(r"\bscikit\s+learn\b", "scikit-learn", normalized, flags=re.I)
+    return normalized
 
 
 def _repair_spaced_glyphs(line: str) -> str:
@@ -177,12 +412,43 @@ def _repair_spaced_glyphs(line: str) -> str:
 
 
 def _contact_block(lines: list[str]) -> str:
-    kept = [
-        line for line in lines[:12]
-        if re.search(r"@|\b(?:phone|email|linkedin|github)\b|https?://|\+?\d[\d\s-]{7,}", line, flags=re.I)
-        or (line.isupper() and len(line.split()) <= 5 and not re.search(r"\b(?:education|skills|projects|experience)\b", line, flags=re.I))
-    ]
-    return "\n".join(dict.fromkeys(kept)).strip()
+    heading_keys = {_heading_key(alias) for names in SECTION_ALIASES.values() for alias in names}
+    name_candidates: list[str] = []
+    contact_values: list[str] = []
+    for index, line in enumerate(lines):
+        cleaned = line.strip()
+        if not cleaned or _heading_key(cleaned) in heading_keys:
+            continue
+        if index < 16 and _looks_like_name(cleaned):
+            name_candidates.append(cleaned)
+        if _contains_contact_value(cleaned):
+            contact_values.append(cleaned)
+    return "\n".join(dict.fromkeys([*name_candidates[:1], *contact_values])).strip()
+
+
+def _contains_contact_value(value: str) -> bool:
+    return bool(
+        re.search(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", value, flags=re.I)
+        or re.search(r"https?://|(?:www\.)?(?:linkedin\.com|github\.com)/", value, flags=re.I)
+        or any(_looks_like_phone_number(match.group(0)) for match in re.finditer(r"(?<!\d)\+?[\d][\d\s().-]{7,}\d(?!\d)", value))
+    )
+
+
+def _looks_like_phone_number(value: str) -> bool:
+    if re.fullmatch(r"\s*(?:19|20)\d{2}\s*(?:-|–|—|to)\s*(?:present|current|(?:19|20)\d{2})\s*", value, flags=re.I):
+        return False
+    digits = re.sub(r"\D", "", value)
+    return 10 <= len(digits) <= 15
+
+
+def _looks_like_name(value: str) -> bool:
+    if not value.isupper():
+        return False
+    if not (2 <= len(value.split()) <= 5 and len(value) <= 60):
+        return False
+    if re.search(r"@|https?://|linkedin|github|\d|\b(?:phone|email|contact|education|skills|projects|experience|summary|objective|certification|achievement)\b", value, flags=re.I):
+        return False
+    return all(part.replace("'", "").replace("-", "").isalpha() for part in value.split())
 
 
 def _recover_education(lines: list[str]) -> str:
@@ -238,8 +504,7 @@ def _heading_key(value: str) -> str:
 
 
 def extract_skills(text: str) -> tuple[str, ...]:
-    lower = text.lower()
-    found = [skill.title() for skill in sorted(KNOWN_SKILLS) if skill in lower]
+    found = [canonicalize_skill(skill) for skill in sorted(KNOWN_SKILLS) if _contains_term(text, skill)]
     sections = extract_sections(text)
     found.extend(_skills_from_explicit_section(sections.get("skills", "")))
     return tuple(dict.fromkeys(found))
@@ -248,19 +513,95 @@ def extract_skills(text: str) -> tuple[str, ...]:
 def _skills_from_explicit_section(text: str) -> list[str]:
     """Extract market-specific skills from an explicit skills section."""
     found: list[str] = []
-    for raw_line in text.splitlines():
-        line = re.sub(r"^[\s•▪●\uf0b7*\-]+", "", raw_line).strip()
+    for line in _skill_section_candidate_lines(text):
         if not line:
+            continue
+        if _is_generic_skill_label(line):
             continue
         if ":" in line:
             label, line = line.split(":", 1)
-            if 1 <= len(label.split()) <= 5:
-                found.append(label.strip())
+            if 1 <= len(label.split()) <= 5 and not _is_generic_skill_label(label):
+                found.append(canonicalize_skill(label))
         for value in re.split(r"\s*[•▪●|;,]\s*", line):
-            cleaned = value.strip(" .()")
-            if 2 <= len(cleaned) <= 80 and len(cleaned.split()) <= 8:
-                found.append(cleaned)
+            cleaned = _clean_skill_candidate(value)
+            if _is_skill_like_value(cleaned):
+                found.append(canonicalize_skill(cleaned))
     return found[:60]
+
+
+def _skill_section_candidate_lines(text: str) -> list[str]:
+    lines = [
+        re.sub(r"^[\s•▪●\uf0b7*\-]+", "", raw_line).strip()
+        for raw_line in text.splitlines()
+        if raw_line.strip()
+    ]
+    merged: list[str] = []
+    for line in lines:
+        cleaned = normalize_ats_text(line)
+        key = _skill_key(cleaned)
+        has_separator = bool(re.search(r"[:•▪●|;,]", cleaned))
+        if (
+            merged
+            and not has_separator
+            and key not in GENERIC_SKILL_LABELS
+            and len(cleaned.split()) <= 3
+            and not re.search(r"[.!?]$", merged[-1])
+        ):
+            merged[-1] = f"{merged[-1]} {cleaned}".strip()
+            continue
+        merged.append(cleaned)
+    return merged
+
+
+def _clean_skill_candidate(value: str) -> str:
+    cleaned = normalize_ats_text(value.strip(" .()"))
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if cleaned.count("(") > cleaned.count(")"):
+        cleaned = re.sub(r"\s*\([^)]*$", "", cleaned).strip()
+    return cleaned.strip(" .()")
+
+
+def _is_skill_like_value(value: str) -> bool:
+    if not value or _is_generic_skill_label(value):
+        return False
+    if len(value) > 70 or len(value.split()) > 7:
+        return False
+    key = _skill_key(value)
+    if key in CANONICAL_SKILL_LABELS or key in {_skill_key(skill) for skill in KNOWN_SKILLS}:
+        return True
+    if len(value.split()) == 1:
+        return bool(re.fullmatch(r"[A-Z0-9]{2,6}", value) or re.fullmatch(r"[A-Z][A-Za-z0-9.+#-]{1,18}", value) and value in {"Bloomberg", "FactSet", "Dealogic", "Euromonitor", "Gartner", "Factiva", "FinBERT", "DSPy", "UiPath", "Copilot", "Perplexity"})
+    return bool(re.search(r"\b(?:ai|ml|data|research|analysis|analytics|financial|finance|market|strategy|modelling|engineering|automation|intelligence)\b", value, flags=re.I))
+
+
+def canonicalize_skill(value: str) -> str:
+    cleaned = normalize_ats_text(value.strip(" .()"))
+    key = _skill_key(cleaned)
+    if key in CANONICAL_SKILL_LABELS:
+        return CANONICAL_SKILL_LABELS[key]
+    if cleaned.isupper() or re.search(r"[A-Z]{2,}|[+#/.-]", cleaned):
+        return cleaned
+    return " ".join(part.capitalize() if part.lower() not in {"and", "of", "for"} else part.lower() for part in cleaned.split())
+
+
+def _contains_term(text: str, term: str) -> bool:
+    haystack = " ".join(_skill_tokens(text))
+    needle = " ".join(_skill_tokens(term))
+    return bool(needle and f" {needle} " in f" {haystack} ")
+
+
+def _skill_tokens(value: str) -> list[str]:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    normalized = normalized.replace("c++", "c plus plus").replace("ci/cd", "ci cd").replace("pl/sql", "pl sql")
+    return re.findall(r"[a-z0-9]+", normalized)
+
+
+def _skill_key(value: str) -> str:
+    return " ".join(_skill_tokens(value))
+
+
+def _is_generic_skill_label(value: str) -> bool:
+    return _skill_key(value) in GENERIC_SKILL_LABELS
 
 
 def extract_roles(text: str) -> tuple[str, ...]:

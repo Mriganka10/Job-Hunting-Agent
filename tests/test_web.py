@@ -241,6 +241,7 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "Schedule Daily Run" in response.text
     assert "scheduler-status" in response.text
     assert "activeResult" in response.text
+    assert "function resultKey" in response.text
     assert "fetch('/api/dashboard')" in response.text
     assert "payload.latest_run?.payload" in response.text
     assert "function shouldRenderResult" in response.text
@@ -251,6 +252,9 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "Role &amp; Location" in response.text or "Role & Location" in response.text
     assert "job.match_score" in response.text
     assert "job.match_reasons" in response.text
+    assert "show-more-jobs" in response.text
+    assert "visibleJobCount" in response.text
+    assert "preserveJobCount" in response.text
     assert "/mock-interview" in response.text
     assert "Reusable Draft Message" in response.text
     assert "[Company Name]" in response.text
@@ -365,7 +369,7 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
         "Singapore": "en-SG-LunaNeural",
     }
     for region, voice_name in expected_neural_voices.items():
-        assert web_module._accent_for_region(region)["azure_voice"] == voice_name
+        assert web._accent_for_region(region)["azure_voice"] == voice_name
 
     complete = client.post(
         "/api/mock-interview/complete",

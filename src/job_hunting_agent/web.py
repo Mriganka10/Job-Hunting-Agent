@@ -2391,6 +2391,8 @@ def _page(user_email: str, profile: dict) -> str:
     .download-button { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 9px 12px; border-radius: 7px; background: var(--blue); color: #ffffff; text-decoration: none; font-weight: 850; box-shadow: 0 10px 24px rgba(23, 92, 211, 0.2); }
     .download-button.secondary-link { background: #394150; box-shadow: none; }
     .download-button:hover { filter: brightness(1.04); }
+    .show-more-row { display: flex; justify-content: center; margin-top: 12px; }
+    .show-more-row button { min-height: 38px; padding: 9px 14px; border: 1px solid #c9d8ef; background: #edf4ff; color: var(--blue); box-shadow: none; }
     .history-list { grid-column: 1 / -1; margin: 2px 0 0; padding: 8px; list-style: none; border: 1px solid #dfe6f0; border-radius: 6px; background: rgba(255, 255, 255, 0.82); }
     .history-list li { margin: 0; font-size: 11px; line-height: 1.4; }
     .result-section { margin-top: 18px; padding: 16px; border: 1px solid rgba(225, 232, 242, 0.92); border-radius: 8px; background: rgba(255, 255, 255, 0.84); box-shadow: 0 12px 32px rgba(29, 41, 57, 0.07); }
@@ -2547,7 +2549,9 @@ def _page(user_email: str, profile: dict) -> str:
     const schedulerStatus = document.getElementById('scheduler-status');
     const statusPill = document.querySelector('.status-pill');
     const timezoneInput = document.getElementById('daily_timezone');
-    let activeResult = { generatedAt: '', source: '' };
+    let activeResult = { key: '', generatedAt: '', source: '' };
+    let activePayload = null;
+    let visibleJobCount = 8;
     function enrichFormData() {
       timezoneInput.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
       const data = new FormData(form);
@@ -2628,9 +2632,14 @@ def _page(user_email: str, profile: dict) -> str:
       if (!current?.generated_at) return candidate;
       return candidate.generated_at > current.generated_at ? candidate : current;
     }
+    function resultKey(result) {
+      return result?.generated_at || result?.run_id || '';
+    }
     function shouldRenderResult(result) {
-      if (!result?.generated_at || result.generated_at === activeResult.generatedAt) return false;
-      return !activeResult.generatedAt || result.generated_at > activeResult.generatedAt;
+      const key = resultKey(result);
+      if (!key || key === activeResult.key) return false;
+      if (!activeResult.generatedAt || !result.generated_at) return true;
+      return result.generated_at > activeResult.generatedAt;
     }
     function renderScheduler(scheduler) {
       const running = scheduler && scheduler.running;
@@ -2652,8 +2661,13 @@ def _page(user_email: str, profile: dict) -> str:
         schedulerStatus.innerHTML += `<ul class="history-list"><li><strong>Latest ${escapeHtml(item.trigger)} run:</strong> ${escapeHtml(item.finished_at || '')} · ${escapeHtml(item.jobs ?? 'n/a')} jobs</li></ul>`;
       }
     }
-    function render(payload, source = 'manual') {
-      activeResult = { generatedAt: payload.generated_at || activeResult.generatedAt, source };
+    function render(payload, source = 'manual', options = {}) {
+      const key = resultKey(payload);
+      if (!options.preserveJobCount && key !== activeResult.key) {
+        visibleJobCount = 8;
+      }
+      activeResult = { key, generatedAt: payload.generated_at || activeResult.generatedAt, source };
+      activePayload = payload;
       const report = payload.ats_report;
       const appSummary = payload.application_summary || {};
       const resultLabel = source === 'scheduled'
@@ -2671,10 +2685,14 @@ def _page(user_email: str, profile: dict) -> str:
       `;
       const improvements = report.improvements.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
       const missing = report.missing_keywords.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
-      const jobs = payload.jobs.slice(0, 12).map((job) => {
+      const jobLimit = Math.min(visibleJobCount, payload.jobs.length);
+      const jobs = payload.jobs.slice(0, jobLimit).map((job) => {
         const reasons = (job.match_reasons || []).map((reason) => `<span class="status-pill">${escapeHtml(reason)}</span>`).join(' ');
         return `<tr><td>${escapeHtml(job.portal)}</td><td><strong>${escapeHtml(job.title)}</strong><br><span class="muted">${escapeHtml(job.location || '')}</span></td><td>${escapeHtml(job.company)}</td><td><strong>${escapeHtml(job.match_score || 0)}%</strong><br>${reasons}</td><td><a href="${job.url}" target="_blank" rel="noreferrer">Open</a></td></tr>`;
       }).join('');
+      const showMoreJobs = payload.jobs.length > jobLimit
+        ? `<div class="show-more-row"><button id="show-more-jobs" type="button">Show more jobs (${payload.jobs.length - jobLimit} more)</button></div>`
+        : '';
       const draftTemplate = buildDraftTemplate(payload.applications);
       details.innerHTML = `
         <section class="result-section">
@@ -2689,6 +2707,7 @@ def _page(user_email: str, profile: dict) -> str:
           <h3>Job Leads</h3>
           <p class="muted">Ranked using target roles, combined profile/resume skills, location, experience, resume summary, and the optional job description.</p>
           <div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role & Location</th><th>Company</th><th>Match</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>
+          ${showMoreJobs}
         </section>
         <section class="result-section">
           <h3>Reusable Draft Message</h3>
@@ -2737,6 +2756,12 @@ def _page(user_email: str, profile: dict) -> str:
       `;
     }
     document.addEventListener('click', async (event) => {
+      const showMoreButton = event.target.closest('#show-more-jobs');
+      if (showMoreButton) {
+        visibleJobCount += 8;
+        if (activePayload) render(activePayload, activeResult.source, { preserveJobCount: true });
+        return;
+      }
       const button = event.target.closest('.copy-draft');
       if (!button) return;
       const card = button.closest('.draft-card');

@@ -4,8 +4,11 @@ import re
 from pathlib import Path
 
 from .models import AtsReport, CandidateProfile, Resume
+from .resume import canonicalize_skill, normalize_ats_text
 
 ACTION_VERB_REPLACEMENTS = {
+    "building": "Built",
+    "conducting": "Conducted",
     "employing": "Employed",
     "utilizing": "Utilized",
     "contributing": "Contributed",
@@ -35,48 +38,48 @@ def _resume_sections(resume: Resume, report: AtsReport, profile: CandidateProfil
     target_roles = _ordered_terms((*profile.target_roles, *resume.inferred_roles))
     # Never inject a missing ATS keyword unless it is already supported by the
     # candidate profile or resume evidence.
-    skills = _ordered_terms((*profile.skills, *resume.inferred_skills))
+    skills = _ordered_skills((*profile.skills, *resume.inferred_skills))
     parsed_sections = resume.sections or {}
     experience_source = (
         f"EXPERIENCE\n{parsed_sections['experience']}"
         if parsed_sections.get("experience")
         else (resume.text if _has_experience_heading(resume.text) else "")
     )
-    experience_lines = _experience_items(experience_source, target_roles)
-    education_lines = _education_section_items(parsed_sections.get("education", "")) or _education_lines(resume.text)
-    project_lines = _list_section_items(parsed_sections.get("projects", ""))
-    certifications = _list_section_items(parsed_sections.get("certifications", "")) or _certification_lines(resume.text)
-    achievements = _list_section_items(parsed_sections.get("achievements", "")) or _recognition_lines(resume.text)
+    experience_lines = _sanitize_experience_items(_experience_items(experience_source, target_roles))
+    experience_bullets = [item.removeprefix("BULLET::") for item in experience_lines if item.startswith("BULLET::")]
+    education_lines = _sanitize_section_items(
+        _education_section_items(parsed_sections.get("education", "")) or _education_lines(resume.text),
+        "EDUCATION",
+    )
+    project_lines = _sanitize_section_items(_project_section_items(parsed_sections.get("projects", "")), "PROJECTS")
+    certifications = _sanitize_section_items(
+        _list_section_items(parsed_sections.get("certifications", "")) or _certification_lines(resume.text),
+        "CERTIFICATIONS",
+    )
+    achievements = _sanitize_section_items(
+        _list_section_items(parsed_sections.get("achievements", "")) or _achievement_lines(resume.text, experience_bullets),
+        "ACHIEVEMENTS",
+    )
     languages = _language_lines(resume.text)
     technical_skill_lines = _skill_section_lines(parsed_sections.get("skills", ""), skills)
     original_summary = (resume.sections or {}).get("summary", "").strip()
-    year_text = _experience_years(resume.text)
-    summary_items = _list_section_items(original_summary) if original_summary else []
-    if achievements:
-        summary_items = [
-            item for item in summary_items
-            if not re.search(r"\b(?:award|batch topper|honou?r|recogniz(?:ed|ation))\b", item, flags=re.I)
-        ]
-    generated_summary = (
-        f"{profile.name or 'Candidate'} targets {', '.join(target_roles[:3]) if target_roles else 'technology roles'}"
-        f" with {year_text}experience and demonstrated skills in {', '.join(skills[:8]) if skills else 'the areas documented in the uploaded resume'}."
-    )
+    summary_items = _summary_section_items(original_summary, resume, profile, target_roles, skills, achievements, experience_bullets)
     contact = _contact_line(profile, parsed_sections.get("contact", ""))
 
     languages = _language_lines(parsed_sections.get("languages", "")) or languages
-    publications = _section_items(parsed_sections.get("publications", ""), join_wrapped=True)
-    volunteering = _section_items(parsed_sections.get("volunteering", ""), join_wrapped=True)
-    interests = _section_items(parsed_sections.get("interests", ""), join_wrapped=True)
+    publications = _sanitize_section_items(_section_items(parsed_sections.get("publications", ""), join_wrapped=True), "PUBLICATIONS")
+    volunteering = _sanitize_section_items(_section_items(parsed_sections.get("volunteering", ""), join_wrapped=True), "VOLUNTEERING")
+    interests = _sanitize_section_items(_section_items(parsed_sections.get("interests", ""), join_wrapped=True), "INTERESTS")
     teaching_vision = _prose_section_items(parsed_sections.get("teaching_vision", ""))
-    teaching_subjects = _list_section_items(parsed_sections.get("teaching_subjects", ""))
-    core_terms = _compact_term_items(parsed_sections.get("core_competencies", ""))
-    soft_terms = _compact_term_items(parsed_sections.get("soft_skills", "")) or _soft_skill_lines(resume.text)
-    core_competencies = [", ".join(core_terms)] if core_terms else []
-    soft_skills = [", ".join(soft_terms)] if soft_terms else []
+    teaching_subjects = _sanitize_section_items(_list_section_items(parsed_sections.get("teaching_subjects", "")), "SUBJECTS")
+    core_terms = _high_signal_terms(_compact_term_items(parsed_sections.get("core_competencies", "")))
+    soft_terms = _high_signal_terms(_compact_term_items(parsed_sections.get("soft_skills", "")) or _soft_skill_lines(resume.text), soft=True)
+    core_competencies = [", ".join(core_terms)] if len(core_terms) >= 3 else []
+    soft_skills = [", ".join(soft_terms)] if len(soft_terms) >= 3 else []
 
     return [
         ("CONTACT", [contact] if contact else []),
-        ("PROFESSIONAL SUMMARY", summary_items or [generated_summary]),
+        ("PROFESSIONAL SUMMARY", summary_items),
         ("TEACHING VISION", teaching_vision),
         ("SUBJECTS AVAILABLE TO TEACH", teaching_subjects),
         ("CORE COMPETENCIES", core_competencies),
@@ -250,6 +253,321 @@ def _add_labelled_text(paragraph, text: str, *, bold_dash_prefix: bool = False) 
     paragraph.add_run((" - " if separator == " - " else " ") + suffix.strip())
 
 
+def _summary_section_items(
+    original: str,
+    resume: Resume,
+    profile: CandidateProfile,
+    target_roles: list[str],
+    skills: list[str],
+    achievements: list[str],
+    experience_bullets: list[str],
+) -> list[str]:
+    role = target_roles[0] if target_roles else _role_from_text(resume.text)
+    role = role or "Technology professional"
+    summary_skills = _summary_skill_terms(skills)
+    skill_text = _join_terms(summary_skills)
+    experience_phrase = _experience_phrase(resume.text, profile.experience_years)
+    focus_terms = _non_overlapping_focus_terms(_domain_focus_terms(resume.text, skills, role, summary_skills), summary_skills)
+    measurable = _measurable_summary_evidence([*achievements, *experience_bullets])
+
+    clauses: list[str] = []
+    if skill_text:
+        clauses.append(f"{role} with {experience_phrase} experience in {skill_text}")
+    else:
+        clauses.append(f"{role} with {experience_phrase} experience across the documented resume scope")
+    if focus_terms:
+        clauses.append(f"focused on {', '.join(focus_terms[:4])}")
+    if measurable:
+        clauses.append(measurable)
+    summary = ". ".join(_capitalize_sentence(_clean_sentence(clause).rstrip(".")) for clause in clauses if clause).strip()
+    if summary:
+        summary += "."
+
+    source_sentence = _best_original_summary_sentence(original, target_roles, skills)
+    if source_sentence and len(summary.split()) < 22:
+        summary = f"{summary.rstrip('.')} with background in {source_sentence.rstrip('.')}."
+    return [_trim_words(summary, 86)]
+
+
+def _summary_skill_terms(skills: list[str]) -> list[str]:
+    strong_markers = re.compile(
+        r"\b(?:ai|ml|machine learning|deep learning|data|spark|sql|python|aws|azure|cloud|"
+        r"financial|finance|investment|market|research|modelling|strategy|analytics|prompt|automation)\b",
+        flags=re.I,
+    )
+    weak_when_crowded = {"Excel", "Matplotlib", "NumPy", "Pandas", "Jupyter Notebook"}
+    strong = [skill for skill in skills if strong_markers.search(skill)]
+    selected = strong or skills
+    if len(selected) > 4:
+        selected = [skill for skill in selected if skill not in weak_when_crowded] or selected
+    return selected[:4]
+
+
+def _best_original_summary_sentence(original: str, target_roles: list[str], skills: list[str]) -> str:
+    if not original.strip():
+        return ""
+    candidates = [
+        _clean_sentence(item)
+        for item in re.split(r"(?<=[.!?])\s+|[\n•▪●]+", original)
+        if 8 <= len(_clean_sentence(item).split()) <= 28
+    ]
+    signals = [term.casefold() for term in (*target_roles, *skills[:8]) if term]
+    generic = re.compile(r"\b(?:hardworking|dynamic|self motivated|challenging environment|organization growth|seeking opportunity)\b", flags=re.I)
+    ranked = sorted(
+        (item for item in candidates if not generic.search(item)),
+        key=lambda item: sum(signal in item.casefold() for signal in signals),
+        reverse=True,
+    )
+    if not ranked or not sum(signal in ranked[0].casefold() for signal in signals):
+        return ""
+    if re.search(r"\b(?:navigating the intricate landscape|organization growth|challenging environment)\b", ranked[0], flags=re.I):
+        return ""
+    return ranked[0]
+
+
+def _role_from_text(text: str) -> str:
+    match = re.search(
+        r"\b(?:data engineer|machine learning engineer|software engineer|python developer|backend developer|"
+        r"full stack developer|data analyst|data scientist|business analyst|consultant|manager|faculty|professor)\b",
+        text,
+        flags=re.I,
+    )
+    return match.group(0).title() if match else ""
+
+
+def _experience_phrase(text: str, configured_years: float) -> str:
+    match = re.search(r"\b(\d+(?:\.\d+)?\+?)\s+years?\b", text, flags=re.I)
+    if match:
+        return f"{match.group(1)} years of"
+    if configured_years:
+        if 0 < configured_years < 1:
+            return f"{round(configured_years * 12):g} months of"
+        return f"{configured_years:g} years of"
+    return "hands-on"
+
+
+def _domain_focus_terms(text: str, skills: list[str], role: str = "", summary_skills: list[str] | None = None) -> list[str]:
+    lower = f"{text} {' '.join(skills)}".casefold()
+    candidates = (
+        ("teaching and curriculum delivery", ("adjunct faculty", "faculty", "teaching", "students", "subjects available")),
+        ("investment research", ("investment banking", "m&a", "capital issuance", "valuation", "pitchbook")),
+        ("financial modelling", ("financial modelling", "financial models", "finance", "valuation")),
+        ("market research", ("market research", "market sizing", "competitive intelligence", "secondary research")),
+        ("AI automation", ("generative ai", "agentic ai", "prompt engineering", "rpa", "uipath")),
+        ("data pipelines", ("pipeline", "etl", "spark", "airflow", "databricks")),
+        ("analytics reporting", ("dashboard", "report", "analytics", "power bi", "tableau")),
+        ("backend services", ("api", "fastapi", "django", "flask", "microservice")),
+        ("cloud deployment", ("aws", "azure", "gcp", "terraform", "docker", "kubernetes")),
+        ("machine learning", ("machine learning", "model", "tensorflow", "pytorch", "scikit-learn")),
+        ("stakeholder delivery", ("stakeholder", "client", "vendor", "business user")),
+    )
+    terms = [label for label, markers in candidates if any(_contains_focus_marker(lower, marker) for marker in markers)]
+    profile_skill_text = " ".join(summary_skills or skills[:6]).casefold()
+    technical_target = bool(re.search(r"\b(?:engineer|developer|scientist|data analyst|ai|ml)\b", role, flags=re.I))
+    finance_supported = bool(re.search(r"\b(?:financial|finance|investment|market|m&a|valuation|research)\b", profile_skill_text))
+    if technical_target and not finance_supported:
+        terms = [term for term in terms if term not in {"investment research", "financial modelling", "market research"}]
+    return terms
+
+
+def _non_overlapping_focus_terms(focus_terms: list[str], summary_skills: list[str]) -> list[str]:
+    skill_keys = [skill.casefold() for skill in summary_skills]
+    unique: list[str] = []
+    seen: set[str] = set()
+    for term in focus_terms:
+        key = term.casefold()
+        if any(key == skill or key in skill or skill in key for skill in skill_keys):
+            continue
+        if key not in seen:
+            seen.add(key)
+            unique.append(term)
+    return unique
+
+
+def _contains_focus_marker(text: str, marker: str) -> bool:
+    if re.search(r"[^a-z0-9 ]", marker, flags=re.I):
+        return marker.casefold() in text
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(marker.casefold())}(?![a-z0-9])", text))
+
+
+def _measurable_summary_evidence(lines: list[str]) -> str:
+    ranked = sorted(lines, key=_summary_metric_rank, reverse=True)
+    for line in ranked:
+        cleaned = _clean_sentence(line)
+        metric = re.search(
+            r"\b\d+(?:\.\d+)?%|\b\d+\+|\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:users|records|hours|days|months|projects|clients|files|gb|tb|sla|member)\b",
+            cleaned,
+            flags=re.I,
+        )
+        if metric:
+            concise = _trim_words(cleaned, 22).rstrip(".")
+            return f"supported by measurable evidence such as {concise}"
+    return ""
+
+
+def _summary_metric_rank(line: str) -> int:
+    cleaned = _clean_sentence(line)
+    score = 0
+    if re.search(r"\d+(?:\.\d+)?%", cleaned):
+        score += 4
+    if re.search(r"\b\d+(?:,\d{3})*\+?\s*(?:hours|users|records|clients|member|projects)\b", cleaned, flags=re.I):
+        score += 3
+    if re.search(r"\b(?:improved|reduced|increased|achieved|saved|led|managed|developed)\b", cleaned, flags=re.I):
+        score += 2
+    if re.search(r"\b\d+\+?\s+years?\b", cleaned, flags=re.I):
+        score -= 2
+    return score
+
+
+def _join_terms(terms: list[str]) -> str:
+    if not terms:
+        return ""
+    if len(terms) == 1:
+        return terms[0]
+    return ", ".join(terms[:-1]) + f", and {terms[-1]}"
+
+
+def _trim_words(value: str, maximum: int) -> str:
+    words = value.split()
+    if len(words) <= maximum:
+        return value
+    return " ".join(words[:maximum]).rstrip(" ,;:") + "."
+
+
+def _sanitize_experience_items(items: list[str]) -> list[str]:
+    sanitized: list[str] = []
+    for item in items:
+        prefix = ""
+        value = item
+        for candidate in ("ROLE::", "META::", "BULLET::"):
+            if item.startswith(candidate):
+                prefix = candidate
+                value = item.removeprefix(candidate)
+                break
+        cleaned = _clean_sentence(value)
+        if not cleaned or _is_cross_section_heading(cleaned):
+            continue
+        if prefix == "BULLET::":
+            cleaned = _strengthen_action_verb(cleaned)
+            if _is_cross_section_heading(cleaned) or _looks_like_contact_or_address(cleaned):
+                continue
+        sanitized.append(f"{prefix}{cleaned}" if prefix else cleaned)
+    return _dedupe_prefixed_lines(sanitized)
+
+
+def _sanitize_section_items(items: list[str], heading: str) -> list[str]:
+    sanitized: list[str] = []
+    for item in items:
+        cleaned = _clean_sentence(item)
+        if not cleaned or _is_cross_section_heading(cleaned):
+            continue
+        if heading != "CONTACT" and _looks_like_contact_or_address(cleaned):
+            continue
+        if heading == "EDUCATION" and _looks_like_work_timeline(cleaned):
+            continue
+        if heading in {"ACHIEVEMENTS", "CERTIFICATIONS"} and _is_resume_metadata(cleaned):
+            continue
+        sanitized.append(cleaned)
+    if heading == "EDUCATION":
+        sanitized = _dedupe_secondary_education_labels(sanitized)
+    return _dedupe_lines(sanitized)
+
+
+def _is_cross_section_heading(value: str) -> bool:
+    key = re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+    return key in {
+        "academic credentials",
+        "academic qualifications",
+        "achievements",
+        "certification",
+        "certifications",
+        "contact",
+        "contact details",
+        "core competencies",
+        "education",
+        "interests",
+        "languages",
+        "personal details",
+        "professional experience",
+        "professional summary",
+        "profile summary",
+        "projects",
+        "publications",
+        "skills",
+        "soft skills",
+        "technical skills",
+        "volunteer experience",
+        "work experience",
+    }
+
+
+def _looks_like_contact_or_address(value: str) -> bool:
+    return bool(
+        re.search(r"@|https?://|linkedin\.com|github\.com|^\s*address\s*:", value, flags=re.I)
+        or re.fullmatch(r"\+?[\d\s().-]{8,}", value)
+    )
+
+
+def _looks_like_work_timeline(value: str) -> bool:
+    return bool(
+        "|" in value
+        and _looks_like_date_range(value)
+        and re.search(r"\b(?:engineer|developer|analyst|consultant|associate|officer|manager|lead|intern|pvt|ltd|limited|inc|corp|services|technologies)\b", value, flags=re.I)
+    )
+
+
+def _dedupe_secondary_education_labels(items: list[str]) -> list[str]:
+    high_school_items: list[tuple[int, int]] = []
+    for index, item in enumerate(items):
+        if not re.search(r"\bhigher secondary education\b", item, flags=re.I):
+            continue
+        year_match = re.search(r"\b(19|20)\d{2}\b", item)
+        high_school_items.append((index, int(year_match.group(0)) if year_match else 0))
+    if len(high_school_items) <= 1:
+        return items
+    latest_index = max(high_school_items, key=lambda item: item[1])[0]
+    corrected = list(items)
+    for index, _ in high_school_items:
+        if index != latest_index:
+            corrected[index] = re.sub(r"\bHigher Secondary Education\b", "Secondary Education", corrected[index], flags=re.I)
+    return corrected
+
+
+def _high_signal_terms(terms: list[str], *, soft: bool = False) -> list[str]:
+    generic = re.compile(
+        r"\b(?:hardworking|punctual|honest|positive attitude|quick learner|self motivated|result oriented|"
+        r"responsible|flexible|dedicated|sincere|good communication|good knowledge|basic knowledge|"
+        r"domain expertise|technical skills|core skills|tools|technology|methodologies|"
+        r"strategic planning|leadership|solutions|software development lifecycle|quality assurance|"
+        r"quality control|project management|stakeholder engagements?)\b",
+        flags=re.I,
+    )
+    allowed_soft = {
+        "communication",
+        "leadership",
+        "stakeholder management",
+        "people management",
+        "problem solving",
+        "collaboration",
+        "mentoring",
+        "decision-making",
+        "time management",
+        "critical thinking",
+        "negotiation",
+        "planning",
+    }
+    cleaned: list[str] = []
+    for term in terms:
+        value = _clean_sentence(term)
+        key = value.casefold()
+        if not value or len(value) > 70 or generic.search(value):
+            continue
+        if soft and key not in allowed_soft:
+            continue
+        cleaned.append(canonicalize_skill(value) if not soft else value.title())
+    return _dedupe_lines(cleaned)[:10]
+
+
 def _experience_items(text: str, target_roles: list[str]) -> list[str]:
     if not text.strip():
         return []
@@ -298,6 +616,9 @@ def _structured_experience_entries(text: str) -> list[dict[str, str | list[str]]
             continue
         if lower in {"personal details"}:
             break
+
+        if _merge_wrapped_experience_meta(current, line):
+            continue
 
         timeline_match = _experience_timeline_match(line)
         if not timeline_match:
@@ -456,10 +777,37 @@ def _role_first_timeline_match(line: str) -> dict[str, str] | None:
 def _find_date_range(value: str):
     month = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
     return re.search(
-        rf"\b(?:{month}\s+)?\d{{4}}\s*(?:-|–|to)\s*(?:present|current|(?:{month}\s+)?\d{{4}})\b",
+        rf"\b(?:{month}\s+)?\d{{4}}\s*(?:-|–|—|to)?\s*(?:present|current|(?:{month}\s+)?\d{{4}})\b",
         value,
         flags=re.I,
     )
+
+
+def _merge_wrapped_experience_meta(current: dict[str, str | list[str]] | None, line: str) -> bool:
+    if not current or current.get("dates"):
+        return False
+    if not current.get("title") and not current.get("company"):
+        return False
+    if current.get("title") and not current.get("company") and "|" in line:
+        timeline = _role_first_timeline_match(_clean_sentence(f"{current['title']} {line}"))
+        if timeline:
+            current["title"] = timeline["title"]
+            current["company"] = timeline["company"]
+            current["location"] = timeline["location"]
+            current["dates"] = timeline["dates"]
+            return True
+    combined = _clean_sentence(" ".join(part for part in (str(current.get("company", "")), line) if part))
+    date_match = _find_date_range(combined)
+    if date_match and (_looks_like_company_meta(combined) or current.get("company")):
+        company = _clean_sentence(combined[:date_match.start()]).strip(" (|,-")
+        if company:
+            current["company"] = company
+        current["dates"] = _clean_sentence(date_match.group(0))
+        return True
+    if current.get("company") and _looks_like_company_meta(line):
+        current["company"] = combined
+        return True
+    return False
 
 
 def _ensure_entry(
@@ -483,7 +831,6 @@ def _append_experience_bullet(entry: dict[str, str | list[str]], line: str) -> N
         and (
             line[:1].islower()
             or line.lower().startswith(("and ", "or ", "within ", "requirements", "projects", "banking ", "creation "))
-            or len(str(bullets[-1])) < 80
             or not previous.endswith((".", ":", ";"))
         )
     )
@@ -516,6 +863,9 @@ def _resume_lines(text: str) -> list[str]:
     for raw_line in normalized.splitlines():
         cleaned = _clean_sentence(raw_line)
         if not cleaned:
+            continue
+        if cleaned in {".", ";", ":"} and lines:
+            lines[-1] = f"{lines[-1]}{cleaned}"
             continue
         if raw_line.lstrip().startswith("•"):
             cleaned = f"BULLET_LINE::{cleaned}"
@@ -564,6 +914,48 @@ def _list_section_items(text: str) -> list[str]:
     return _dedupe_lines([item for item in items if not _is_section_heading(item)])[:16]
 
 
+def _project_section_items(text: str) -> list[str]:
+    """Split project sections even when PDF extraction removed bullet markers."""
+    lines = [_clean_sentence(line) for line in text.splitlines() if _clean_sentence(line)]
+    if not lines:
+        return []
+    items: list[str] = []
+    current = ""
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            items.append(current)
+            current = ""
+
+    for line in lines:
+        starts_project = _looks_like_project_start(line)
+        if starts_project:
+            flush()
+            current = line
+        elif current:
+            current = _clean_sentence(f"{current} {line}")
+        else:
+            current = line
+    flush()
+    if len(items) <= 1:
+        return _list_section_items(text)
+    return _dedupe_lines([item for item in items if not _is_section_heading(item)])[:12]
+
+
+def _looks_like_project_start(line: str) -> bool:
+    if re.match(r"^[•▪●\uf0b7*\-]\s*", line):
+        return True
+    if " - " not in line:
+        return False
+    title, description = line.split(" - ", 1)
+    if len(title.split()) > 10 or len(title) > 90:
+        return False
+    if re.search(r"\b(?:build|built|develop|designed|aims?|analy[sz]es|optimizing|predict|recommend|cluster|classif|framework|system|model|project|using)\b", description, flags=re.I):
+        return True
+    return bool(re.search(r"\((?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|q[1-4]|\d{4})", description, flags=re.I))
+
+
 def _prose_section_items(text: str) -> list[str]:
     """Join PDF line wraps while retaining genuine paragraph boundaries."""
     paragraphs: list[str] = []
@@ -599,40 +991,139 @@ def _compact_term_items(text: str) -> list[str]:
 
 def _education_section_items(text: str) -> list[str]:
     lines = [_clean_sentence(line) for line in text.splitlines() if _clean_sentence(line)]
-    cleaned: list[str] = []
+    parallel_entries = _parallel_education_entries(lines)
+    if parallel_entries:
+        return parallel_entries
+    entries: list[str] = []
+    current = ""
     education_signal = re.compile(
-        r"\b(?:pursuing|education|b\.?tech|bachelor|master|mba|ph\.?d|diploma|degree|"
+        r"\b(?:pursuing|education|b\.?tech|m\.?tech|bachelor|master|mba|ph\.?d|diploma|degree|"
         r"b\.?sc|m\.?sc|b\.?a|m\.?a|executive programme?|executive program|"
-        r"university|college|school|institute|academy|iim|iit|cgpa|gpa|grade|marks?|percentage)\b",
+        r"university|college|school|institute|academy|iim|iit|cgpa|gpa|grade|marks?|percentage|"
+        r"secondary|higher secondary|senior secondary|matriculation|icse|cbse|isc)\b",
         flags=re.I,
     )
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            entries.append(_clean_sentence(current))
+            current = ""
+
     for line in lines:
-        if "|" in line and _looks_like_date_range(line) and re.search(
-            r"\b(?:engineer|developer|analyst|consultant|associate|officer|manager|lead|intern|"
-            r"pvt|ltd|limited|inc|corp|services|technologies)\b",
-            line,
-            flags=re.I,
-        ):
+        if _looks_like_work_timeline(line):
             break
-        if re.fullmatch(r"t\s*h", line, flags=re.I) or "|" in line:
+        if re.fullmatch(r"t\s*h", line, flags=re.I):
+            continue
+        if "|" in line and not re.search(r"\b(?:university|college|school|institute|academy|iim|iit|icse|cbse|isc)\b", line, flags=re.I):
             continue
         starts_entry = bool(
             re.match(r"^(?:19|20)\d{2}\s*:", line)
             or re.match(
                 r"^(?:pursuing|currently|executive programme?|executive program|mba\b|ph\.?d\b|"
-                r"b\.?tech\b|m\.?tech\b|b\.?sc\b|m\.?sc\b|bachelor\b|master\b|diploma\b)",
+                r"b\.?tech\b|m\.?tech\b|b\.?sc\b|m\.?sc\b|bachelor\b|master\b|diploma\b|"
+                r"higher secondary\b|secondary education\b|senior secondary\b|matriculation\b)",
                 line,
                 flags=re.I,
             )
         )
         has_signal = bool(education_signal.search(line))
         if starts_entry:
-            cleaned.append(line)
-        elif cleaned and (has_signal or len(line) <= 80):
-            cleaned[-1] = _clean_sentence(f"{cleaned[-1]} {line}")
+            flush()
+            current = line
+        elif current and (has_signal or len(line) <= 90):
+            current = _clean_sentence(f"{current} {line}")
         elif has_signal:
-            cleaned.append(line)
-    return _dedupe_lines(cleaned)[:10]
+            flush()
+            current = line
+    flush()
+    return _dedupe_secondary_education_labels(_dedupe_lines(entries))[:10]
+
+
+def _parallel_education_entries(lines: list[str]) -> list[str]:
+    credential_indexes = [
+        index for index, line in enumerate(lines)
+        if _looks_like_education_credential(line)
+    ]
+    if len(credential_indexes) < 2 or credential_indexes[0] <= 2:
+        return []
+    dates = [line for line in lines[:credential_indexes[0]] if _is_standalone_education_date(line)]
+    metrics = _education_metrics(lines[:credential_indexes[0]])
+    if not dates:
+        return []
+    entries: list[str] = []
+    for position, start in enumerate(credential_indexes):
+        end = credential_indexes[position + 1] if position + 1 < len(credential_indexes) else len(lines)
+        credential = lines[start]
+        details = [
+            line for line in lines[start + 1:end]
+            if not _is_isolated_ordinal(line)
+            and not _is_standalone_education_date(line)
+            and not re.search(r"^(?:marks?|cgpa|gpa)\b", line, flags=re.I)
+        ]
+        parts = []
+        if position < len(dates):
+            parts.append(f"{dates[position]}:")
+        parts.append(credential)
+        if details:
+            parts.append("- " + _clean_sentence(" ".join(details)))
+        if position < len(metrics):
+            parts.append(f"({metrics[position]})")
+        entries.append(_clean_sentence(" ".join(parts)))
+    return _dedupe_secondary_education_labels(_dedupe_lines(entries))[:10]
+
+
+def _looks_like_education_credential(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:b\.?tech|m\.?tech|bachelor|master|mba|ph\.?d|diploma|b\.?sc|m\.?sc|"
+            r"higher secondary|senior secondary|secondary\s*\(?x\)?|class\s*(?:x|xii|10|12))\b",
+            line,
+            flags=re.I,
+        )
+    )
+
+
+def _is_standalone_education_date(line: str) -> bool:
+    return bool(
+        re.fullmatch(r"(?:19|20)\d{2}\s*(?:-|–|—|to)\s*(?:present|current|(?:19|20)\d{2})", line, flags=re.I)
+        or re.fullmatch(r"(?:19|20)\d{2}", line)
+    )
+
+
+def _education_metrics(lines: list[str]) -> list[str]:
+    metrics: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if re.search(r"\bcgpa\b", line, flags=re.I):
+            value = line
+            if index + 1 < len(lines) and not _is_standalone_education_date(lines[index + 1]):
+                value = _clean_sentence(f"{value} {lines[index + 1]}")
+                index += 1
+            if index + 1 < len(lines) and _is_isolated_ordinal(lines[index + 1]):
+                value = _clean_sentence(f"{value}{lines[index + 1]}")
+                index += 1
+            metrics.append(_repair_ordinal_metric(value))
+        elif re.search(r"\bmarks?\b|\bpercentage\b", line, flags=re.I):
+            value = line
+            if index + 1 < len(lines) and re.search(r"\d+(?:\.\d+)?\s*%", lines[index + 1]):
+                value = _clean_sentence(f"{value} {lines[index + 1]}")
+                index += 1
+            metrics.append(value)
+        index += 1
+    return metrics
+
+
+def _repair_ordinal_metric(value: str) -> str:
+    cleaned = _clean_sentence(value)
+    cleaned = re.sub(r"\b(\d+)\s+(?:Semester\))\s*(st|nd|rd|th)\b", r"\1\2 Semester)", cleaned, flags=re.I)
+    cleaned = re.sub(r"\b(\d+)\s*(st|nd|rd|th)\s+Semester\b", r"\1\2 Semester", cleaned, flags=re.I)
+    return cleaned
+
+
+def _is_isolated_ordinal(line: str) -> bool:
+    return bool(re.fullmatch(r"(?:st|nd|rd|th|t\s*h)", line, flags=re.I))
 
 
 def _soft_skill_lines(text: str) -> list[str]:
@@ -684,10 +1175,9 @@ def _split_company_meta(line: str) -> tuple[str, str]:
 
 
 def _looks_like_date_range(line: str) -> bool:
-    month = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
     return bool(
-        re.search(rf"\b(?:{month})?\s*\d{{4}}\s*(?:-|–|to)\s*(?:present|current|(?:{month})?\s*\d{{4}})\b", line, flags=re.I)
-        or re.search(r"\b\d{4}\s*(?:-|–|to)\s*(?:present|current|\d{4})\b", line, flags=re.I)
+        _find_date_range(line)
+        or re.search(r"\b\d{4}\s*(?:-|–|—|to)\s*(?:present|current|\d{4})\b", line, flags=re.I)
     )
 
 
@@ -854,9 +1344,9 @@ def _technical_skill_lines(skills: list[str]) -> list[str]:
                 matched.append(skill)
                 remaining.remove(skill)
         if matched:
-            lines.append(f"{label}: {', '.join(_ordered_terms(tuple(matched)))}")
+            lines.append(f"{label}: {', '.join(_ordered_skills(tuple(matched)))}")
     if remaining:
-        lines.append(f"Additional Skills: {', '.join(_ordered_terms(tuple(remaining[:10])))}")
+        lines.append(f"Additional Skills: {', '.join(_ordered_skills(tuple(remaining[:10])))}")
     return lines[:7]
 
 
@@ -864,9 +1354,7 @@ def _skill_section_lines(original: str, inferred: list[str]) -> list[str]:
     """Preserve uploaded skill labels and keywords, then add only supported omissions."""
     if not original.strip():
         return _technical_skill_lines(inferred)
-    original_lines = _categorized_skill_lines(original) or _list_section_items(original) or _dedupe_lines(
-        [_clean_sentence(line) for line in original.splitlines() if _clean_sentence(line)]
-    )
+    original_lines = _categorized_skill_lines(original) or _skill_raw_lines(original)
     preserved: list[str] = []
     for line in original_lines:
         if _is_section_heading(line):
@@ -877,13 +1365,78 @@ def _skill_section_lines(original: str, inferred: list[str]) -> list[str]:
         cleaned = re.sub(r"\s*[|;•▪●]\s*", ", ", line)
         cleaned = re.sub(r",\s*,+", ", ", cleaned).strip(" ,")
         if cleaned:
-            preserved.append(cleaned)
+            preserved.append(_normalize_skill_line(cleaned))
 
     searchable = " ".join(preserved).casefold()
-    additions = [skill for skill in inferred if skill.casefold() not in searchable]
+    additions = [skill for skill in inferred if canonicalize_skill(skill).casefold() not in searchable]
     if additions:
-        preserved.append(f"Additional Skills: {', '.join(_ordered_terms(tuple(additions)))}")
+        preserved.append(f"Additional Skills: {', '.join(_ordered_skills(tuple(additions)))}")
     return _dedupe_lines(preserved)[:14] if preserved else _technical_skill_lines(inferred)
+
+
+def _skill_raw_lines(text: str) -> list[str]:
+    return _dedupe_lines(
+        [
+            _clean_sentence(re.sub(r"^[\s•▪●\uf0b7*\-]+", "", line))
+            for line in text.splitlines()
+            if _clean_sentence(re.sub(r"^[\s•▪●\uf0b7*\-]+", "", line))
+        ]
+    )
+
+
+def _normalize_skill_line(line: str) -> str:
+    cleaned = normalize_ats_text(_clean_sentence(line))
+    if ":" in cleaned:
+        label, values = cleaned.split(":", 1)
+        terms = _split_skill_terms(values)
+        if terms:
+            return f"{_clean_skill_label(label)}: {', '.join(_ordered_skills(tuple(terms)))}"
+        return f"{_clean_skill_label(label)}: {values.strip()}"
+    terms = _split_skill_terms(cleaned)
+    return ", ".join(_ordered_skills(tuple(terms))) if terms else cleaned
+
+
+def _split_skill_terms(value: str) -> list[str]:
+    return [
+        _clean_skill_term(part)
+        for part in re.split(r"\s*(?:,|\||;|•|▪|●)\s*", value)
+        if _clean_skill_term(part)
+    ]
+
+
+def _clean_skill_term(value: str) -> str:
+    cleaned = normalize_ats_text(_clean_sentence(value)).strip(" .()")
+    if cleaned.count("(") > cleaned.count(")"):
+        cleaned = re.sub(r"\s*\([^)]*$", "", cleaned).strip()
+    cleaned = re.sub(r"\bM&a\b", "M&A", cleaned)
+    return cleaned.strip(" .()")
+
+
+def _clean_skill_label(value: str) -> str:
+    label = normalize_ats_text(_clean_sentence(value)).strip(":")
+    replacements = {
+        "ai and technology": "AI & Technology",
+        "ai technology": "AI & Technology",
+        "cs fundamentals": "CS Fundamentals",
+        "cloud and devops": "Cloud & DevOps",
+        "cloud devops": "Cloud & DevOps",
+        "data analytics and visualization": "Data Analytics & Visualization",
+        "data science and ai ml": "Data Science & AI/ML",
+        "devops": "DevOps",
+        "domain expertise": "Domain Expertise",
+        "big data": "Big Data",
+        "data platforms": "Data Platforms",
+        "image processing": "Image Processing",
+        "mlops and cloud": "MLOps & Cloud",
+        "natural language processing": "Natural Language Processing",
+        "programming": "Programming",
+        "programming languages": "Programming Languages",
+        "databases": "Databases",
+        "database": "Databases",
+        "operating systems": "Operating Systems",
+        "research databases": "Research Databases",
+    }
+    return replacements.get(label.casefold(), label.title() if label.islower() else label)
 
 
 def _categorized_skill_lines(text: str) -> list[str]:
@@ -899,17 +1452,18 @@ def _categorized_skill_lines(text: str) -> list[str]:
         current_label, current_values = "", []
 
     for line in lines:
+        if ":" in line:
+            label, values = line.split(":", 1)
+            if _looks_like_skill_label(label):
+                flush()
+                current_label = label
+                if values.strip():
+                    current_values.append(values.strip())
+                continue
         label_candidate = line.rstrip(":")
         is_label = bool(
-            len(label_candidate) <= 60
-            and len(label_candidate.split()) <= 7
+            _looks_like_skill_label(label_candidate)
             and not re.search(r"[•▪●\uf0b7,;]", label_candidate)
-            and re.search(
-                r"\b(?:skills?|tools?|expertise|technology|technologies|databases?|platforms?|"
-                r"languages?|frameworks?|systems?|methods?|competencies)\b",
-                label_candidate,
-                flags=re.I,
-            )
         )
         if is_label:
             flush()
@@ -917,7 +1471,47 @@ def _categorized_skill_lines(text: str) -> list[str]:
         elif current_label:
             current_values.append(line)
     flush()
-    return [f"{label}: {_clean_sentence(' '.join(values))}" for label, values in categories]
+    return [f"{label}: {_join_skill_values(values)}" for label, values in categories]
+
+
+def _join_skill_values(values: list[str]) -> str:
+    current = ""
+    for value in values:
+        cleaned = _clean_sentence(value)
+        if not cleaned:
+            continue
+        if not current:
+            current = cleaned
+        elif _is_wrapped_skill_continuation(current, cleaned):
+            current = _clean_sentence(f"{current} {cleaned}")
+        else:
+            current = _clean_sentence(f"{current} • {cleaned}")
+    return current
+
+
+def _is_wrapped_skill_continuation(current: str, next_value: str) -> bool:
+    last_word = current.split()[-1].strip(" ,;:.()").casefold() if current.split() else ""
+    return bool(
+        current.endswith((",", "/", "&", "("))
+        or next_value[:1].islower()
+        or (len(next_value.split()) <= 2 and not re.search(r"[•,;:]", next_value))
+        or last_word in {"competitive", "operating", "prompt", "financial", "market", "secondary", "stock"}
+    )
+
+
+def _looks_like_skill_label(value: str) -> bool:
+    label = _clean_sentence(value)
+    return bool(
+        len(label) <= 60
+        and len(label.split()) <= 7
+        and re.search(
+            r"\b(?:skills?|tools?|expertise|technology|technologies|databases?|platforms?|"
+            r"languages?|frameworks?|systems?|methods?|competencies|devops|cloud|mlops|"
+            r"analytics|visualization|processing|fundamentals|domain|science|ai|ml|programming)\b",
+            label,
+            flags=re.I,
+        )
+    )
 
 
 def _is_section_heading(value: str) -> bool:
@@ -948,6 +1542,40 @@ def _strip_section_prefix(value: str) -> str:
 
 def _strengthen_action_verb(value: str) -> str:
     cleaned = _clean_sentence(value)
+    gerund_actions = {
+        "automating": "Automated",
+        "building": "Built",
+        "creating": "Created",
+        "delivering": "Delivered",
+        "designing": "Designed",
+        "developing": "Developed",
+        "implementing": "Implemented",
+        "improving": "Improved",
+        "managing": "Managed",
+        "optimizing": "Optimized",
+        "reducing": "Reduced",
+    }
+    responsible = re.match(r"^responsible for\s+(\w+)\s+(.+)$", cleaned, flags=re.I)
+    if responsible:
+        replacement = gerund_actions.get(responsible.group(1).casefold())
+        if replacement:
+            return f"{replacement} {responsible.group(2)}"
+    phrase_replacements = (
+        (r"^actively participating in\s+", "Contributed to "),
+        (r"^serving as a lead for\s+", "Led "),
+        (r"^played a pivotal role in the implementation of\s+", "Implemented "),
+        (r"^played a pivotal role in\s+", "Implemented "),
+        (r"^efficiently performed\s+", "Performed "),
+        (r"^preparation of\s+", "Prepared "),
+        (r"^worked with\s+", "Applied "),
+        (r"^worked on\s+", "Contributed to "),
+    )
+    for pattern, replacement_text in phrase_replacements:
+        if re.search(pattern, cleaned, flags=re.I):
+            return re.sub(pattern, replacement_text, cleaned, count=1, flags=re.I)
+    cleaned = re.sub(r"^(?:responsible for|worked on)\s+", "Managed ", cleaned, flags=re.I)
+    cleaned = re.sub(r"^helped with\s+", "Supported ", cleaned, flags=re.I)
+    cleaned = re.sub(r"^involved in\s+", "Contributed to ", cleaned, flags=re.I)
     first = cleaned.split(" ", 1)[0].lower()
     replacement = ACTION_VERB_REPLACEMENTS.get(first)
     if replacement and " " in cleaned:
@@ -987,8 +1615,19 @@ def _extract_contact_values(text: str) -> list[str]:
     values: list[str] = []
     values.extend(re.findall(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", text, flags=re.I))
     values.extend(re.findall(r"https?://[^\s|•]+|(?:www\.)?(?:linkedin\.com|github\.com)/[^\s|•]+", text, flags=re.I))
-    values.extend(match.group(0).strip() for match in re.finditer(r"(?<!\d)\+?[\d][\d\s().-]{7,}\d(?!\d)", text))
+    values.extend(
+        match.group(0).strip()
+        for match in re.finditer(r"(?<!\d)\+?[\d][\d\s().-]{7,}\d(?!\d)", text)
+        if _looks_like_phone_number(match.group(0))
+    )
     return values
+
+
+def _looks_like_phone_number(value: str) -> bool:
+    if _looks_like_date_range(value):
+        return False
+    digits = re.sub(r"\D", "", value)
+    return 10 <= len(digits) <= 15
 
 
 def _format_phone(value: str) -> str:
@@ -1026,7 +1665,27 @@ def _clean_sentence(value: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned)
     cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
     cleaned = _repair_extraction_spacing(cleaned)
-    return cleaned.strip(" -•\t")
+    cleaned = normalize_ats_text(cleaned)
+    cleaned = _format_metric_numbers(cleaned)
+    cleaned = cleaned.strip(" •\t")
+    return re.sub(r"^\s*[-]\s*", "", cleaned)
+
+
+def _capitalize_sentence(value: str) -> str:
+    value = value.strip()
+    return value[:1].upper() + value[1:] if value else value
+
+
+def _format_metric_numbers(value: str) -> str:
+    def replace(match) -> str:
+        return f"{int(match.group(1)):,}"
+
+    return re.sub(
+        r"\b(\d{4,})(?=\s*(?:records|users|transactions|files|rows|clients|reports|dashboards|pipelines)\b)",
+        replace,
+        value,
+        flags=re.I,
+    )
 
 
 def _repair_extraction_spacing(value: str) -> str:
@@ -1058,6 +1717,17 @@ def _dedupe_lines(lines: list[str]) -> list[str]:
     return result
 
 
+def _dedupe_prefixed_lines(lines: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for line in lines:
+        key = re.sub(r"^(?:ROLE::|META::|BULLET::)", "", line).casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(line)
+    return result
+
+
 def _ordered_terms(terms: tuple[str, ...]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -1068,6 +1738,30 @@ def _ordered_terms(terms: tuple[str, ...]) -> list[str]:
             seen.add(key)
             ordered.append(cleaned)
     return ordered
+
+
+def _ordered_skills(terms: tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for term in terms:
+        cleaned = _clean_skill_term(canonicalize_skill(term))
+        key = cleaned.casefold()
+        if cleaned and key not in seen and not _is_noisy_skill_term(cleaned):
+            seen.add(key)
+            ordered.append(cleaned)
+    return ordered
+
+
+def _is_noisy_skill_term(value: str) -> bool:
+    if len(value) > 70 or len(value.split()) > 7:
+        return True
+    if value.count("(") != value.count(")"):
+        return True
+    key = re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+    return key in {
+        "additional skills", "core skills", "domain expertise", "technical skills",
+        "ai and technology", "research databases", "tools", "technologies",
+    }
 
 
 def _safe_filename(value: str) -> str:

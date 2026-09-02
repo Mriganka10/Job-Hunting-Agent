@@ -12,6 +12,7 @@ import requests
 from .config import SearchConfig
 from .models import CandidateProfile, JobLead, Resume
 from .ats import _embedding_similarity
+from .resume import canonicalize_skill
 
 HEADERS = {
     "User-Agent": (
@@ -55,12 +56,10 @@ class LinkedInAdapter(PortalAdapter):
     ) -> list[JobLead]:
         leads: list[JobLead] = []
         locations = intent.locations or ("India",)
-        for role in intent.roles:
-            for location in locations[:2]:
+        for role in intent.roles[:3]:
+            for location in locations[:3]:
                 query = _role_skill_query(role, intent.skills)
                 leads.extend(self._fetch_public_jobs(query, location, config, intent.experience_years, role))
-                if len(leads) >= config.max_jobs_per_portal:
-                    return _enrich_job_details(leads[: config.max_jobs_per_portal], self.name)
         if leads:
             return _enrich_job_details(leads[: config.max_jobs_per_portal], self.name)
         return _fallback_search_links(self.name, intent, config, _linkedin_search_url)
@@ -110,12 +109,10 @@ class NaukriAdapter(PortalAdapter):
     ) -> list[JobLead]:
         leads: list[JobLead] = []
         locations = intent.locations or ("india",)
-        for role in intent.roles:
-            for location in locations[:2]:
+        for role in intent.roles[:3]:
+            for location in locations[:3]:
                 query = _role_skill_query(role, intent.skills)
                 leads.extend(self._fetch_public_jobs(query, location, config, intent.experience_years, role))
-                if len(leads) >= config.max_jobs_per_portal:
-                    return _enrich_job_details(leads[: config.max_jobs_per_portal], self.name)
         if leads:
             return _enrich_job_details(leads[: config.max_jobs_per_portal], self.name)
         return _fallback_search_links(self.name, intent, config, _naukri_search_url)
@@ -154,7 +151,7 @@ class NaukriAdapter(PortalAdapter):
 
 def build_search_intent(resume: Resume, profile: CandidateProfile) -> SearchIntent:
     roles = _ordered_unique(profile.target_roles or resume.inferred_roles) or ("Software Engineer",)
-    skills = _ordered_unique((*profile.skills, *resume.inferred_skills))
+    skills = _ordered_unique(tuple(canonicalize_skill(skill) for skill in (*profile.skills, *resume.inferred_skills)))
     locations = profile.locations or ("Remote",)
     summary = resume.sections.get("summary", "") if resume.sections else ""
     return SearchIntent(
@@ -178,15 +175,15 @@ def rank_job_leads(
     for job in jobs:
         job_text = f"{job.title} {job.description}"
         relevance = _embedding_similarity(candidate_text, job_text)
-        role_fit = _term_coverage(intent.roles, job_text)
-        skill_fit = _term_coverage(intent.skills, job_text)
-        location = job.location.casefold()
-        location_fit = 1.0 if any(place.casefold() in location or location in place.casefold() for place in intent.locations) else (0.7 if "remote" in location else 0.0)
+        role_fit = _role_fit(intent.roles, job.title, job.description)
+        skill_fit = _skill_fit(intent.skills, job_text)
+        location_fit = _location_fit(intent.locations, job.location)
         required = _required_experience(job_text)
         if required is None:
             required = _seniority_experience(job.title)
-        experience_fit = 0.4 if required is None else (1.0 if required <= intent.experience_years + 1 else max(0.0, 1 - (required - intent.experience_years) / 4))
-        score = round(100 * (0.35 * relevance + 0.25 * role_fit + 0.15 * skill_fit + 0.15 * location_fit + 0.10 * experience_fit))
+        experience_fit = _experience_fit(required, intent.experience_years, job.title)
+        seniority_fit = _seniority_alignment(job.title, intent.experience_years)
+        score = round(100 * (0.38 * role_fit + 0.25 * experience_fit + 0.20 * location_fit + 0.12 * skill_fit + 0.05 * relevance) * seniority_fit)
         reasons = _match_reasons(role_fit, skill_fit, location_fit, experience_fit, required, intent)
         scored.append(replace(job, match_score=max(0, min(100, score)), match_reasons=reasons, required_experience=required))
 
@@ -202,6 +199,77 @@ def _term_coverage(terms: tuple[str, ...], text: str) -> float:
     return min(1.0, matches / max(1, min(len(terms), 4)))
 
 
+def _role_fit(roles: tuple[str, ...], title: str, description: str) -> float:
+    if not roles:
+        return 0.5
+    title_tokens = set(_signal_tokens(title))
+    description_text = description.casefold()
+    best = 0.0
+    for role in roles:
+        role_tokens = set(_signal_tokens(role))
+        if not role_tokens:
+            continue
+        title_overlap = len(role_tokens & title_tokens) / len(role_tokens)
+        exact_title = 1.0 if role.casefold() in title.casefold() else 0.0
+        description_overlap = min(0.6, sum(token in description_text for token in role_tokens) / max(1, len(role_tokens)))
+        best = max(best, max(exact_title, 0.78 * title_overlap + 0.22 * description_overlap))
+    return min(1.0, best)
+
+
+def _skill_fit(skills: tuple[str, ...], text: str) -> float:
+    priority_skills = tuple(canonicalize_skill(skill) for skill in skills[:10])
+    return _term_coverage(priority_skills, text)
+
+
+def _location_fit(locations: tuple[str, ...], job_location: str) -> float:
+    if not locations:
+        return 0.5
+    normalized_job = re.sub(r"\s+", " ", job_location.casefold())
+    explicit_remote = any("remote" in location.casefold() for location in locations)
+    if "remote" in normalized_job:
+        return 1.0 if explicit_remote else 0.7
+    for location in locations:
+        normalized_location = re.sub(r"\s+", " ", location.casefold())
+        if not normalized_location:
+            continue
+        if normalized_location in normalized_job or normalized_job in normalized_location:
+            return 1.0
+        if normalized_location in {"india", "pan india"} and re.search(r"\b(india|bengaluru|bangalore|hyderabad|pune|mumbai|delhi|kolkata|chennai|gurgaon|noida)\b", normalized_job):
+            return 0.85
+    return 0.0
+
+
+def _experience_fit(required: float | None, candidate_years: float, title: str) -> float:
+    if required is None:
+        inferred = _seniority_experience(title)
+        if inferred is None:
+            return 0.55
+        required = inferred
+    if candidate_years + _experience_tolerance(candidate_years) >= required:
+        return 1.0
+    gap = required - candidate_years
+    return max(0.0, 1 - gap / 5)
+
+
+def _experience_tolerance(candidate_years: float) -> float:
+    if candidate_years < 1:
+        return 1.0
+    if candidate_years < 3:
+        return 1.5
+    if candidate_years < 7:
+        return 2.0
+    return 3.0
+
+
+def _seniority_alignment(title: str, candidate_years: float) -> float:
+    lowered = title.casefold()
+    if candidate_years < 2 and re.search(r"\b(?:senior|sr\.?|lead|principal|staff|manager|architect)\b", lowered):
+        return 0.45
+    if candidate_years >= 6 and re.search(r"\b(?:intern|trainee|entry|fresher|junior)\b", lowered):
+        return 0.65
+    return 1.0
+
+
 def _match_reasons(
     role_fit: float,
     skill_fit: float,
@@ -211,7 +279,7 @@ def _match_reasons(
     intent: SearchIntent,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
-    if role_fit > 0:
+    if role_fit >= 0.45:
         reasons.append("Target-role match")
     if skill_fit > 0:
         reasons.append("Skill match")
@@ -232,8 +300,10 @@ def _is_eligible(job: JobLead, intent: SearchIntent, config: SearchConfig | None
     explicit_remote = any("remote" in location.casefold() for location in intent.locations)
     if config is not None and not config.include_remote and not explicit_remote and "remote" in job.location.casefold():
         return False
-    if job.required_experience is not None and intent.experience_years < 3:
-        return job.required_experience <= intent.experience_years + 1.5
+    if job.required_experience is not None:
+        return job.required_experience <= intent.experience_years + _experience_tolerance(intent.experience_years)
+    if job.match_score < 35:
+        return False
     return True
 
 
@@ -293,12 +363,18 @@ def _extract_job_detail_text(page: str) -> str:
 
 
 def _role_skill_query(role: str, skills: tuple[str, ...]) -> str:
-    additions = [skill for skill in skills if skill.casefold() not in role.casefold()][:2]
+    additions = [canonicalize_skill(skill) for skill in skills if skill.casefold() not in role.casefold()][:2]
     return " ".join((role, *additions)).strip()
 
 
 def _ordered_unique(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value.strip() for value in values if value and value.strip()))
+
+
+def _signal_tokens(value: str) -> list[str]:
+    stopwords = {"and", "or", "the", "for", "with", "role", "job", "engineer"}
+    tokens = re.findall(r"[a-z0-9+#]+", value.casefold().replace("/", " "))
+    return [token for token in tokens if token not in stopwords and len(token) > 1]
 
 
 def get_adapters(names: tuple[str, ...]) -> list[PortalAdapter]:
