@@ -11,6 +11,7 @@ import secrets
 import smtplib
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from xml.sax.saxutils import escape as xml_escape
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,7 @@ from .db import (
     latest_runs,
     latest_mock_interviews,
     mock_interview_session,
+    mutate_run_payload,
     normalize_email,
     record_run,
     run_for_user,
@@ -49,8 +51,10 @@ from .db import (
     update_schedule_status,
     user_profile,
 )
-from .models import CandidateProfile
+from .models import AtsReport, CandidateProfile, JobLead, Resume
 from .job_pagination import DEFAULT_JOB_PAGE_SIZE, paginate_jobs
+from .performance_cache import cached_document, document_cache_key
+from .resume_builder import write_base_resume, write_tailored_resume
 from .storage import StoredObject, download_file, mirror_artifacts, presigned_download_url, upload_file
 
 app = FastAPI(title="Job Hunting Agent")
@@ -77,6 +81,11 @@ if COOKIE_SECURE and APP_SECRET == "local-dev-change-me":
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 init_db()
+
+DOCUMENT_WORKERS = max(1, int(os.getenv("JOB_AGENT_DOCUMENT_WORKERS", "2")))
+DOCUMENT_EXECUTOR = ThreadPoolExecutor(max_workers=DOCUMENT_WORKERS, thread_name_prefix="resume-render")
+_document_tasks: set[str] = set()
+_document_tasks_lock = threading.Lock()
 
 
 class DailyScheduler:
@@ -787,7 +796,7 @@ def stop_scheduler(job_agent_session: Annotated[str | None, Cookie(alias=SESSION
 
 
 def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user_email: str = "") -> dict:
-    report, jobs, results, improved_resume = JobHuntingAgent(config).run(resume_path)
+    report, jobs, results, improved_resume = JobHuntingAgent(config).run(resume_path, build_documents=not bool(user_email))
     application_summary = _application_summary(results)
     generated_at = datetime.now().isoformat(timespec="seconds")
     improved_resume = _publish_improved_resume(improved_resume, user_email or config.profile.email or "anonymous", generated_at)
@@ -800,19 +809,81 @@ def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user
         "generated_at": generated_at,
         "trigger": trigger,
         "improved_resume": improved_resume,
+        "_config_snapshot": {
+            "profile": asdict(config.profile),
+            "application": asdict(config.application),
+        },
         "portal_submission_note": (
             "Portal applications are prepared as drafts or recruiter emails. "
             "Authenticated LinkedIn/Naukri submission remains adapter-gated because those portals can require login, CAPTCHA, OTP, and screening answers."
         ),
     }
-    artifact_uris = mirror_artifacts(config.application.data_dir, user_email or config.profile.email or "anonymous", result["generated_at"])
-    if artifact_uris:
-        result["artifact_uris"] = artifact_uris
+    if not user_email:
+        artifact_uris = mirror_artifacts(config.application.data_dir, config.profile.email or "anonymous", result["generated_at"])
+        if artifact_uris:
+            result["artifact_uris"] = artifact_uris
     if user_email:
         run_id = record_run(user_email, result)
         result["run_id"] = run_id
+        _submit_document_task(f"base:{run_id}", _prepare_base_document, user_email, run_id)
         return _client_run_payload(result, run_id)
     return result
+
+
+@app.get("/api/runs/{run_id}/resume-status")
+def resume_status(
+    run_id: int,
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+) -> dict:
+    user_email = require_user(job_agent_session)
+    run = run_for_user(user_email, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    improved = (run.get("payload") or {}).get("improved_resume") or {}
+    ready = {
+        str(item.get("artifact_id")): {"status": "ready", "validation": item.get("validation", {})}
+        for item in improved.get("tailored_resumes", []) if isinstance(item, dict)
+    }
+    ready.update(improved.get("tailored_statuses") or {})
+    return {
+        "base": {
+            "status": improved.get("status", "preparing"),
+            "validation": improved.get("validation", {}),
+            "error": improved.get("error", ""),
+        },
+        "tailored": ready,
+    }
+
+
+@app.post("/api/runs/{run_id}/tailored-resumes/{artifact_id}/prepare")
+def prepare_tailored_resume(
+    run_id: int,
+    artifact_id: str,
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+) -> dict:
+    user_email = require_user(job_agent_session)
+    run = run_for_user(user_email, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    payload = run.get("payload") or {}
+    job = next((item for item in payload.get("jobs", []) if item.get("tailored_resume_id") == artifact_id), None)
+    if not job:
+        raise HTTPException(status_code=404, detail="Tailored resume is not part of this run.")
+    improved = payload.get("improved_resume") or {}
+    if any(item.get("artifact_id") == artifact_id for item in improved.get("tailored_resumes", []) if isinstance(item, dict)):
+        return {"status": "ready", "artifact_id": artifact_id}
+
+    def mark_preparing(current: dict) -> dict:
+        current_improved = dict(current.get("improved_resume") or {})
+        statuses = dict(current_improved.get("tailored_statuses") or {})
+        statuses[artifact_id] = {"status": "preparing"}
+        current_improved["tailored_statuses"] = statuses
+        current["improved_resume"] = current_improved
+        return current
+
+    mutate_run_payload(user_email, run_id, mark_preparing)
+    _submit_document_task(f"tailored:{run_id}:{artifact_id}", _prepare_tailored_document, user_email, run_id, artifact_id)
+    return {"status": "preparing", "artifact_id": artifact_id}
 
 
 @app.get("/api/runs/{run_id}/improved-resume")
@@ -885,6 +956,151 @@ def _resume_file_response(artifact: dict, file_format: str):
         )
         return FileResponse(path, media_type=media_type, filename=path.name)
     raise HTTPException(status_code=404, detail="Resume artifact is not available for this run.")
+
+
+def _submit_document_task(key: str, function, *args) -> bool:
+    with _document_tasks_lock:
+        if key in _document_tasks:
+            return False
+        _document_tasks.add(key)
+    future = DOCUMENT_EXECUTOR.submit(function, *args)
+    future.add_done_callback(lambda _: _finish_document_task(key))
+    return True
+
+
+def _finish_document_task(key: str) -> None:
+    with _document_tasks_lock:
+        _document_tasks.discard(key)
+
+
+def _prepare_base_document(user_email: str, run_id: int) -> None:
+    try:
+        run = run_for_user(user_email, run_id)
+        if not run:
+            return
+        payload = run.get("payload") or {}
+        resume, report, config, resume_hash = _document_inputs(payload)
+        key = document_cache_key(resume_hash, config.profile, config.application.resume_page_target)
+        artifact, _ = cached_document(
+            config.application.data_dir,
+            key,
+            lambda output: write_base_resume(
+                resume, report, config.profile, output,
+                page_target=config.application.resume_page_target,
+            ),
+        )
+        artifact = _publish_document_artifact(
+            artifact, user_email, str(payload.get("generated_at") or run_id), "base"
+        )
+
+        def complete(current: dict) -> dict:
+            previous = current.get("improved_resume") or {}
+            current["improved_resume"] = {
+                **previous, **artifact, "artifact_id": "base", "status": "ready",
+                "tailored_resumes": previous.get("tailored_resumes", []),
+            }
+            return current
+
+        mutate_run_payload(user_email, run_id, complete)
+    except Exception as exc:
+        _mark_document_failure(user_email, run_id, "base", str(exc))
+
+
+def _prepare_tailored_document(user_email: str, run_id: int, artifact_id: str) -> None:
+    try:
+        run = run_for_user(user_email, run_id)
+        if not run:
+            return
+        payload = run.get("payload") or {}
+        resume, report, config, resume_hash = _document_inputs(payload)
+        job_payload = next(item for item in payload.get("jobs", []) if item.get("tailored_resume_id") == artifact_id)
+        job = _job_from_payload(job_payload)
+        key = document_cache_key(resume_hash, config.profile, config.application.resume_page_target, job)
+        artifact, _ = cached_document(
+            config.application.data_dir,
+            key,
+            lambda output: write_tailored_resume(
+                resume, report, config.profile, output, job,
+                page_target=config.application.resume_page_target,
+            ),
+        )
+        artifact = _publish_document_artifact(
+            artifact, user_email, str(payload.get("generated_at") or run_id), f"tailored/{artifact_id}"
+        )
+
+        def complete(current: dict) -> dict:
+            improved = dict(current.get("improved_resume") or {})
+            artifacts = [item for item in improved.get("tailored_resumes", []) if item.get("artifact_id") != artifact_id]
+            artifacts.append(artifact)
+            statuses = dict(improved.get("tailored_statuses") or {})
+            statuses[artifact_id] = {"status": "ready", "validation": artifact.get("validation", {})}
+            improved.update({"tailored_resumes": artifacts, "tailored_statuses": statuses})
+            current["improved_resume"] = improved
+            return current
+
+        mutate_run_payload(user_email, run_id, complete)
+    except Exception as exc:
+        _mark_document_failure(user_email, run_id, artifact_id, str(exc))
+
+
+def _mark_document_failure(user_email: str, run_id: int, artifact_id: str, detail: str) -> None:
+    def fail(current: dict) -> dict:
+        improved = dict(current.get("improved_resume") or {})
+        message = re.sub(r"\s+", " ", detail).strip()[:300]
+        if artifact_id == "base":
+            improved.update({"status": "failed", "error": message})
+        else:
+            statuses = dict(improved.get("tailored_statuses") or {})
+            statuses[artifact_id] = {"status": "failed", "error": message}
+            improved["tailored_statuses"] = statuses
+        current["improved_resume"] = improved
+        return current
+
+    mutate_run_payload(user_email, run_id, fail)
+
+
+def _publish_document_artifact(artifact: dict[str, object], user_email: str, generated_at: str, suffix: str) -> dict[str, object]:
+    published = dict(artifact)
+    prefix = f"artifacts/{normalize_email(user_email)}/{generated_at}/improved_resume/{suffix}"
+    for file_format in ("docx", "pdf"):
+        path = artifact.get(f"{file_format}_path")
+        if path:
+            published[f"{file_format}_uri"] = upload_file(str(path), prefix)
+    return published
+
+
+def _document_inputs(payload: dict) -> tuple[Resume, AtsReport, AppConfig, str]:
+    improved = payload.get("improved_resume") or {}
+    source = improved.get("_resume_snapshot") or {}
+    resume = Resume(
+        str(source.get("path", "")), str(source.get("text", "")),
+        tuple(source.get("inferred_skills", ())), tuple(source.get("inferred_roles", ())),
+        dict(source.get("sections", {})),
+    )
+    report_data = dict(payload.get("ats_report") or {})
+    for field in ("strengths", "improvements", "missing_keywords", "detected_sections", "matched_keywords"):
+        report_data[field] = tuple(report_data.get(field, ()))
+    report_data["score_breakdown"] = tuple(tuple(item) for item in report_data.get("score_breakdown", ()))
+    report_data["score_range"] = tuple(report_data.get("score_range", (0, 100)))
+    config = _config_from_snapshot(payload.get("_config_snapshot") or {})
+    return resume, AtsReport(**report_data), config, str(improved.get("_resume_hash") or "")
+
+
+def _config_from_snapshot(source: dict) -> AppConfig:
+    profile = dict(source.get("profile") or {})
+    search = dict(source.get("search") or {})
+    application = dict(source.get("application") or {})
+    email = dict(source.get("email") or {})
+    for field in ("target_roles", "locations", "skills"):
+        profile[field] = tuple(profile.get(field, ()))
+    search["portals"] = tuple(search.get("portals", ("remotive", "arbeitnow", "linkedin", "naukri")))
+    return AppConfig(CandidateProfile(**profile), SearchConfig(**search), ApplicationConfig(**application), EmailConfig(**email))
+
+
+def _job_from_payload(source: dict) -> JobLead:
+    values = dict(source)
+    values["match_reasons"] = tuple(values.get("match_reasons", ()))
+    return JobLead(**values)
 
 
 def _publish_improved_resume(improved_resume: dict[str, object], user_email: str, generated_at: str) -> dict[str, object]:
@@ -1107,6 +1323,7 @@ def _run_with_payload_id(run: dict) -> dict:
 
 def _client_run_payload(payload: dict, run_id: int) -> dict:
     client_payload = dict(payload)
+    client_payload.pop("_config_snapshot", None)
     page = paginate_jobs(
         list(payload.get("jobs") or []),
         run_id=run_id,
@@ -1122,6 +1339,8 @@ def _client_run_payload(payload: dict, run_id: int) -> dict:
     client_payload["application_count"] = len(applications)
     improved = dict(client_payload.get("improved_resume") or {})
     improved.pop("tailored_resumes", None)
+    improved.pop("_resume_snapshot", None)
+    improved.pop("_resume_hash", None)
     client_payload["improved_resume"] = improved
     return client_payload
 
@@ -2664,6 +2883,7 @@ def _page(user_email: str, profile: dict) -> str:
     const timezoneInput = document.getElementById('daily_timezone');
     let activeResult = { key: '', generatedAt: '', source: '' };
     let activePayload = null;
+    let resumeStatusTimer = null;
     function enrichFormData() {
       timezoneInput.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
       const data = new FormData(form);
@@ -2806,9 +3026,12 @@ def _page(user_email: str, profile: dict) -> str:
         const jobDetails = [job.workplace_mode, job.employment_type, job.salary_text, job.posted_at ? `Posted ${job.posted_at.slice(0, 10)}` : '', job.freshness_verified ? 'date verified' : 'date unverified'].filter((item) => item && item !== 'unknown').map(escapeHtml).join(' · ');
         const sourceState = job.source_validated ? 'Validated API' : 'Public discovery';
         const normalizedCompany = job.normalized_company && job.normalized_company !== job.company ? `<br><span class="muted">${escapeHtml(job.normalized_company)}</span>` : '';
-        const tailored = job.tailored_resume_id
+        const tailoredState = payload.improved_resume?.tailored_statuses?.[job.tailored_resume_id]?.status || 'idle';
+        const tailored = job.tailored_resume_id && tailoredState === 'ready'
           ? `<br><a href="/api/runs/${encodeURIComponent(payload.run_id)}/tailored-resumes/${encodeURIComponent(job.tailored_resume_id)}/docx">DOCX</a> · <a href="/api/runs/${encodeURIComponent(payload.run_id)}/tailored-resumes/${encodeURIComponent(job.tailored_resume_id)}/pdf">PDF</a>`
-          : '';
+          : job.tailored_resume_id
+            ? `<br><button type="button" class="prepare-tailored" data-artifact-id="${escapeHtml(job.tailored_resume_id)}" ${tailoredState === 'preparing' ? 'disabled' : ''}>${tailoredState === 'preparing' ? 'Preparing resume...' : tailoredState === 'failed' ? 'Retry resume' : 'Prepare resume'}</button>`
+            : '';
         return `<tr><td>${escapeHtml(job.portal)}<br><span class="muted">${escapeHtml(sourceState)}</span></td><td><strong>${escapeHtml(job.title)}</strong><br><span class="muted">${escapeHtml(job.location || '')}</span><br><span class="muted">${jobDetails}</span></td><td>${escapeHtml(job.company)}${normalizedCompany}</td><td><strong>${escapeHtml(job.match_score || 0)}%</strong><br>${reasons}</td><td><a href="${escapeHtml(job.url)}" target="_blank" rel="noreferrer">Open job</a>${tailored}<br><span class="muted">${escapeHtml(job.link_status || 'unchecked')}</span></td></tr>`;
       }).join('');
       const remainingJobs = Math.max(0, (jobPage.total || totalJobs) - payload.jobs.length);
@@ -2837,9 +3060,17 @@ def _page(user_email: str, profile: dict) -> str:
           <div class="draft-grid">${draftTemplate ? draftCard(draftTemplate) : '<p class="muted">No draft message was generated for this run.</p>'}</div>
         </section>
       `;
+      scheduleResumeStatusPoll();
     }
     function improvedResumeDownload(payload) {
       if (!payload.improved_resume || !payload.run_id) return '';
+      const status = payload.improved_resume.status || 'preparing';
+      if (status === 'preparing') {
+        return `<div class="download-actions"><span class="muted">Preparing the validated base resume in the background...</span></div>`;
+      }
+      if (status === 'failed') {
+        return `<div class="download-actions"><span class="note">Resume preparation failed: ${escapeHtml(payload.improved_resume.error || 'unknown error')}</span></div>`;
+      }
       const validation = payload.improved_resume.validation || {};
       const validationLabel = validation.passed
         ? `${validation.page_count || '?'} page PDF · render and factual checks passed`
@@ -2883,7 +3114,53 @@ def _page(user_email: str, profile: dict) -> str:
         </article>
       `;
     }
+    function scheduleResumeStatusPoll(immediate = false) {
+      if (resumeStatusTimer) clearTimeout(resumeStatusTimer);
+      const improved = activePayload?.improved_resume || {};
+      const tailored = Object.values(improved.tailored_statuses || {});
+      const pending = improved.status === 'preparing' || tailored.some((item) => item.status === 'preparing');
+      if (!pending || !activePayload?.run_id) return;
+      resumeStatusTimer = setTimeout(refreshResumeStatus, immediate ? 100 : 1500);
+    }
+    async function refreshResumeStatus() {
+      if (!activePayload?.run_id) return;
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(activePayload.run_id)}/resume-status`);
+        const status = await responsePayload(response);
+        if (!response.ok) throw new Error(status.detail || 'Unable to read resume status.');
+        activePayload.improved_resume = {
+          ...activePayload.improved_resume,
+          status: status.base?.status || activePayload.improved_resume?.status,
+          validation: status.base?.validation || activePayload.improved_resume?.validation,
+          error: status.base?.error || '',
+          tailored_statuses: status.tailored || {},
+        };
+        render(activePayload, activeResult.source);
+      } catch (_) {
+        resumeStatusTimer = setTimeout(refreshResumeStatus, 3000);
+      }
+    }
     document.addEventListener('click', async (event) => {
+      const prepareButton = event.target.closest('.prepare-tailored');
+      if (prepareButton) {
+        if (!activePayload?.run_id) return;
+        const artifactId = prepareButton.dataset.artifactId;
+        prepareButton.disabled = true;
+        prepareButton.textContent = 'Preparing resume...';
+        const statuses = { ...(activePayload.improved_resume?.tailored_statuses || {}) };
+        statuses[artifactId] = { status: 'preparing' };
+        activePayload.improved_resume = { ...activePayload.improved_resume, tailored_statuses: statuses };
+        try {
+          const response = await fetch(`/api/runs/${encodeURIComponent(activePayload.run_id)}/tailored-resumes/${encodeURIComponent(artifactId)}/prepare`, { method: 'POST' });
+          const payload = await responsePayload(response);
+          if (!response.ok) throw new Error(payload.detail || 'Unable to prepare resume.');
+          scheduleResumeStatusPoll(true);
+        } catch (error) {
+          statuses[artifactId] = { status: 'failed', error: error.message };
+          render(activePayload, activeResult.source);
+        }
+        return;
+      }
       const showMoreButton = event.target.closest('#show-more-jobs');
       if (showMoreButton) {
         if (!activePayload?.run_id || !activePayload?.job_page?.next_cursor) return;

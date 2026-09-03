@@ -478,6 +478,53 @@ def test_improved_resume_download_requires_run_owner(tmp_path: Path) -> None:
     assert owner.get(f"/api/runs/{run_id}/tailored-resumes/job-resume-1/txt").status_code == 400
 
 
+def test_lazy_tailored_resume_prepare_is_owner_scoped_and_idempotent(monkeypatch) -> None:
+    owner_email = f"lazy-owner-{uuid4().hex}@example.com"
+    other_email = f"lazy-other-{uuid4().hex}@example.com"
+    artifact_id = "lazy-artifact-1"
+    run_id = record_run(owner_email, {
+        "trigger": "manual",
+        "generated_at": "2026-09-03T10:00:00",
+        "ats_report": {"score": 81},
+        "jobs": [{
+            "portal": "api", "title": "Data Engineer", "company": "Example", "location": "Remote",
+            "url": "https://example/job", "tailored_resume_id": artifact_id,
+        }],
+        "application_summary": {}, "output_dir": "",
+        "improved_resume": {"status": "preparing", "tailored_resumes": []},
+    })
+    submitted = []
+    def submit(*args):
+        if not submitted:
+            submitted.append(args)
+            return True
+        return False
+    monkeypatch.setattr(web, "_submit_document_task", submit)
+
+    owner = authenticated_client(owner_email)
+    assert owner.post(f"/api/runs/{run_id}/tailored-resumes/{artifact_id}/prepare").status_code == 200
+    assert owner.post(f"/api/runs/{run_id}/tailored-resumes/{artifact_id}/prepare").status_code == 200
+    assert len(submitted) == 1
+    assert owner.get(f"/api/runs/{run_id}/resume-status").json()["tailored"][artifact_id]["status"] == "preparing"
+    assert authenticated_client(other_email).post(f"/api/runs/{run_id}/tailored-resumes/{artifact_id}/prepare").status_code == 404
+
+
+def test_client_run_payload_hides_private_resume_and_config_snapshots() -> None:
+    payload = {
+        "jobs": [], "applications": [], "_config_snapshot": {"email": {"password": "secret"}},
+        "improved_resume": {
+            "status": "preparing", "_resume_hash": "hash", "_resume_snapshot": {"text": "private resume"},
+            "tailored_resumes": [],
+        },
+    }
+
+    result = web._client_run_payload(payload, 123)
+
+    assert "_config_snapshot" not in result
+    assert "_resume_hash" not in result["improved_resume"]
+    assert "_resume_snapshot" not in result["improved_resume"]
+
+
 def test_job_pages_are_server_paginated_and_owner_scoped() -> None:
     owner_email = f"jobs-owner-{uuid4().hex}@example.com"
     other_email = f"jobs-other-{uuid4().hex}@example.com"

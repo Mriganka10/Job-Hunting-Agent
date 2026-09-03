@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -9,6 +11,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
+from . import http_client
 from .config import SearchConfig
 from .models import JobLead
 
@@ -27,6 +30,9 @@ COMPANY_ALIASES = {
 TRACKING_QUERY_KEYS = {
     "ref", "refid", "source", "src", "tracking", "trk", "utm_campaign", "utm_content", "utm_medium", "utm_source", "utm_term",
 }
+LINK_CACHE_TTL_SECONDS = 6 * 60 * 60
+_link_cache: dict[str, tuple[float, str]] = {}
+_link_cache_lock = threading.Lock()
 
 
 def validate_job_leads(
@@ -193,21 +199,32 @@ def _normalize_job(job: JobLead, config: SearchConfig, now: datetime) -> JobLead
 
 
 def _check_link(job: JobLead) -> str:
+    canonical = canonicalize_job_url(job.url)
+    now = time.monotonic()
+    with _link_cache_lock:
+        cached = _link_cache.get(canonical)
+        if cached and cached[0] > now:
+            return cached[1]
     try:
-        response = requests.head(job.url, allow_redirects=True, timeout=5, headers={"User-Agent": "Mozilla/5.0 JobHuntingAgent/1.0"})
+        response = http_client.head(job.url, allow_redirects=True, timeout=5, headers={"User-Agent": "Mozilla/5.0 JobHuntingAgent/1.0"})
         if response.status_code == 405:
-            response = requests.get(job.url, allow_redirects=True, timeout=5, headers={"User-Agent": "Mozilla/5.0 JobHuntingAgent/1.0"}, stream=True)
+            response = http_client.get(job.url, allow_redirects=True, timeout=5, headers={"User-Agent": "Mozilla/5.0 JobHuntingAgent/1.0"}, stream=True)
     except requests.RequestException:
-        return "unavailable"
-    if response.status_code in {404, 410}:
-        return "expired"
-    if 200 <= response.status_code < 400:
-        return "active"
-    if response.status_code in {401, 403}:
-        return "protected"
-    if response.status_code == 429:
-        return "rate_limited"
-    return "unavailable"
+        status = "unavailable"
+    else:
+        if response.status_code in {404, 410}:
+            status = "expired"
+        elif 200 <= response.status_code < 400:
+            status = "active"
+        elif response.status_code in {401, 403}:
+            status = "protected"
+        elif response.status_code == 429:
+            status = "rate_limited"
+        else:
+            status = "unavailable"
+    with _link_cache_lock:
+        _link_cache[canonical] = (now + LINK_CACHE_TTL_SECONDS, status)
+    return status
 
 
 def _same_job(left: JobLead, right: JobLead) -> bool:

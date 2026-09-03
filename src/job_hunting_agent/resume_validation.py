@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import asdict
+from functools import lru_cache
 
 from .models import CandidateProfile, JobLead, Resume
 from .resume import normalize_ats_text
@@ -29,9 +30,13 @@ def validate_factual_consistency(
     sections: list[tuple[str, list[str]]],
     job: JobLead | None = None,
 ) -> dict[str, object]:
-    source = _source_evidence(resume, profile)
-    source_tokens = set(_tokens(source))
-    source_numbers = set(_numbers(source))
+    source_tokens, source_numbers_tuple = _source_facts(
+        resume.text,
+        tuple(sorted(resume.sections.items())),
+        tuple(str(value) for value in asdict(profile).values() if value),
+    )
+    source_tokens = set(source_tokens)
+    source_numbers = set(source_numbers_tuple)
     if profile.experience_years:
         source_numbers.add(f"{profile.experience_years:g}")
         source_numbers.add(f"{round(profile.experience_years * 12):g}")
@@ -149,9 +154,14 @@ def relevance_score(value: str, target_text: str) -> int:
     return len(target & value_tokens) * 4 + sum(term in value.casefold() for term in _meaningful_terms(target_text))
 
 
-def _source_evidence(resume: Resume, profile: CandidateProfile) -> str:
-    profile_values = [str(value) for value in asdict(profile).values() if value]
-    return normalize_ats_text("\n".join((resume.text, *resume.sections.values(), *profile_values)))
+@lru_cache(maxsize=128)
+def _source_facts(
+    resume_text: str,
+    sections: tuple[tuple[str, str], ...],
+    profile_values: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    source = normalize_ats_text("\n".join((resume_text, *(value for _, value in sections), *profile_values)))
+    return tuple(dict.fromkeys(_tokens(source))), tuple(dict.fromkeys(_numbers(source)))
 
 
 def _numbers(value: str) -> list[str]:

@@ -41,44 +41,57 @@ def write_improved_resume(
     page_target: int = 2,
 ) -> dict[str, object]:
     output_dir = Path(data_dir) / "improved_resume"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    primary = write_base_resume(resume, report, profile, output_dir, page_target=page_target)
+    tailored: list[dict[str, object]] = []
+    for job in jobs:
+        tailored.append(write_tailored_resume(resume, report, profile, output_dir / "tailored", job, page_target=page_target))
+    return {**primary, "artifact_id": "base", "tailored_resumes": tailored}
+
+
+def write_base_resume(
+    resume: Resume,
+    report: AtsReport,
+    profile: CandidateProfile,
+    output_dir: str | Path,
+    *,
+    page_target: int = 2,
+) -> dict[str, object]:
+    output_dir = Path(output_dir)
     detected_name = _candidate_name(resume.text)
     base_name = _safe_filename(profile.name or detected_name or "candidate")
     display_name = profile.name.strip() or detected_name or "Candidate"
-    primary = _write_resume_artifact(
-        output_dir / f"{base_name}-ATS-Friendly-Resume",
-        resume,
-        report,
-        profile,
-        display_name,
+    return _write_resume_artifact(
+        output_dir / f"{base_name}-ATS-Friendly-Resume", resume, report, profile, display_name,
         page_target=max(1, min(int(page_target), 3)),
     )
-    tailored: list[dict[str, object]] = []
-    tailored_dir = output_dir / "tailored"
-    for job in jobs:
-        artifact_id = sha256(job.stable_id.encode("utf-8")).hexdigest()[:16]
-        target_profile = replace(profile, target_roles=(job.title,))
-        stem = f"{base_name[:24]}-{artifact_id}"
-        artifact = _write_resume_artifact(
-            tailored_dir / stem,
-            resume,
-            report,
-            target_profile,
-            display_name,
-            page_target=max(1, min(int(page_target), 3)),
-            job=job,
-        )
-        artifact.update(
-            {
-                "artifact_id": artifact_id,
-                "job_id": job.stable_id,
-                "job_title": job.title,
-                "company": job.company,
-                "tailoring": tailoring_analysis(resume, profile, job),
-            }
-        )
-        tailored.append(artifact)
-    return {**primary, "artifact_id": "base", "tailored_resumes": tailored}
+
+
+def write_tailored_resume(
+    resume: Resume,
+    report: AtsReport,
+    profile: CandidateProfile,
+    output_dir: str | Path,
+    job: JobLead,
+    *,
+    page_target: int = 2,
+) -> dict[str, object]:
+    detected_name = _candidate_name(resume.text)
+    base_name = _safe_filename(profile.name or detected_name or "candidate")
+    display_name = profile.name.strip() or detected_name or "Candidate"
+    artifact_id = sha256(job.stable_id.encode("utf-8")).hexdigest()[:16]
+    artifact = _write_resume_artifact(
+        Path(output_dir) / f"{base_name[:24]}-{artifact_id}", resume, report,
+        replace(profile, target_roles=(job.title,)), display_name,
+        page_target=max(1, min(int(page_target), 3)), job=job,
+    )
+    artifact.update({
+        "artifact_id": artifact_id,
+        "job_id": job.stable_id,
+        "job_title": job.title,
+        "company": job.company,
+        "tailoring": tailoring_analysis(resume, profile, job),
+    })
+    return artifact
 
 
 def _write_resume_artifact(
