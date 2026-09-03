@@ -197,11 +197,21 @@ The `data/` folder is ignored by Git because it can contain private candidate an
 5. Search intent is built from configured roles, skills, locations, and resume inference.
 6. Structured API and public portal adapters search configured sources.
 7. Job leads are normalized, freshness/expiry/link checked, alias-normalized, and deduplicated.
-8. Application service checks the ledger.
+8. Application service checks the ledger and uses a bounded preparation pool while preserving result order.
 9. Drafts are written or emails are sent.
 10. Reports and application records are written under `data/`.
-11. A full run produces validated base and per-job DOCX/PDF resumes and optionally mirrors artifacts to S3.
-12. Web UI receives the first job page and fetches later pages from the authenticated cursor endpoint.
+11. Web UI receives ATS results and the first job page immediately after the search/application phase.
+12. A bounded document pool prepares the validated base DOCX/PDF and publishes progressive status.
+13. A job-specific DOCX/PDF is generated only when requested, keyed by resume/job/builder hashes, then reused from cache.
+14. Later job pages are fetched from the authenticated cursor endpoint.
+
+## Performance And Concurrency
+
+- Top-level portal adapters run concurrently with at most four search workers; each adapter retains its own timeout and failure boundary.
+- HTTP calls use thread-local pooled sessions. Structured feed payloads use short-lived caches and canonical link checks use a six-hour cache.
+- ATS results use a versioned content-hash cache. Local semantic models load once, resume vectors are reused, and uncached job texts are embedded in a batch.
+- Document rendering uses a separate bounded pool controlled by `JOB_AGENT_DOCUMENT_WORKERS` (default `2`). Application drafting/email uses `JOB_AGENT_APPLICATION_WORKERS` (default `4`).
+- The local background pool is restart-safe through persisted run state and content caches, but it is not a distributed queue. Multi-instance production deployments should replace it with a durable worker service.
 
 ## Production Architecture Target
 

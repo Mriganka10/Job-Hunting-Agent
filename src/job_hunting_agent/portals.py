@@ -9,9 +9,10 @@ from urllib.parse import quote_plus
 
 import requests
 
+from . import http_client
 from .config import SearchConfig
 from .models import CandidateProfile, JobLead, Resume
-from .ats import _embedding_similarity
+from .ats_semantic import semantic_similarities
 from .resume import canonicalize_skill
 
 HEADERS = {
@@ -73,7 +74,7 @@ class LinkedInAdapter(PortalAdapter):
             f"&f_TPR=r{max(1, config.freshness_days) * 86400}&f_E={quote_plus(_linkedin_experience_filter(experience_years))}&start=0"
         )
         try:
-            response = requests.get(url, headers=HEADERS, timeout=TIMEOUT_SECONDS)
+            response = http_client.get(url, headers=HEADERS, timeout=TIMEOUT_SECONDS)
             response.raise_for_status()
         except requests.RequestException:
             return []
@@ -126,7 +127,7 @@ class NaukriAdapter(PortalAdapter):
     ) -> list[JobLead]:
         url = _naukri_search_url(query, location, config, experience_years)
         try:
-            response = requests.get(url, headers=HEADERS, timeout=TIMEOUT_SECONDS)
+            response = http_client.get(url, headers=HEADERS, timeout=TIMEOUT_SECONDS)
             response.raise_for_status()
         except requests.RequestException:
             return []
@@ -182,10 +183,10 @@ def rank_job_leads(
     summary = intent.profile_summary or (resume.sections.get("summary", "") if resume.sections else "")
     candidate_text = " ".join((*intent.roles, *intent.skills, summary, intent.job_description))
     scored: list[JobLead] = []
+    job_texts = [f"{job.title} {job.description}" for job in jobs]
+    relevances = semantic_similarities(candidate_text, job_texts)
 
-    for job in jobs:
-        job_text = f"{job.title} {job.description}"
-        relevance = _embedding_similarity(candidate_text, job_text)
+    for job, job_text, relevance in zip(jobs, job_texts, relevances):
         role_fit = _role_fit(intent.roles, job.title, job.description)
         skill_fit = _skill_fit(intent.skills, job_text)
         location_fit = _location_fit(intent.locations, job.location)
@@ -352,7 +353,7 @@ def _fetch_job_detail(lead: JobLead, portal: str) -> str:
         if job_id_match:
             url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id_match.group(1)}"
     try:
-        response = requests.get(url, headers=HEADERS, timeout=DETAIL_TIMEOUT_SECONDS)
+        response = http_client.get(url, headers=HEADERS, timeout=DETAIL_TIMEOUT_SECONDS)
         response.raise_for_status()
     except requests.RequestException:
         return ""

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import smtplib
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha1
 from email.message import EmailMessage
 from pathlib import Path
 
 from .config import AppConfig
 from .models import ApplicationResult, AtsReport, JobLead, Resume
+
+
+APPLICATION_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, int(os.getenv("JOB_AGENT_APPLICATION_WORKERS", "4"))),
+    thread_name_prefix="application-prep",
+)
 
 
 class ApplicationLedger:
@@ -54,33 +62,35 @@ def apply_to_jobs(
 ) -> list[ApplicationResult]:
     ledger = ApplicationLedger(config.application.data_dir)
     results: list[ApplicationResult] = []
+    pending = []
     for job in jobs:
         if ledger.already_applied(job):
-            draft_detail = write_application_draft(job, resume, ats_report, config)
-            results.append(
-                ApplicationResult(
-                    job,
-                    "skipped",
-                    f"Already present in ledger. Draft saved to {draft_detail}",
-                )
-            )
+            pending.append((APPLICATION_EXECUTOR.submit(_prepare_existing_job, job, resume, ats_report, config), False))
             continue
 
-        if config.application.mode == "email" and job.recruiter_email:
-            try:
-                detail = send_email_application(job, resume, ats_report, config)
-                result = ApplicationResult(job, "emailed", detail)
-            except Exception as exc:
-                draft_detail = write_application_draft(job, resume, ats_report, config)
-                detail = f"Email failed: {exc}. Draft saved to {draft_detail}"
-                result = ApplicationResult(job, "email_failed", detail)
-        else:
-            detail = write_application_draft(job, resume, ats_report, config)
-            result = ApplicationResult(job, "drafted", detail)
+        pending.append((APPLICATION_EXECUTOR.submit(_prepare_application, job, resume, ats_report, config), True))
 
-        ledger.record(result)
+    for future, should_record in pending:
+        result = future.result()
+        if should_record:
+            ledger.record(result)
         results.append(result)
     return results
+
+
+def _prepare_existing_job(job: JobLead, resume: Resume, ats_report: AtsReport, config: AppConfig) -> ApplicationResult:
+    detail = write_application_draft(job, resume, ats_report, config)
+    return ApplicationResult(job, "skipped", f"Already present in ledger. Draft saved to {detail}")
+
+
+def _prepare_application(job: JobLead, resume: Resume, ats_report: AtsReport, config: AppConfig) -> ApplicationResult:
+    if config.application.mode == "email" and job.recruiter_email:
+        try:
+            return ApplicationResult(job, "emailed", send_email_application(job, resume, ats_report, config))
+        except Exception as exc:
+            draft_detail = write_application_draft(job, resume, ats_report, config)
+            return ApplicationResult(job, "email_failed", f"Email failed: {exc}. Draft saved to {draft_detail}")
+    return ApplicationResult(job, "drafted", write_application_draft(job, resume, ats_report, config))
 
 
 def write_application_draft(

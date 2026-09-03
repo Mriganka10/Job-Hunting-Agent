@@ -8,6 +8,7 @@ from urllib.parse import quote_plus
 
 import requests
 
+from . import http_client
 from .job_validation import normalize_employment_type, normalize_workplace_mode, parse_job_datetime
 from .models import CandidateProfile, JobLead
 
@@ -28,13 +29,12 @@ class RemotiveAdapter:
         del profile
         query = intent.roles[0] if intent.roles else intent.query
         try:
-            response = requests.get(
+            payload = http_client.get_json(
                 f"{self.endpoint}?search={quote_plus(query)}&limit={max(10, config.max_jobs_per_portal * 3)}",
                 headers=API_HEADERS,
                 timeout=API_TIMEOUT_SECONDS,
+                ttl_seconds=300,
             )
-            response.raise_for_status()
-            payload = response.json()
         except (requests.RequestException, ValueError, TypeError):
             return []
         records = payload.get("jobs", []) if isinstance(payload, dict) else []
@@ -86,13 +86,12 @@ class ArbeitnowAdapter:
         leads: list[JobLead] = []
         for page in range(1, 4):
             try:
-                response = requests.get(
+                payload = http_client.get_json(
                     f"{self.endpoint}?page={page}",
                     headers=API_HEADERS,
                     timeout=API_TIMEOUT_SECONDS,
+                    ttl_seconds=300,
                 )
-                response.raise_for_status()
-                payload = response.json()
             except (requests.RequestException, ValueError, TypeError):
                 break
             records = payload.get("data", []) if isinstance(payload, dict) else []

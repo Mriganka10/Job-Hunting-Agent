@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any, Iterator
 DATA_DIR = Path(os.getenv("JOB_AGENT_DATA_DIR", "data"))
 DATABASE_URL = os.getenv("JOB_AGENT_DATABASE_URL", f"sqlite:///{DATA_DIR / 'job_agent.db'}")
 IS_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+_run_payload_lock = threading.RLock()
 
 
 def utcnow() -> datetime:
@@ -648,6 +650,20 @@ def run_for_user(user_email: str, run_id: int) -> dict[str, Any] | None:
             (normalized, int(run_id)),
         )
     return _decode_row(row) if row else None
+
+
+def mutate_run_payload(user_email: str, run_id: int, mutator) -> dict[str, Any] | None:
+    """Atomically update one private run payload within this application process."""
+    normalized = normalize_email(user_email)
+    with _run_payload_lock, connection() as conn:
+        row = _fetchone(conn, "SELECT payload FROM run_records WHERE user_email = ? AND id = ?", (normalized, int(run_id)))
+        if not row:
+            return None
+        raw = row.get("payload")
+        payload = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+        updated = mutator(payload) or payload
+        _execute(conn, "UPDATE run_records SET payload = ? WHERE user_email = ? AND id = ?", (_json_dump(updated), normalized, int(run_id)))
+        return updated
 
 
 def save_schedule(
