@@ -4,7 +4,8 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 import job_hunting_agent.web as web
-from job_hunting_agent.db import record_run
+from job_hunting_agent.db import mock_interview_question_history, record_run
+from job_hunting_agent.interview_questions import editor_metadata
 from job_hunting_agent.models import ApplicationResult, JobLead
 from job_hunting_agent.web import (
     APP_SECRET,
@@ -38,6 +39,58 @@ def test_interview_modes_use_distinct_category_strategies_without_duplicates() -
     for sequence in (quick, standard, deep):
         prompts = [item["question"] for item in sequence]
         assert len(prompts) == len(set(prompts))
+
+
+def test_question_selection_prefers_unseen_prompts_and_preserves_topic_diversity() -> None:
+    groups = web._mock_interview_questions_for(("Data Engineer",), ("Python", "SQL", "AWS"))
+    first = _interview_question_sequence(groups, 10, "deep", seed="session-one")
+    second = _interview_question_sequence(
+        groups,
+        10,
+        "deep",
+        previous_questions=first,
+        seed="session-two",
+    )
+
+    assert not ({item["question"] for item in first} & {item["question"] for item in second})
+    assert all(not item["previously_asked"] for item in second)
+    assert len({item["topic"] for item in second}) >= 7
+
+
+def test_code_editor_metadata_detects_implementation_prompts_without_conceptual_false_positives() -> None:
+    assert editor_metadata("Write a SQL query that returns the latest order for each customer.") == {
+        "answer_mode": "code",
+        "editor_language": "sql",
+    }
+    assert editor_metadata("Implement a C++ function that reverses a linked list.") == {
+        "answer_mode": "code",
+        "editor_language": "cpp",
+    }
+    assert editor_metadata("Explain how SQL indexing changes query planning.")["answer_mode"] == "text"
+    assert editor_metadata("When inheriting unfamiliar code, how do you build confidence?")["answer_mode"] == "text"
+    assert editor_metadata("Write a COBOL routine for this record layout.") == {
+        "answer_mode": "code",
+        "editor_language": "plaintext",
+    }
+    groups = web._mock_interview_questions_for(("Backend Engineer",), ("Java", "SQL"))
+    session = _interview_question_sequence(groups, 8, "standard", seed="code-editor-session")
+    assert any(item["answer_mode"] == "code" and item["editor_language"] in {"java", "sql"} for item in session)
+
+
+def test_mock_interview_question_history_is_user_scoped_and_persistent() -> None:
+    email = f"question-history-{uuid4().hex}@example.com"
+    other_email = f"question-history-{uuid4().hex}@example.com"
+    client = authenticated_client(email)
+
+    first = client.post("/api/mock-interview/start", json={"region": "India", "interview_mode": "standard"}).json()
+    second = client.post("/api/mock-interview/start", json={"region": "India", "interview_mode": "standard"}).json()
+
+    assert first["selection"]["new_questions"] == 8
+    assert second["selection"]["new_questions"] == 8
+    assert second["selection"]["reused_questions"] == 0
+    assert not ({item["question"] for item in first["questions"]} & {item["question"] for item in second["questions"]})
+    assert len(mock_interview_question_history(email)) == 16
+    assert mock_interview_question_history(other_email) == []
 
 
 def test_mock_score_uses_rubric_and_counts_unanswered_questions() -> None:
@@ -322,6 +375,12 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert "Turn Camera Off" in page.text
     assert "Camera On" not in page.text
     assert "camera-preview" in page.text
+    assert 'id="code-editor"' in page.text
+    assert 'id="code-language"' in page.text
+    assert "codeEditor.setRangeText('  ', start, end, 'end')" in page.text
+    assert "item.answer_mode === 'code'" in page.text
+    assert "Your code is saved as written and is not executed." in page.text
+    assert '<option value="plaintext">Other / Plain text</option>' in page.text
     assert "Your video" in page.text
     assert "function stopCamera()" in page.text
     assert "mediaStream.getTracks().forEach((track) => track.stop())" in page.text
@@ -417,6 +476,53 @@ def test_static_ai_interviewer_asset_is_served() -> None:
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
+
+
+def test_accent_catalog_requires_auth_and_lists_six_female_locales(monkeypatch) -> None:
+    monkeypatch.setattr(web, "AZURE_SPEECH_KEY", "")
+    assert TestClient(app).get("/api/mock-interview/accents").status_code == 401
+    result = authenticated_client().get("/api/mock-interview/accents").json()
+    assert result["tts_provider"] == "browser"
+    assert {item["lang"] for item in result["accents"]} == {"en-IN", "en-US", "en-GB", "en-AU", "en-CA", "en-SG"}
+    assert all(item["gender"] == "Female" and item["interviewer"] == "Sarah" for item in result["accents"])
+
+
+def test_accent_preview_uses_fixed_text_and_selected_regional_voice(monkeypatch) -> None:
+    monkeypatch.setattr(web, "AZURE_SPEECH_KEY", "test-key")
+    monkeypatch.setattr(web, "AZURE_SPEECH_REGION", "test-region")
+    calls = []
+    def synthesize(text, voice):
+        calls.append((text, voice))
+        return b"regional audio"
+    monkeypatch.setattr(web, "_azure_speech_audio", synthesize)
+    client = authenticated_client()
+    for country in ("India", "United States", "United Kingdom", "Australia", "Canada", "Singapore"):
+        response = client.post("/api/mock-interview/speech/preview", json={"region": country, "text": "untrusted arbitrary text"})
+        assert response.status_code == 200
+        assert response.content == b"regional audio"
+        assert calls[-1][1]["azure_voice"] == web._accent_for_region(country)["azure_voice"]
+        assert "untrusted arbitrary text" not in calls[-1][0]
+    assert client.post("/api/mock-interview/speech/preview", json={"region": "unsupported"}).status_code == 400
+
+
+def test_accent_preview_missing_configuration_is_explicit(monkeypatch) -> None:
+    monkeypatch.setattr(web, "AZURE_SPEECH_KEY", "")
+    client = authenticated_client()
+    assert client.post("/api/mock-interview/speech/preview", json={"region": "Canada"}).status_code == 503
+    assert TestClient(app).post("/api/mock-interview/speech/preview", json={"region": "Canada"}).status_code == 401
+
+
+def test_interview_rejects_unknown_country_and_ignores_spoofed_accent() -> None:
+    client = authenticated_client()
+    assert client.post("/api/mock-interview/start", json={"region": "unsupported"}).status_code == 400
+    response = client.post("/api/mock-interview/start", json={"region": "Canada", "accent": "British English"})
+    assert response.status_code == 200
+    assert response.json()["accent"] == "Canadian English"
+    page = client.get("/mock-interview").text
+    assert 'id="preview-accent"' in page
+    assert "region.disabled = active" in page
+    assert "globalFemaleHints" not in page
+    assert "nonMaleExact" not in page
 
 
 def test_mock_interview_requires_authenticated_user() -> None:
