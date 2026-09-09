@@ -39,6 +39,7 @@ from .db import (
     latest_runs,
     latest_mock_interviews,
     mock_interview_session,
+    mock_interview_question_history,
     mutate_run_payload,
     normalize_email,
     record_run,
@@ -53,6 +54,7 @@ from .db import (
 )
 from .models import AtsReport, CandidateProfile, JobLead, Resume
 from .job_pagination import DEFAULT_JOB_PAGE_SIZE, paginate_jobs
+from .interview_questions import build_question_groups, select_question_sequence
 from .performance_cache import cached_document, document_cache_key
 from .resume_builder import write_base_resume, write_tailored_resume
 from .storage import StoredObject, download_file, mirror_artifacts, presigned_download_url, upload_file
@@ -86,6 +88,7 @@ DOCUMENT_WORKERS = max(1, int(os.getenv("JOB_AGENT_DOCUMENT_WORKERS", "2")))
 DOCUMENT_EXECUTOR = ThreadPoolExecutor(max_workers=DOCUMENT_WORKERS, thread_name_prefix="resume-render")
 _document_tasks: set[str] = set()
 _document_tasks_lock = threading.Lock()
+_interview_start_lock = threading.Lock()
 
 
 class DailyScheduler:
@@ -615,22 +618,32 @@ def start_mock_interview(
     latest_payload = (latest or {}).get("payload") or {}
     interview = _mock_interview_payload(profile, latest_payload)
     region = str(payload.get("region") or "India")
-    accent = str(payload.get("accent") or _accent_for_region(region)["label"])
+    voice = _accent_for_region(region)
+    accent = voice["label"]
     requested_limit = max(4, min(int(payload.get("question_limit") or 8), 12))
     interview_mode = str(payload.get("interview_mode") or _interview_mode_for_limit(requested_limit)).strip().lower()
     mode_limits = {"quick": 5, "standard": 8, "deep": 10}
     if interview_mode not in mode_limits:
         raise HTTPException(status_code=400, detail="Interview mode must be quick, standard, or deep.")
     question_limit = mode_limits[interview_mode]
-    questions = _interview_question_sequence(interview["groups"], question_limit, interview_mode)
-    session_id = create_mock_interview_session(
-        user_email,
-        region=region,
-        accent=accent,
-        roles=tuple(interview["roles"]),
-        skills=tuple(interview["skills"]),
-        questions=questions,
-    )
+    # Keep history lookup and reservation together so two simultaneous starts in
+    # this process cannot receive the same unseen set.
+    with _interview_start_lock:
+        history = mock_interview_question_history(user_email)
+        questions = _interview_question_sequence(
+            interview["groups"],
+            question_limit,
+            interview_mode,
+            previous_questions=history,
+        )
+        session_id = create_mock_interview_session(
+            user_email,
+            region=region,
+            accent=accent,
+            roles=tuple(interview["roles"]),
+            skills=tuple(interview["skills"]),
+            questions=questions,
+        )
     return {
         "session_id": session_id,
         "region": region,
@@ -641,6 +654,11 @@ def start_mock_interview(
         "roles": interview["roles"],
         "skills": interview["skills"],
         "questions": questions,
+        "selection": {
+            "new_questions": sum(not question["previously_asked"] for question in questions),
+            "reused_questions": sum(question["previously_asked"] for question in questions),
+            "history_questions_considered": len(history),
+        },
     }
 
 
@@ -1363,87 +1381,7 @@ def _mock_interview_payload(profile: dict, latest_payload: dict | None = None) -
 
 
 def _mock_interview_questions_for(roles: tuple[str, ...], skills: tuple[str, ...]) -> list[dict]:
-    skill_text = " ".join(skills).lower()
-    role_text = " ".join(roles).lower()
-    primary_role = roles[0] if roles else "target role"
-    groups: list[dict] = [
-        {
-            "title": "Role And Project Deep Dive",
-            "tag": primary_role,
-            "questions": [
-                f"Walk me through your strongest project for a {primary_role} role. What business problem did it solve, what tradeoffs did you make, and how did you measure success?",
-                "Pick one production issue from your resume. How did you identify the root cause, communicate status, and prevent recurrence?",
-                "Explain a recent architecture decision where you balanced scalability, cost, delivery timeline, and maintainability.",
-            ],
-        },
-        {
-            "title": "SQL And Python",
-            "tag": "Core coding",
-            "questions": [
-                "Write a SQL query to identify duplicate customer records, keep the latest record, and explain how you would index the table.",
-                "How would you optimize a slow SQL query with joins, aggregations, and date filters on a large fact table?",
-                "In Python, how would you validate, transform, and load a mixed CSV/JSON feed while handling bad records and retries?",
-            ],
-        },
-        {
-            "title": "Data Engineering System Design",
-            "tag": "Pipelines",
-            "questions": [
-                "Design an end-to-end batch pipeline that ingests files, validates schema, handles late-arriving data, and publishes curated datasets.",
-                "How would you implement data quality checks, observability, lineage, and alerting for a critical banking data workflow?",
-                "Explain how you would backfill two years of data without breaking downstream reports or SLAs.",
-            ],
-        },
-    ]
-    if any(term in skill_text for term in ("spark", "scala", "pyspark", "hadoop", "hive", "sqoop", "databricks")):
-        groups.append(
-            {
-                "title": "Spark, Scala, And Big Data",
-                "tag": "Distributed data",
-                "questions": [
-                    "Explain Spark shuffle, partitioning, and data skew. How would you debug and fix a job that suddenly became slow?",
-                    "When would you use broadcast joins, bucketing, caching, or adaptive query execution in Spark?",
-                    "How would you design a Spark pipeline for CSV, JSON, and Parquet data with schema evolution and replay support?",
-                    "Compare DataFrames, RDDs, and Spark SQL for maintainability and performance in a production pipeline.",
-                ],
-            }
-        )
-    if any(term in skill_text for term in ("aws", "azure", "gcp", "cloud", "databricks", "jenkins", "autosys")):
-        groups.append(
-            {
-                "title": "Cloud, Scheduling, And DevOps",
-                "tag": "Production readiness",
-                "questions": [
-                    "How would you deploy a data pipeline with environment-specific configuration, secrets management, and rollback support?",
-                    "How do you monitor scheduled jobs and distinguish data failures from infrastructure failures?",
-                    "Explain how you would design cloud storage zones for raw, curated, and consumption-ready datasets.",
-                ],
-            }
-        )
-    if any(term in skill_text or term in role_text for term in ("machine learning", "ml", "rag", "llm", "model", "analytics")):
-        groups.append(
-            {
-                "title": "Analytics, ML, And GenAI",
-                "tag": "Current market focus",
-                "questions": [
-                    "How would you prepare features, avoid leakage, and evaluate a machine learning model for a business workflow?",
-                    "Explain how you would productionize a model with monitoring for drift, latency, quality, and retraining triggers.",
-                    "For a RAG-style assistant, how would you design chunking, retrieval evaluation, access control, and hallucination checks?",
-                ],
-            }
-        )
-    groups.append(
-        {
-            "title": "Behavioral And Leadership",
-            "tag": "Client delivery",
-            "questions": [
-                "Describe a time you led multiple stakeholders or vendors through an ambiguous delivery problem.",
-                "Tell me about a time you disagreed with an architecture or implementation approach. How did you resolve it?",
-                "How do you explain a technical failure or delivery risk to a non-technical stakeholder?",
-            ],
-        }
-    )
-    return groups
+    return build_question_groups(roles, skills)
 
 
 def _interview_mode_for_limit(limit: int) -> str:
@@ -1454,47 +1392,21 @@ def _interview_mode_for_limit(limit: int) -> str:
     return "standard"
 
 
-def _interview_question_sequence(groups: list[dict], limit: int, mode: str = "standard") -> list[dict]:
-    """Build a varied, non-repeating session with mode-specific depth and category coverage."""
-    rng = secrets.SystemRandom()
-    pools: list[dict] = []
-    for group in groups:
-        candidates = list(dict.fromkeys(group.get("questions") or []))
-        rng.shuffle(candidates)
-        pools.append({**group, "questions": candidates})
-
-    behavioral = [group for group in pools if "Behavioral" in group.get("title", "")]
-    technical = [group for group in pools if group not in behavioral]
-    if mode == "quick":
-        ordered_groups = behavioral + technical
-    elif mode == "deep":
-        ordered_groups = list(reversed(technical)) + behavioral
-    else:
-        ordered_groups = technical + behavioral
-
-    selected: list[tuple[dict, str]] = []
-    # First pass guarantees breadth. Later passes add depth without repeating text.
-    for group in ordered_groups:
-        if group.get("questions"):
-            selected.append((group, group["questions"].pop(0)))
-        if len(selected) >= limit:
-            break
-    while len(selected) < limit and any(group.get("questions") for group in ordered_groups):
-        available = [group for group in ordered_groups if group.get("questions")]
-        rng.shuffle(available)
-        for group in available:
-            selected.append((group, group["questions"].pop(0)))
-            if len(selected) >= limit:
-                break
-    return [
-        {
-            "id": f"q{index}",
-            "category": group.get("title", "Interview"),
-            "tag": group.get("tag", ""),
-            "question": question,
-        }
-        for index, (group, question) in enumerate(selected[:limit], start=1)
-    ]
+def _interview_question_sequence(
+    groups: list[dict],
+    limit: int,
+    mode: str = "standard",
+    *,
+    previous_questions: tuple[dict | str, ...] | list[dict | str] = (),
+    seed: str | None = None,
+) -> list[dict]:
+    return select_question_sequence(
+        groups,
+        limit,
+        mode,
+        previous_questions=previous_questions,
+        seed=seed,
+    )
 
 
 def _accent_for_region(region: str) -> dict:
@@ -1509,7 +1421,38 @@ def _accent_for_region(region: str) -> dict:
         "canada": {"label": "Canadian English", "lang": "en-CA", "azure_voice": "en-CA-ClaraNeural", "female_voice_hints": ["Clara", "Linda"], "male_voice_hints": ["Liam"]},
         "singapore": {"label": "Singapore English", "lang": "en-SG", "azure_voice": "en-SG-LunaNeural", "female_voice_hints": ["Luna", "Seraphina", "Jia"], "male_voice_hints": ["Wayne"]},
     }
-    return accents.get(normalized, {"label": "Neutral English", "lang": "en-US", "azure_voice": "en-US-JennyNeural", "female_voice_hints": ["Zira", "Jenny", "Samantha"], "male_voice_hints": ["David", "Mark", "Guy"]})
+    if normalized not in accents:
+        raise HTTPException(status_code=400, detail="Choose India, United States, United Kingdom, Australia, Canada, or Singapore.")
+    return {**accents[normalized], "interviewer": "Sarah", "gender": "Female"}
+
+
+@app.get("/api/mock-interview/accents")
+def interviewer_accents(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    require_user(job_agent_session)
+    countries = ("India", "United States", "United Kingdom", "Australia", "Canada", "Singapore")
+    return {
+        "accents": [{"region": country, **_accent_for_region(country)} for country in countries],
+        "tts_provider": "azure" if AZURE_SPEECH_KEY and AZURE_SPEECH_REGION else "browser",
+        "preview_text": "Hello, I'm Sarah, your interviewer. Tell me about a project you are proud of and the impact of your work.",
+    }
+
+
+@app.post("/api/mock-interview/speech/preview")
+def preview_interviewer_accent(
+    payload: Annotated[dict, Body()],
+    job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> Response:
+    require_user(job_agent_session)
+    voice = _accent_for_region(str(payload.get("region") or "India"))
+    if not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
+        raise HTTPException(status_code=503, detail="Regional neural speech requires Azure Speech configuration.")
+    try:
+        audio = _azure_speech_audio(
+            "Hello, I'm Sarah, your interviewer. Tell me about a project you are proud of and the impact of your work.", voice
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="This regional voice is temporarily unavailable. Please retry.") from exc
+    return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/mock-interview/speech")
@@ -2119,6 +2062,13 @@ def _mock_interview_page(user_email: str) -> str:
     select, textarea {{ width:100%; border:1px solid rgba(148,163,184,.45); border-radius:7px; padding:10px 11px; font:inherit; color:#eef6ff; background:rgba(15,23,42,.88); }}
     textarea {{ min-height:210px; resize:vertical; line-height:1.45; }}
     .answer-pad {{ padding:0 14px 14px; }}
+    .code-answer {{ padding:10px 14px 0; }}
+    .editor-toolbar {{ display:grid; grid-template-columns:minmax(0,1fr) 150px; gap:10px; align-items:end; margin-bottom:8px; }}
+    .editor-toolbar label {{ margin:0 0 6px; }}
+    .editor-note {{ margin:0; color:#cbd5e1; font-size:12px; line-height:1.4; }}
+    .code-editor {{ min-height:280px; resize:vertical; tab-size:2; white-space:pre; overflow:auto; color:#dbeafe; background:#050b16; font:13px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }}
+    .transcript-code {{ margin:8px 0 0; max-height:260px; overflow:auto; padding:10px; border:1px solid rgba(148,163,184,.25); border-radius:6px; color:#dbeafe; background:#050b16; font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space:pre; }}
+    .language-chip {{ display:inline-flex; margin-top:5px; color:#93c5fd; font-size:11px; font-weight:850; }}
     .button-row {{ display:flex; flex-wrap:wrap; gap:9px; margin-top:12px; }}
     .setup-panel {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:12px; padding:14px; border:1px solid rgba(148,163,184,.3); border-radius:8px; background:rgba(15,23,42,.72); }}
     .setup-panel h2 {{ margin:0; font-size:18px; }}
@@ -2163,15 +2113,17 @@ def _mock_interview_page(user_email: str) -> str:
           <p>Choose region, interview length, and enable camera for a realistic practice room.</p>
         </div>
         <div>
-          <label for="region">Region or country accent</label>
+          <label for="region">Interviewer accent</label>
           <select id="region">
-            <option value="India">India English</option>
-            <option value="United States">US English</option>
+            <option value="India">Indian English</option>
+            <option value="United States">American English</option>
             <option value="United Kingdom">British English</option>
             <option value="Australia">Australian English</option>
             <option value="Canada">Canadian English</option>
             <option value="Singapore">Singapore English</option>
           </select>
+          <button id="preview-accent" class="ghost" type="button" disabled>Preview voice</button>
+          <p id="voice-availability" role="status" aria-live="polite">Checking regional voices...</p>
         </div>
         <div>
           <label for="question-limit">Interview length</label>
@@ -2214,11 +2166,37 @@ def _mock_interview_page(user_email: str) -> str:
             <span class="camera-label">Your video</span>
           </section>
           <section class="room-panel answer-area">
-            <div class="panel-head"><h2 class="panel-title">Your Answer</h2><span id="recording-state" class="pill">Idle</span></div>
-            <div class="mic-orb">MIC</div>
-            <label for="answer">Response transcript</label>
-            <div class="answer-pad">
+            <div class="panel-head"><h2 id="answer-panel-title" class="panel-title">Your Answer</h2><span id="recording-state" class="pill">Idle</span></div>
+            <div id="spoken-answer">
+              <div class="mic-orb">MIC</div>
+              <label for="answer">Response transcript</label>
+              <div class="answer-pad">
               <textarea id="answer" placeholder="Speak after clicking Record, or type your answer here. Use examples, technical depth, and measurable impact."></textarea>
+              </div>
+            </div>
+            <div id="code-answer" class="code-answer hidden">
+              <div class="editor-toolbar">
+                <div>
+                  <label for="code-editor">Code response</label>
+                  <p class="editor-note">Your code is saved as written and is not executed.</p>
+                </div>
+                <div>
+                  <label for="code-language">Language</label>
+                  <select id="code-language">
+                    <option value="sql">SQL</option><option value="python">Python</option><option value="cpp">C++</option><option value="c">C</option>
+                    <option value="java">Java</option><option value="javascript">JavaScript</option><option value="typescript">TypeScript</option>
+                    <option value="csharp">C#</option><option value="go">Go</option><option value="rust">Rust</option>
+                    <option value="php">PHP</option><option value="ruby">Ruby</option><option value="kotlin">Kotlin</option>
+                    <option value="swift">Swift</option><option value="scala">Scala</option><option value="r">R</option>
+                    <option value="shell">Shell</option><option value="html">HTML/CSS</option><option value="dart">Dart</option>
+                    <option value="matlab">MATLAB</option><option value="perl">Perl</option><option value="lua">Lua</option>
+                    <option value="graphql">GraphQL</option><option value="mongodb">MongoDB Query</option><option value="plaintext">Other / Plain text</option>
+                  </select>
+                </div>
+              </div>
+              <textarea id="code-editor" class="code-editor" aria-label="Code response editor" autocomplete="off" autocapitalize="off" spellcheck="false" wrap="off" placeholder="Write your solution here..."></textarea>
+            </div>
+            <div class="answer-pad">
               <div class="button-row">
                 <button id="save-btn" class="primary" type="button" disabled>Submit & Next</button>
                 <button id="clear-btn" class="dark" type="button">Clear</button>
@@ -2244,8 +2222,19 @@ def _mock_interview_page(user_email: str) -> str:
     const clearBtn = document.getElementById('clear-btn');
     const cameraBtn = document.getElementById('camera-btn');
     const region = document.getElementById('region');
+    const previewAccent = document.getElementById('preview-accent');
+    const voiceAvailability = document.getElementById('voice-availability');
+    let accentCatalog = null;
+    let previewGeneration = 0;
+    let previewAudio = null;
+    let previewUrl = null;
     const questionLimit = document.getElementById('question-limit');
     const answer = document.getElementById('answer');
+    const spokenAnswer = document.getElementById('spoken-answer');
+    const codeAnswer = document.getElementById('code-answer');
+    const codeEditor = document.getElementById('code-editor');
+    const codeLanguage = document.getElementById('code-language');
+    const answerPanelTitle = document.getElementById('answer-panel-title');
     const questionText = document.getElementById('question-text');
     const category = document.getElementById('category');
     const codeBox = document.getElementById('code-box');
@@ -2317,23 +2306,13 @@ def _mock_interview_page(user_email: str) -> str:
       const targetLanguage = String(voiceProfile?.lang || '').toLowerCase().replace('_', '-');
       const hints = (voiceProfile?.female_voice_hints || []).map((hint) => hint.toLowerCase());
       const maleHints = (voiceProfile?.male_voice_hints || []).map((hint) => hint.toLowerCase());
-      const globalFemaleHints = ['heera','veena','aditi','raveena','neerja','kavya','swara','zira','jenny','aria','samantha','ava','joanna','salli','hazel','sonia','libby','susan','amy','emma','karen','catherine','olivia','nicole','natasha','clara','linda','luna','seraphina'];
       const exactVoices = voices.filter((voice) => String(voice.lang || '').toLowerCase().replace('_', '-') === targetLanguage);
       const knownFemaleExact = exactVoices.find((voice) => {{
         const name = String(voice.name || '').toLowerCase();
-        return hints.some((hint) => name.includes(hint));
+        return hints.some((hint) => name.includes(hint)) && !maleHints.some((hint) => name.includes(hint));
       }});
       if (knownFemaleExact) return knownFemaleExact;
-      const nonMaleExact = exactVoices.find((voice) => {{
-        const name = String(voice.name || '').toLowerCase();
-        return !maleHints.some((hint) => name.includes(hint));
-      }});
-      if (nonMaleExact) return nonMaleExact;
-      return voices.find((voice) => {{
-        const language = String(voice.lang || '').toLowerCase().replace('_', '-');
-        const name = String(voice.name || '').toLowerCase();
-        return language.startsWith('en-') && globalFemaleHints.some((hint) => name.includes(hint));
-      }}) || null;
+      return null;
     }}
     async function waitForVoices() {{
       if (!window.speechSynthesis || window.speechSynthesis.getVoices().length) return;
@@ -2369,7 +2348,7 @@ def _mock_interview_page(user_email: str) -> str:
       if (!voice) {{
         speakBtn.disabled = true;
         accentLabel.textContent = `${{session.accent}} · compatible voice unavailable`;
-        statusText.textContent = `No compatible ${{session.accent}} or known female English voice was exposed by this browser. Install the Windows language speech pack, restart the browser, and try again.`;
+        statusText.textContent = `The selected ${{session.accent}} female voice is unavailable. Configure Azure Speech or install a matching regional female voice. Text questions remain available.`;
         return;
       }}
       const utterance = new SpeechSynthesisUtterance(text);
@@ -2377,10 +2356,7 @@ def _mock_interview_page(user_email: str) -> str:
       utterance.voice = voice;
       utterance.rate = 0.92;
       utterance.pitch = 1;
-      const selectedLanguage = String(voice.lang || '').toLowerCase().replace('_', '-');
-      const requestedLanguage = String(session.voice.lang || '').toLowerCase().replace('_', '-');
-      const fallbackLabel = selectedLanguage === requestedLanguage ? '' : ' · female fallback';
-      accentLabel.textContent = `${{session.accent}} · ${{voice.name}}${{fallbackLabel}}`;
+      accentLabel.textContent = `${{session.accent}} · ${{voice.name}}`;
       window.speechSynthesis.speak(utterance);
     }}
     function renderQuestion() {{
@@ -2388,7 +2364,9 @@ def _mock_interview_page(user_email: str) -> str:
       category.textContent = item.category;
       questionText.textContent = item.question;
       answer.value = '';
+      codeEditor.value = '';
       recognitionBase = '';
+      setAnswerMode(item);
       const total = session.questions.length;
       questionCountPill.textContent = `${{activeIndex + 1}}/${{total}}`;
       progressLabel.textContent = `${{Math.min(activeIndex + 1, total)}}/${{total}}`;
@@ -2401,16 +2379,38 @@ def _mock_interview_page(user_email: str) -> str:
       transcript.innerHTML = answers.map((item, index) => `
         <article class="turn">
           <strong>Q${{index + 1}}. ${{escapeHtml(item.question)}}</strong>
-          <div>${{escapeHtml(item.answer || 'No answer captured.')}}</div>
+          ${{item.answer_type === 'code'
+            ? `<span class="language-chip">${{escapeHtml(languageLabel(item.code_language))}}</span><pre class="transcript-code"><code>${{escapeHtml(item.answer || 'No code submitted.')}}</code></pre>`
+            : `<div>${{escapeHtml(item.answer || 'No answer captured.')}}</div>`}}
         </article>
       `).join('') || '<div class="turn">No answers captured yet.</div>';
     }}
+    function languageLabel(value) {{
+      const option = [...codeLanguage.options].find((item) => item.value === value);
+      return option ? option.textContent : 'Code';
+    }}
+    function setAnswerMode(item) {{
+      const codeMode = item?.answer_mode === 'code';
+      spokenAnswer.classList.toggle('hidden', codeMode);
+      codeAnswer.classList.toggle('hidden', !codeMode);
+      answerPanelTitle.textContent = codeMode ? 'Code Answer' : 'Your Answer';
+      recordingState.textContent = codeMode ? 'Editor' : 'Idle';
+      recordBtn.disabled = codeMode || !session;
+      if (codeMode) {{
+        const supported = [...codeLanguage.options].some((option) => option.value === item.editor_language);
+        codeLanguage.value = supported ? item.editor_language : 'plaintext';
+        codeEditor.focus();
+      }}
+    }}
     function setInterviewActive(active) {{
       startBtn.disabled = active;
+      region.disabled = active;
+      previewAccent.disabled = active || !accentCatalog;
       stopBtn.classList.toggle('hidden', !active);
       speakBtn.disabled = !active || (session?.tts_provider !== 'azure' && !preferredVoice(session?.voice || {{}}));
-      recordBtn.disabled = !active;
+      recordBtn.disabled = !active || session?.questions?.[activeIndex]?.answer_mode === 'code';
       saveBtn.disabled = !active;
+      if (!active) updateAccentAvailability();
     }}
     async function loadQuestions() {{
       const response = await fetch('/api/mock-interview/questions');
@@ -2438,6 +2438,11 @@ def _mock_interview_page(user_email: str) -> str:
       `).join('') : '<p class="muted">No completed interviews yet.</p>');
     }}
     async function startInterview() {{
+      stopAccentPreview();
+      region.disabled = true;
+      previewAccent.disabled = true;
+      startBtn.disabled = true;
+      try {{
       const response = await fetch('/api/mock-interview/start', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
@@ -2446,6 +2451,7 @@ def _mock_interview_page(user_email: str) -> str:
       const payload = await response.json();
       if (!response.ok) {{
         statusText.textContent = payload.detail || 'Unable to start interview.';
+        setInterviewActive(false);
         return;
       }}
       await waitForVoices();
@@ -2461,6 +2467,10 @@ def _mock_interview_page(user_email: str) -> str:
       scorecard.classList.add('hidden');
       renderTranscript();
       renderQuestion();
+      }} catch (error) {{
+        statusText.textContent = 'Unable to start interview. Please retry.';
+        setInterviewActive(false);
+      }}
     }}
     function setupRecognition() {{
       const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -2533,7 +2543,16 @@ def _mock_interview_page(user_email: str) -> str:
         recognition.stop();
       }}
       const item = session.questions[activeIndex];
-      answers.push({{question_id: item.id, category: item.category, question: item.question, answer: answer.value.trim()}});
+      const codeMode = item.answer_mode === 'code';
+      const response = codeMode ? codeEditor.value.trim() : answer.value.trim();
+      answers.push({{
+        question_id: item.id,
+        category: item.category,
+        question: item.question,
+        answer: response,
+        answer_type: codeMode ? 'code' : 'text',
+        code_language: codeMode ? codeLanguage.value : '',
+      }});
       renderTranscript();
       if (next && activeIndex < session.questions.length - 1) {{
         activeIndex += 1;
@@ -2584,9 +2603,95 @@ def _mock_interview_page(user_email: str) -> str:
     speakBtn.addEventListener('click', () => session && speak(session.questions[activeIndex].question, session.questions[activeIndex].id));
     recordBtn.addEventListener('click', recordAnswer);
     saveBtn.addEventListener('click', () => saveAnswer(true));
-    clearBtn.addEventListener('click', () => {{ answer.value = ''; recognitionBase = ''; }});
+    clearBtn.addEventListener('click', () => {{
+      if (session?.questions?.[activeIndex]?.answer_mode === 'code') codeEditor.value = '';
+      else {{ answer.value = ''; recognitionBase = ''; }}
+    }});
+    codeEditor.addEventListener('keydown', (event) => {{
+      if (event.key !== 'Tab') return;
+      event.preventDefault();
+      const start = codeEditor.selectionStart;
+      const end = codeEditor.selectionEnd;
+      codeEditor.setRangeText('  ', start, end, 'end');
+    }});
     cameraBtn.addEventListener('click', enableCamera);
-    region.addEventListener('change', () => {{ accentLabel.textContent = region.options[region.selectedIndex].text; }});
+    function stopAccentPreview() {{
+      previewGeneration += 1;
+      if (previewAudio) previewAudio.pause();
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewAudio = null;
+      previewUrl = null;
+      window.speechSynthesis?.cancel();
+    }}
+    function selectedAccent() {{
+      return accentCatalog?.accents.find((item) => item.region === region.value);
+    }}
+    function updateAccentAvailability() {{
+      const selected = selectedAccent();
+      if (!selected || region.disabled) return;
+      const browserVoice = preferredVoice(selected);
+      const available = accentCatalog.tts_provider === 'azure' || browserVoice;
+      previewAccent.disabled = !available;
+      voiceAvailability.textContent = accentCatalog.tts_provider === 'azure'
+        ? `${{selected.label}} · Sarah · Neural voice configured`
+        : browserVoice ? `${{selected.label}} · ${{browserVoice.name}}`
+        : `${{selected.label}} female voice unavailable on this device. Azure Speech is required for all six regional voices.`;
+    }}
+    async function loadAccentCatalog() {{
+      try {{
+        const response = await fetch('/api/mock-interview/accents');
+        if (!response.ok) throw new Error('Unable to load regional voices.');
+        accentCatalog = await response.json();
+        await waitForVoices();
+        updateAccentAvailability();
+      }} catch (error) {{ voiceAvailability.textContent = error.message; }}
+    }}
+    previewAccent.addEventListener('click', async () => {{
+      stopAccentPreview();
+      const generation = previewGeneration;
+      const selected = selectedAccent();
+      if (!selected || region.disabled) return;
+      previewAccent.disabled = true;
+      voiceAvailability.textContent = `Preparing ${{selected.label}} preview...`;
+      try {{
+        if (accentCatalog.tts_provider === 'azure') {{
+          const response = await fetch('/api/mock-interview/speech/preview', {{
+            method: 'POST', headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{region: selected.region}})
+          }});
+          if (!response.ok) throw new Error('Regional voice preview unavailable. Please retry.');
+          const audio = await response.blob();
+          if (generation !== previewGeneration) return;
+          previewUrl = URL.createObjectURL(audio);
+          previewAudio = new Audio(previewUrl);
+          previewAudio.addEventListener('ended', () => {{
+            if (generation === previewGeneration) stopAccentPreview();
+          }}, {{once: true}});
+          await previewAudio.play();
+        }} else {{
+          const voice = preferredVoice(selected);
+          if (!voice) throw new Error('No matching regional female voice is installed.');
+          const utterance = new SpeechSynthesisUtterance(accentCatalog.preview_text);
+          utterance.voice = voice;
+          utterance.lang = selected.lang;
+          utterance.rate = 0.92;
+          window.speechSynthesis.speak(utterance);
+        }}
+        if (generation === previewGeneration) updateAccentAvailability();
+      }} catch (error) {{
+        if (generation === previewGeneration) voiceAvailability.textContent = error.message;
+      }} finally {{
+        if (generation === previewGeneration && !region.disabled) previewAccent.disabled = false;
+      }}
+    }});
+    region.addEventListener('change', () => {{
+      stopAccentPreview();
+      accentLabel.textContent = region.options[region.selectedIndex].text;
+      updateAccentAvailability();
+    }});
+    window.speechSynthesis?.addEventListener('voiceschanged', updateAccentAvailability);
+    window.addEventListener('pagehide', stopAccentPreview);
+    loadAccentCatalog();
     renderTranscript();
     loadQuestions();
     loadHistory();

@@ -405,6 +405,30 @@ def latest_mock_interviews(user_email: str, limit: int = 3) -> list[dict[str, An
     return [_decode_mock_interview(row) for row in rows]
 
 
+def mock_interview_question_history(user_email: str, session_limit: int = 200) -> list[dict[str, Any]]:
+    """Return newest-first question history for one user across server restarts."""
+    normalized = normalize_email(user_email)
+    with connection() as conn:
+        rows = _fetchall(
+            conn,
+            """
+            SELECT questions
+            FROM mock_interview_records
+            WHERE user_email = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (normalized, max(1, min(session_limit, 1000))),
+        )
+    history: list[dict[str, Any]] = []
+    for row in rows:
+        value = row.get("questions")
+        questions = json.loads(value) if isinstance(value, str) and value else value
+        if isinstance(questions, list):
+            history.extend(question for question in questions if isinstance(question, dict))
+    return history
+
+
 def save_user_profile(
     user_email: str,
     profile_payload: dict[str, Any],
