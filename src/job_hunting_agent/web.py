@@ -57,6 +57,7 @@ from .job_pagination import DEFAULT_JOB_PAGE_SIZE, paginate_jobs
 from .interview_questions import build_question_groups, select_question_sequence
 from .performance_cache import cached_document, document_cache_key
 from .resume_builder import write_base_resume, write_tailored_resume
+from .scheduler_backend import delete_user_schedule, upsert_user_schedule, uses_eventbridge_scheduler
 from .storage import StoredObject, download_file, mirror_artifacts, presigned_download_url, upload_file
 
 app = FastAPI(title="Job Hunting Agent")
@@ -108,6 +109,7 @@ class DailyScheduler:
         self.config: AppConfig | None = None
         self.user_email: str | None = None
         self.history: list[dict] = []
+        self._externally_active = False
 
     def start(
         self,
@@ -145,6 +147,11 @@ class DailyScheduler:
                     config_payload=_config_payload(config),
                     next_run_at=self.next_run_at,
                 )
+                if uses_eventbridge_scheduler():
+                    upsert_user_schedule(self.user_email, daily_at, self.timezone_name)
+            if uses_eventbridge_scheduler():
+                self._externally_active = True
+                return
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
 
@@ -153,11 +160,15 @@ class DailyScheduler:
             self._stop_event.set()
             self._thread.join(timeout=1)
         self._thread = None
+        self._externally_active = False
         self.next_run_at = None
 
     @property
     def is_running(self) -> bool:
-        return bool(self._thread and self._thread.is_alive())
+        return bool(
+            (self._thread and self._thread.is_alive())
+            or self._externally_active
+        )
 
     def snapshot(self) -> dict:
         return {
@@ -810,6 +821,8 @@ async def start_scheduler(
 def stop_scheduler(job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> dict:
     user_email = require_user(job_agent_session)
     disable_schedule(user_email)
+    if uses_eventbridge_scheduler():
+        delete_user_schedule(user_email)
     return schedulers.stop(user_email)
 
 
@@ -845,6 +858,35 @@ def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user
         result["run_id"] = run_id
         _submit_document_task(f"base:{run_id}", _prepare_base_document, user_email, run_id)
         return _client_run_payload(result, run_id)
+    return result
+
+
+def run_scheduled_user(user_email: str) -> dict:
+    saved = schedule_for_user(user_email)
+    if not saved or not saved.get("active"):
+        return {"status": "skipped", "reason": "schedule_inactive"}
+    resume_path = saved.get("resume_path") or ""
+    if not Path(resume_path).exists() and saved.get("resume_uri"):
+        resume_path = str(download_file(saved["resume_uri"], _user_upload_dir(user_email)))
+    try:
+        result = run_agent(
+            resume_path,
+            _config_from_payload(saved["config_payload"]),
+            trigger="scheduled",
+            user_email=user_email,
+        )
+    except Exception as exc:
+        update_schedule_status(user_email, last_error=str(exc))
+        raise
+    hour, minute = _parse_hhmm(saved["daily_at"])
+    next_run = _next_run_time(hour, minute, _timezone(saved.get("timezone") or "UTC"))
+    update_schedule_status(
+        user_email,
+        next_run_at=next_run.isoformat(timespec="minutes"),
+        last_run_at=result["generated_at"],
+        last_error="",
+        last_result=result,
+    )
     return result
 
 

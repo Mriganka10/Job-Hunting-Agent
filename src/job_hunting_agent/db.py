@@ -278,6 +278,11 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_mock_interview_records_user ON mock_interview_records(user_email)",
         ]
     with connection() as conn:
+        if IS_POSTGRES:
+            # Web and worker tasks can boot together against a new database.
+            # Serialize DDL so PostgreSQL's catalog does not see concurrent
+            # CREATE TABLE IF NOT EXISTS races.
+            conn.execute("SELECT pg_advisory_xact_lock(4815162342)")
         for statement in statements:
             conn.execute(statement)
         _ensure_column(conn, "scheduler_records", "timezone", "TEXT NOT NULL DEFAULT 'UTC'")
