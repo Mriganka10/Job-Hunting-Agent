@@ -205,4 +205,4 @@ Use this flow for a demo:
 3. Add browser automation spike for LinkedIn Easy Apply.
 4. Add browser automation spike for Naukri profile-based applications.
 5. Add authenticated browser automation behind the current FastAPI UI.
-6. Move scheduled execution to a durable worker/queue for multi-instance production.
+6. Add queue-depth worker autoscaling and alarms for failed EventBridge/SQS execution.

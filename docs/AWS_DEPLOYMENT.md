@@ -27,4 +27,8 @@ Deploy one immutable ARM-compatible image to worker and web. Apply compatible da
 
 Rollback to preceding task definitions if checks fail. The former Elastic Beanstalk environment is paused for the agreed 7–14 day observation window and is not active production.
 
+The former per-application RDS instance still exists during that rollback window and continues to
+incur charges. Snapshot and retire it only after final row-count/restore validation and explicit
+owner approval.
+
 See [deployment walkthrough](AWS_DEPLOYMENT_WALKTHROUGH.md) and [code walkthrough](CODE_WALKTHROUGH.md).

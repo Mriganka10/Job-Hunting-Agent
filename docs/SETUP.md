@@ -99,7 +99,9 @@ python -m job_hunting_agent run --resume /path/to/resume.pdf --config config.tom
 python -m job_hunting_agent run --resume /path/to/resume.pdf --config config.toml --daily-at 09:30
 ```
 
-The scheduler uses the local machine time zone. For long-running daily automation, run this command under a process manager, cron, launchd, systemd, or a cloud scheduler.
+The CLI scheduler uses the local machine time zone. For long-running local automation, run this
+command under a process manager, cron, launchd, or systemd. Production web schedules use
+EventBridge Scheduler, SQS, and the ECS worker instead.
 
 ## Run Web UI
 
@@ -122,7 +124,7 @@ The UI supports:
 - Target roles, locations, and skills.
 - Draft or email application mode.
 - Immediate agent run.
-- Daily schedule while the server process is running.
+- Daily schedule while the server process is running locally; production schedules are external.
 - Improved ATS resume generation and DOCX download.
 - Virtual mock interviews tailored to saved roles and skills.
 - Optional camera preview, browser text-to-speech/speech recognition, typed-answer fallback, transcripts, scorecards, and recent interview history.
@@ -156,8 +158,9 @@ Important web UI behavior:
 
 - `Run Agent` runs immediately and writes output.
 - `Schedule Daily Run` uploads the selected resume and starts the timer without running immediately.
-- The scheduler runs only while the server process is active.
-- Closing the terminal, stopping Uvicorn, or putting the machine to sleep can prevent the scheduled run.
+- The local process scheduler runs only while the server is active.
+- Closing the terminal, stopping Uvicorn, or sleeping the machine can prevent a local scheduled
+  run. These limitations do not apply to the production EventBridge/SQS path.
 
 Health check:
 
