@@ -143,6 +143,15 @@ Purpose:
 - Shows the next development phases.
 - Helps assign future tasks.
 
+### Step 9: Code Walkthrough
+
+File: `docs/CODE_WALKTHROUGH.md`
+
+Purpose:
+
+- Maps web, scheduling, worker, database, ATS, search, and document modules.
+- Explains the September 2026 EventBridge/SQS production changes.
+
 ## 3. Explanation for the Technical Team
 
 Tell the technical team:
@@ -160,7 +169,7 @@ Ask the technical team to follow these steps:
 5. Run the search command.
 6. Run the full agent once in draft mode.
 7. Start the web UI and run an upload-based workflow.
-8. Use `Schedule Daily Run` to save a resume/config and start the daily timer.
+8. Use `Schedule Daily Run` to save a resume/config; production creates an EventBridge schedule.
 9. Confirm schedule state through the UI or `GET /health`.
 10. Inspect `data/reports`, `data/drafts`, and `data/applications.jsonl`.
 11. Download the improved resume and complete a mock interview.

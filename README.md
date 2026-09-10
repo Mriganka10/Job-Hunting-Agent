@@ -24,7 +24,8 @@ Resume-first job-search assistant that evaluates ATS readiness, generates an imp
 - Persists user profiles, verification state, runs, schedules, application history, and mock interviews in SQLite locally or PostgreSQL in production.
 - Supports SMTP login OTP delivery or Amazon SES registration verification and OTP delivery.
 - Isolates database records, local working files, and optional S3 artifacts by authenticated email address.
-- Includes Elastic Beanstalk/EC2 deployment scaffolding with RDS PostgreSQL as the production database target.
+- Runs in production as isolated ECS web and worker services with EventBridge Scheduler, SQS,
+  a dedicated logical PostgreSQL database, and private S3 storage.
 - Runs once or on a daily schedule from the CLI.
 
 > Important: LinkedIn and Naukri frequently use login, CAPTCHA, anti-bot checks, and changing page layouts. This prototype keeps portal automation behind adapters. Search links work immediately; true one-click application should be enabled only for flows you are authorized to automate.
@@ -137,6 +138,7 @@ See [ATS Calibration](docs/ATS_CALIBRATION.md) for testing against a private, co
 
 - [Project Brief](docs/PROJECT_BRIEF.md)
 - [Architecture Overview](docs/ARCHITECTURE.md)
+- [Code Walkthrough](docs/CODE_WALKTHROUGH.md)
 - [Setup Guide](docs/SETUP.md)
 - [CLI Reference](docs/CLI_REFERENCE.md)
 - [Agent Workflows](docs/AGENTS.md)
@@ -150,6 +152,6 @@ See [ATS Calibration](docs/ATS_CALIBRATION.md) for testing against a private, co
 
 ## Current Prototype Boundaries
 
-This repository contains a working core agent and authenticated web prototype. ATS scoring uses deterministic evidence plus optional LLM writing evaluation, and an optional job description drives semantic matching. The web flow returns ATS and job results before document rendering completes: the validated base DOCX/PDF is prepared in a bounded background pool, while evidence-preserving job-specific variants are generated on demand and then cached. Job discovery combines concurrently queried structured APIs and defensive public HTML adapters, independent freshness and expiry filtering, cached link checks, fuzzy duplicate removal, and server-side result paging. The next production steps are an explicit application approval queue, a durable distributed job queue for multi-instance deployments, and authenticated browser adapters per portal account. Naukri and LinkedIn application flows vary by account, job type, and region and can require login, CAPTCHA, OTP, or screening answers; the current implementation does not bypass those controls or submit through them automatically.
+This repository contains a working core agent and authenticated web application. ATS scoring uses deterministic evidence plus optional LLM writing evaluation, and an optional job description drives semantic matching. The web flow returns ATS and job results before document rendering completes: the validated base DOCX/PDF is prepared in a bounded background pool, while evidence-preserving job-specific variants are generated on demand and cached. Job discovery combines concurrent structured APIs and defensive public HTML adapters, freshness and expiry filtering, cached link checks, duplicate removal, and server-side paging. Production daily schedules are durable through EventBridge Scheduler and an SQS/ECS worker. The next product steps are an explicit application approval queue and authenticated browser adapters per portal account. Naukri and LinkedIn can require login, CAPTCHA, OTP, or screening answers; the current implementation does not bypass those controls or submit automatically.
 
 Performance-sensitive work is bounded by `JOB_AGENT_DOCUMENT_WORKERS` and `JOB_AGENT_APPLICATION_WORKERS`. ATS results are keyed by resume content, candidate profile, job description, and scoring version; generated documents are keyed by source resume, target job content, page target, and builder version. HTTP adapters reuse pooled sessions, API feed responses have short TTLs, link results are retained for six hours, and local semantic models and resume embeddings remain resident after first use.

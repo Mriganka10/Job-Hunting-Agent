@@ -109,7 +109,8 @@ The web UI now includes email OTP sign-in and a signed HTTP-only session cookie.
 - Add CSRF protection.
 - Restrict upload size.
 - Validate file content, not only extension.
-- Move schedule execution into EventBridge/SQS/ECS before running multiple EB instances or many client schedules.
+- Keep EventBridge/SQS/ECS schedule permissions least-privileged; monitor failed invocations and
+  DLQ messages before redrive.
 - Store secrets in a secret manager.
 - Protect `data/uploads`, `data/drafts`, and `data/reports`.
 - Treat browser speech transcripts as sensitive candidate data. The current camera feature is local preview only; keep it that way unless explicit recording consent, retention, and deletion controls are added.

@@ -23,8 +23,8 @@ It is intentionally deterministic in the current POC. This makes the behavior ea
 | LinkedIn adapter | Public job endpoint with search fallback | Find LinkedIn job leads. |
 | Naukri adapter | Public page scan with search fallback | Find Naukri job leads. |
 | Application service | Draft writer, SMTP sender, local ledger | Prepare or send applications and avoid duplicates. |
-| Daily scheduler | CLI sleep loop | Run the same workflow daily. |
-| Web UI scheduler | In-process background thread | Run the uploaded resume workflow daily while the server is active. |
+| Daily scheduler | CLI sleep loop for local CLI use | Run the same workflow daily without AWS. |
+| Web UI scheduler | EventBridge Scheduler + SQS/ECS worker in production; process fallback locally | Run durable user schedules independently from the web task. |
 | Mock interview | Profile-derived question bank and deterministic scoring | Run user-scoped practice sessions with transcripts and scorecards. |
 
 ## Resume Parser

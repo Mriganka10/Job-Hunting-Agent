@@ -12,7 +12,7 @@ Status: implemented.
 - Optional SMTP email sending.
 - Local ledger and reports.
 - Web UI for resume upload and profile URLs.
-- In-process daily web scheduler.
+- EventBridge Scheduler plus SQS/ECS daily production execution, with a local process fallback.
 - Basic tests.
 - Email OTP authentication with signed, HTTP-only sessions.
 - SQLite/PostgreSQL persistence for users, profiles, runs, schedules, and application history.
@@ -58,7 +58,7 @@ Status: partially implemented.
 
 - Continue expanding the FastAPI dashboard beyond its current ATS results, job leads, drafts, downloads, scheduler, and interview studio.
 - Add an approval queue and richer application-history views.
-- Replace the current database-persisted in-process scheduler with a durable worker/queue for multi-instance deployments.
+- Add schedule-volume dashboards and queue-depth worker autoscaling.
 
 ## Phase 6: Production Hardening
 
