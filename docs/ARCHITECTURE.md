@@ -104,7 +104,7 @@ Files: `src/job_hunting_agent/web.py`, `src/job_hunting_agent/db.py`, and `src/j
 
 ### Mock Interview Service
 
-The authenticated interview studio builds deterministic behavioral, role, and skill questions from the saved profile. It persists session questions, submitted text answers, and scorecards. Browser camera preview, speech synthesis, and speech recognition are optional client-side enhancements; no camera recording is uploaded or stored.
+The authenticated interview studio builds behavioral, role, skill, and coding questions from the saved profile and avoids previously asked questions per user. It persists session questions, submitted text or code answers, and evaluation reports. Reports score communication, technical accuracy, confidence, and problem solving, then generate strengths, weaknesses, improvement areas, and a next-interview preparation plan. A deterministic evidence-based evaluator is always available; a configured LLM assessment is schema validated and blended with that baseline. Browser camera preview, speech synthesis, and speech recognition are optional client-side enhancements; no camera recording is uploaded or stored.
 
 ### Resume Parser
 

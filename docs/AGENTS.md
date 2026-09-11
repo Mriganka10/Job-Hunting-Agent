@@ -25,7 +25,7 @@ It is intentionally deterministic in the current POC. This makes the behavior ea
 | Application service | Draft writer, SMTP sender, local ledger | Prepare or send applications and avoid duplicates. |
 | Daily scheduler | CLI sleep loop | Run the same workflow daily. |
 | Web UI scheduler | In-process background thread | Run the uploaded resume workflow daily while the server is active. |
-| Mock interview | Profile-derived question bank and deterministic scoring | Run user-scoped practice sessions with transcripts and scorecards. |
+| Mock interview | Profile-derived question bank and evidence-based evaluation with optional LLM blending | Run user-scoped practice sessions with transcripts, code answers, dimension scores, feedback, and preparation plans. |
 
 ## Resume Parser
 

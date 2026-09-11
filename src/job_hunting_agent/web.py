@@ -55,6 +55,7 @@ from .db import (
 from .models import AtsReport, CandidateProfile, JobLead, Resume
 from .job_pagination import DEFAULT_JOB_PAGE_SIZE, paginate_jobs
 from .interview_questions import build_question_groups, select_question_sequence
+from .interview_evaluator import evaluate_interview
 from .performance_cache import cached_document, document_cache_key
 from .resume_builder import write_base_resume, write_tailored_resume
 from .storage import StoredObject, download_file, mirror_artifacts, presigned_download_url, upload_file
@@ -678,7 +679,13 @@ def complete_mock_interview(
     if not session:
         raise HTTPException(status_code=404, detail="Interview session not found.")
     session_questions = session.get("questions") or []
-    scorecard = _score_mock_interview(answers, session_questions)
+    scorecard = _score_mock_interview(
+        answers,
+        session_questions,
+        roles=tuple(session.get("roles") or ()),
+        skills=tuple(session.get("skills") or ()),
+        interview_mode=_interview_mode_for_limit(len(session_questions)),
+    )
     saved = complete_mock_interview_session(
         user_email,
         session_id,
@@ -1503,7 +1510,18 @@ def _azure_speech_audio(text: str, voice: dict) -> bytes:
     return response.content
 
 
-def _score_mock_interview(answers: list[dict], questions: list[dict]) -> dict:
+def _score_mock_interview(
+    answers: list[dict],
+    questions: list[dict],
+    *,
+    roles: tuple[str, ...] = (),
+    skills: tuple[str, ...] = (),
+    interview_mode: str = "",
+) -> dict:
+    return evaluate_interview(answers, questions, roles=roles, skills=skills, interview_mode=interview_mode)
+
+
+def _legacy_score_mock_interview(answers: list[dict], questions: list[dict]) -> dict:
     answers_by_id = {str(item.get("question_id") or ""): item for item in answers if item.get("question_id")}
     scored_answers: list[dict] = []
     answered = 0
@@ -2088,9 +2106,28 @@ def _mock_interview_page(user_email: str) -> str:
     .score-circle span {{ width:88px; height:88px; border-radius:50%; display:grid; place-items:center; background:#0f172a; color:#fff; font-size:30px; font-weight:950; }}
     .feedback-list {{ margin:10px 0 0; padding-left:22px; }}
     .feedback-list li {{ margin:7px 0; line-height:1.4; }}
+    .report-meta {{ display:inline-flex; margin-top:6px; color:#93c5fd; font-size:12px; font-weight:850; }}
+    .feedback-columns {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:20px; margin-top:18px; }}
+    .feedback-columns h3, .report-section h3 {{ margin:0; font-size:15px; color:#fff; }}
+    .rubric-list {{ display:grid; gap:10px; margin-top:12px; }}
+    .rubric-row {{ display:grid; grid-template-columns:150px minmax(0,1fr) 48px; gap:10px; align-items:center; }}
+    .rubric-track {{ height:9px; overflow:hidden; border-radius:999px; background:#1e293b; }}
+    .rubric-track span {{ display:block; height:100%; border-radius:inherit; background:#38bdf8; }}
+    .rubric-value {{ color:#fff; font-weight:900; text-align:right; }}
+    .report-section {{ margin-top:22px; padding-top:18px; border-top:1px solid rgba(148,163,184,.26); }}
+    .plan-list {{ display:grid; gap:0; margin-top:8px; }}
+    .plan-step {{ display:grid; grid-template-columns:34px minmax(0,1fr); gap:12px; padding:12px 0; border-bottom:1px solid rgba(148,163,184,.2); }}
+    .plan-number {{ width:30px; height:30px; display:grid; place-items:center; border-radius:50%; color:#fff; background:#2563eb; font-weight:900; }}
+    .plan-step strong {{ display:block; color:#fff; }}
+    .plan-step p {{ margin:4px 0; color:#dbeafe; line-height:1.45; }}
+    .plan-target {{ color:#93c5fd; font-size:12px; font-weight:800; }}
+    .answer-review {{ margin-top:8px; border-bottom:1px solid rgba(148,163,184,.2); }}
+    .answer-review summary {{ padding:11px 0; cursor:pointer; color:#dbeafe; font-weight:850; }}
+    .answer-review-body {{ padding:0 0 12px; color:#cbd5e1; }}
     .hidden {{ display:none !important; }}
     .notice {{ margin-top:12px; padding:10px; border:1px solid rgba(245,158,11,.5); border-radius:8px; color:#fde68a; background:rgba(120,53,15,.28); }}
-    @media (max-width: 1100px) {{ .interview-grid, .setup-panel {{ grid-template-columns:1fr; }} .right-stack {{ grid-template-rows:auto; }} .stage {{ min-height:480px; }} .topbar {{ width:min(100% - 28px, 760px); flex-wrap:wrap; }} main {{ width:min(100% - 28px, 760px); }} .stat-grid {{ grid-template-columns:1fr; }} }}
+    @media (max-width: 1100px) {{ .interview-grid, .setup-panel, .feedback-columns {{ grid-template-columns:1fr; }} .right-stack {{ grid-template-rows:auto; }} .stage {{ min-height:480px; }} .topbar {{ width:min(100% - 28px, 760px); flex-wrap:wrap; }} main {{ width:min(100% - 28px, 760px); }} .stat-grid {{ grid-template-columns:1fr; }} }}
+    @media (max-width: 560px) {{ .rubric-row {{ grid-template-columns:1fr 44px; }} .rubric-row > span:first-child {{ grid-column:1 / -1; }} }}
   </style>
 </head>
 <body>
@@ -2582,19 +2619,39 @@ def _mock_interview_page(user_email: str) -> str:
     }}
     function renderScorecard(card) {{
       scorecard.classList.remove('hidden');
+      const modeLabel = card.evaluation_mode === 'hybrid_ai' ? 'AI-assisted evaluation' : 'Evidence-based evaluation';
       scorecard.innerHTML = `
         <div class="score">
           <div class="score-circle" style="--score:${{card.score || 0}}"><span>${{card.score || 0}}</span></div>
           <div>
             <h2>${{escapeHtml(card.confidence)}} interview readiness</h2>
             <p class="muted">${{escapeHtml(card.summary)}}</p>
+            <span class="report-meta">${{modeLabel}} · ${{card.answered || 0}}/${{card.question_count || 0}} answered</span>
           </div>
         </div>
-        <div class="setup-panel" style="grid-template-columns:1fr 1fr;margin:16px 0 0">
+        <div class="feedback-columns">
           <div><h3>Strengths</h3><ul class="feedback-list">${{(card.strengths || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
-          <div><h3>Next improvements</h3><ul class="feedback-list">${{(card.improvements || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
+          <div><h3>Weaknesses</h3><ul class="feedback-list">${{(card.weaknesses || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
+          <div><h3>Improvement areas</h3><ul class="feedback-list">${{(card.improvement_areas || card.improvements || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
         </div>
-        <div style="margin-top:16px"><h3>Scoring rubric</h3><div class="stat-grid">${{Object.entries(card.rubric || {{}}).map(([name, value]) => `<div class="stat"><strong>${{value}}</strong><span>${{escapeHtml(name)}} / 100</span></div>`).join('')}}</div></div>
+        <section class="report-section">
+          <h3>Performance dimensions</h3>
+          <div class="rubric-list">${{Object.entries(card.rubric || {{}}).map(([name, value]) => `
+            <div class="rubric-row"><span>${{escapeHtml(name)}}</span><div class="rubric-track"><span style="width:${{Math.max(0, Math.min(100, value || 0))}}%"></span></div><span class="rubric-value">${{value}}</span></div>
+          `).join('')}}</div>
+        </section>
+        <section class="report-section">
+          <h3>Preparation plan for your next interview</h3>
+          <div class="plan-list">${{(card.preparation_plan || []).map((step, index) => `
+            <div class="plan-step"><span class="plan-number">${{index + 1}}</span><div><strong>${{escapeHtml(step.title || step.focus)}}</strong><p>${{escapeHtml(step.action || '')}}</p><p class="muted">${{escapeHtml(step.practice || '')}}</p><span class="plan-target">Target: ${{escapeHtml(step.target || 'Complete before the next round')}}</span></div></div>
+          `).join('')}}</div>
+        </section>
+        <section class="report-section">
+          <h3>Answer review</h3>
+          ${{(card.answers || []).map((item, index) => `
+            <details class="answer-review"><summary>Question ${{index + 1}} · ${{item.score || 0}}/100 · ${{escapeHtml(item.category || 'Interview')}}</summary><div class="answer-review-body"><p>${{escapeHtml(item.question || '')}}</p><div class="rubric-list">${{Object.entries(item.rubric || {{}}).map(([name, value]) => `<div class="rubric-row"><span>${{escapeHtml(name)}}</span><div class="rubric-track"><span style="width:${{Math.max(0, Math.min(100, value || 0))}}%"></span></div><span class="rubric-value">${{value}}</span></div>`).join('')}}</div><ul class="feedback-list">${{(item.improvements || []).map((feedback) => `<li>${{escapeHtml(feedback)}}</li>`).join('')}}</ul></div></details>
+          `).join('') || '<p class="muted">No answer details are available.</p>'}}
+        </section>
       `;
       statusText.textContent = 'Scorecard ready. Review your transcript and practice again when ready.';
     }}

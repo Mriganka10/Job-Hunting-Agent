@@ -18,7 +18,7 @@ Status: implemented.
 - SQLite/PostgreSQL persistence for users, profiles, runs, schedules, and application history.
 - User-isolated local and optional S3 artifact storage.
 - Improved ATS resume generation and DOCX download.
-- Role- and skill-aware virtual mock interviews with optional camera preview, browser speech, transcripts, scorecards, and recent history.
+- Role- and skill-aware virtual mock interviews with optional camera preview, regional speech, non-repeating questions, code responses, four-dimension evaluation reports, preparation plans, and recent history.
 
 ## Phase 2: Better Matching
 

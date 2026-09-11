@@ -105,7 +105,9 @@ def test_mock_score_uses_rubric_and_counts_unanswered_questions() -> None:
     assert scorecard["answered"] == 1
     assert scorecard["question_count"] == 2
     assert scorecard["answers"][1]["score"] == 0
-    assert set(scorecard["rubric"]) == {"Relevance", "Structure", "Specificity", "Technical depth", "Communication"}
+    assert set(scorecard["rubric"]) == {"Communication", "Technical accuracy", "Confidence", "Problem solving"}
+    assert scorecard["weaknesses"]
+    assert len(scorecard["preparation_plan"]) == 4
 
 
 def authenticated_client(email: str = "client@example.com") -> TestClient:
@@ -381,6 +383,9 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert "item.answer_mode === 'code'" in page.text
     assert "Your code is saved as written and is not executed." in page.text
     assert '<option value="plaintext">Other / Plain text</option>' in page.text
+    assert "Preparation plan for your next interview" in page.text
+    assert "Performance dimensions" in page.text
+    assert "Weaknesses" in page.text
     assert "Your video" in page.text
     assert "function stopCamera()" in page.text
     assert "mediaStream.getTracks().forEach((track) => track.stop())" in page.text
@@ -458,8 +463,12 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert scorecard["score"] >= 40
     assert scorecard["score"] < 70
     assert scorecard["answered"] == 5
-    assert set(scorecard["rubric"]) == {"Relevance", "Structure", "Specificity", "Technical depth", "Communication"}
+    assert set(scorecard["rubric"]) == {"Communication", "Technical accuracy", "Confidence", "Problem solving"}
     assert "answers" in scorecard
+    assert scorecard["weaknesses"]
+    assert scorecard["improvement_areas"]
+    assert len(scorecard["preparation_plan"]) == 4
+    assert scorecard["evaluation_mode"] in {"evidence_based", "hybrid_ai"}
     assert any("reuse the same response" in item for item in scorecard["improvements"])
 
     history = client.get("/api/mock-interview/history")
