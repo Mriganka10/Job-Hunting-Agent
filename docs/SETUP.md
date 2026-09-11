@@ -125,7 +125,7 @@ The UI supports:
 - Daily schedule while the server process is running.
 - Improved ATS resume generation and DOCX download.
 - Virtual mock interviews tailored to saved roles and skills.
-- Optional camera preview, browser text-to-speech/speech recognition, typed-answer fallback, transcripts, scorecards, and recent interview history.
+- Optional camera preview, regional text-to-speech, browser speech recognition, typed or code answers, transcripts, four-dimension evaluation reports, preparation plans, and recent interview history.
 
 Local OTP behavior:
 
