@@ -74,7 +74,7 @@ Purpose:
 - Upload resume files.
 - Submit LinkedIn and Naukri profile URLs.
 - Run the agent immediately.
-- Start or stop an in-process daily scheduler.
+- Start or stop the local in-process scheduler; the production web scheduler uses EventBridge and SQS.
 - Download the improved resume produced by a run.
 - Practice in the authenticated virtual mock-interview studio.
 - Confirm user-specific schedule state through the dashboard; `/health` intentionally exposes service health only.

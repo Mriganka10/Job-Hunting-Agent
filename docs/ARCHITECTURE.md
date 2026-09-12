@@ -61,11 +61,12 @@ Responsibilities:
 - Collect target roles, locations, skills, and application mode.
 - Run the agent immediately.
 - Persist and restore each authenticated user's profile and resume reference.
-- Start or stop an email-scoped in-process daily scheduler while the web server is active.
+- Create, update, or delete an email-scoped EventBridge schedule in production; use the in-process
+  scheduler only in local development.
 - Expose public `GET /health` without user data and authenticated `GET /api/dashboard`, `POST /api/run`, and scheduler endpoints.
 - Render only the signed-in user's latest manual or scheduled run.
 - Generate and serve an improved ATS resume for an authorized run.
-- Provide a virtual mock-interview studio with profile-derived questions, browser camera/speech enhancements, deterministic scoring, and persisted history.
+- Provide a virtual mock-interview studio with profile-derived questions, browser camera/speech enhancements, evidence-based section reports, and persisted history.
 - Support SMTP OTP login or SES identity registration/verification plus OTP delivery.
 
 ### Agent Orchestrator
@@ -104,7 +105,7 @@ Files: `src/job_hunting_agent/web.py`, `src/job_hunting_agent/db.py`, and `src/j
 
 ### Mock Interview Service
 
-The authenticated interview studio builds behavioral, role, skill, and coding questions from the saved profile and avoids previously asked questions per user. It persists session questions, submitted text or code answers, and evaluation reports. Reports score communication, technical accuracy, confidence, and problem solving, then generate strengths, weaknesses, improvement areas, and a next-interview preparation plan. A deterministic evidence-based evaluator is always available; a configured LLM assessment is schema validated and blended with that baseline. Browser camera preview, speech synthesis, and speech recognition are optional client-side enhancements; no camera recording is uploaded or stored.
+The authenticated interview studio selects behavioral, role, skill, and coding questions from the saved profile while avoiding each user's prior questions when possible. At section completion, a dedicated evaluator scores communication, technical accuracy, confidence expressed in the submitted wording, and problem solving. It returns strengths, weaknesses, improvement areas, per-answer evidence, and a preparation plan. The local evaluator is always available; an optional single structured LLM request is blended with that baseline. Browser camera preview, speech synthesis, and speech recognition are optional client-side enhancements; no camera recording is uploaded or stored, and submitted code is inspected statically rather than executed.
 
 ### Resume Parser
 
@@ -211,15 +212,21 @@ The `data/` folder is ignored by Git because it can contain private candidate an
 - HTTP calls use thread-local pooled sessions. Structured feed payloads use short-lived caches and canonical link checks use a six-hour cache.
 - ATS results use a versioned content-hash cache. Local semantic models load once, resume vectors are reused, and uncached job texts are embedded in a batch.
 - Document rendering uses a separate bounded pool controlled by `JOB_AGENT_DOCUMENT_WORKERS` (default `2`). Application drafting/email uses `JOB_AGENT_APPLICATION_WORKERS` (default `4`).
-- The local background pool is restart-safe through persisted run state and content caches, but it is not a distributed queue. Multi-instance production deployments should replace it with a durable worker service.
+- Interactive document rendering uses a bounded in-process pool. Daily production schedules use
+  EventBridge Scheduler and an SQS/ECS worker, so schedule timing and execution survive web-task
+  replacement and scale independently.
 
-## Production Architecture Target
+## Current Production Architecture
 
-Future production architecture should add:
+Production now uses CloudFront -> shared ALB -> isolated ECS web service, plus EventBridge
+Scheduler -> SQS -> isolated ECS worker. It uses a dedicated logical database/role and S3 namespace
+on shared base infrastructure. The public domain remains `jobhuntingagent.in`.
+
+Future product work should add:
 
 - Browser automation with stored login sessions.
 - Human approval queue before any portal submission.
 - Secrets manager for email and portal credentials.
-- Persistent scheduler backed by a worker process or queue.
+- Queue-depth autoscaling and richer schedule operations dashboards.
 - Stronger matching using embeddings and LLM-based job/resume comparison.
 - Audit trail for every search, draft, approval, and submission.

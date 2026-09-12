@@ -23,9 +23,9 @@ It is intentionally deterministic in the current POC. This makes the behavior ea
 | LinkedIn adapter | Public job endpoint with search fallback | Find LinkedIn job leads. |
 | Naukri adapter | Public page scan with search fallback | Find Naukri job leads. |
 | Application service | Draft writer, SMTP sender, local ledger | Prepare or send applications and avoid duplicates. |
-| Daily scheduler | CLI sleep loop | Run the same workflow daily. |
-| Web UI scheduler | In-process background thread | Run the uploaded resume workflow daily while the server is active. |
-| Mock interview | Profile-derived question bank and evidence-based evaluation with optional LLM blending | Run user-scoped practice sessions with transcripts, code answers, dimension scores, feedback, and preparation plans. |
+| Daily scheduler | CLI sleep loop for local CLI use | Run the same workflow daily without AWS. |
+| Web UI scheduler | EventBridge Scheduler + SQS/ECS worker in production; process fallback locally | Run durable user schedules independently from the web task. |
+| Mock interview | User-aware question selection and evidence-based evaluation with one optional section-end LLM call | Run user-scoped practice sessions with transcripts, four-dimension reports, and preparation plans. |
 
 ## Resume Parser
 
@@ -135,15 +135,18 @@ This builder is deterministic and must not be described as LLM-generated. It cre
 
 ## Mock Interview Agent
 
-Files: `src/job_hunting_agent/web.py` and `src/job_hunting_agent/db.py`
+Files: `src/job_hunting_agent/web.py`, `src/job_hunting_agent/interview_questions.py`, `src/job_hunting_agent/interview_evaluator.py`, and `src/job_hunting_agent/db.py`
 
 Responsibilities:
 
 - Generate behavioral, role, and skill questions from the signed-in user's saved profile.
 - Persist interview sessions, text answers, scorecards, and recent history.
 - Support optional browser speech synthesis, speech recognition, and local camera preview.
+- Evaluate communication, technical accuracy, confidence in the submitted wording, and problem solving after each completed section.
+- Produce strengths, weaknesses, improvement areas, per-answer feedback, and a personalized preparation plan.
+- Use the local evaluator without external cost, or make one optional structured LLM request per completed section and blend it with the local baseline.
 
-Camera frames are not uploaded or stored. Unsupported or denied browser media features fall back to typed answers.
+Camera frames are not uploaded or stored. Unsupported or denied browser media features fall back to typed answers. Code responses are not executed.
 
 ## Report Writer
 

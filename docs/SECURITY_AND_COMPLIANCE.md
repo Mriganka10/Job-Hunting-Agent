@@ -39,6 +39,8 @@ The system may process:
 
 All such data should be treated as private.
 
+When interview LLM evaluation is enabled, the completed section's questions, categories, answer text, and answer type are sent to the configured endpoint. The request excludes profile contact fields and uses `store: false` for compatible providers. Camera frames and audio are not sent to the evaluator, confidence is inferred only from submitted wording, and code is never executed.
+
 ## Recommended Production Controls
 
 ### Secrets
@@ -109,7 +111,8 @@ The web UI now includes email OTP sign-in and a signed HTTP-only session cookie.
 - Add CSRF protection.
 - Restrict upload size.
 - Validate file content, not only extension.
-- Move schedule execution into EventBridge/SQS/ECS before running multiple EB instances or many client schedules.
+- Keep EventBridge/SQS/ECS schedule permissions least-privileged; monitor failed invocations and
+  DLQ messages before redrive.
 - Store secrets in a secret manager.
 - Protect `data/uploads`, `data/drafts`, and `data/reports`.
 - Treat browser speech transcripts as sensitive candidate data. The current camera feature is local preview only; keep it that way unless explicit recording consent, retention, and deletion controls are added.

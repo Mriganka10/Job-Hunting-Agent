@@ -23,7 +23,7 @@ def evaluate_interview(
     skills: tuple[str, ...] = (),
     interview_mode: str = "",
 ) -> dict[str, Any]:
-    """Create an evidence-based report, optionally refined by a configured LLM."""
+    """Create an evidence-based report, optionally refined by one LLM call."""
     by_id = {str(item.get("question_id") or ""): item for item in answers if item.get("question_id")}
     evaluated: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -41,15 +41,17 @@ def evaluate_interview(
             answered += 1
         evaluated.append(_evaluate_answer(question_item, answer, text, repeated))
 
-    rubric = {
-        dimension: round(sum(item["rubric"][dimension] for item in evaluated) / len(evaluated))
-        for dimension in DIMENSIONS
-    } if evaluated else {dimension: 0 for dimension in DIMENSIONS}
+    rubric = (
+        {
+            dimension: round(sum(item["rubric"][dimension] for item in evaluated) / len(evaluated))
+            for dimension in DIMENSIONS
+        }
+        if evaluated
+        else {dimension: 0 for dimension in DIMENSIONS}
+    )
     report = _build_report(evaluated, rubric, answered, len(questions), roles, skills, interview_mode)
     llm_report = _llm_interview_evaluation(evaluated)
-    if llm_report:
-        report = _merge_llm_report(report, llm_report)
-    return report
+    return _merge_llm_report(report, llm_report) if llm_report else report
 
 
 def _evaluate_answer(question_item: dict, answer: dict, text: str, repeated: bool) -> dict[str, Any]:
@@ -70,7 +72,10 @@ def _evaluate_answer(question_item: dict, answer: dict, text: str, repeated: boo
     strengths = [_positive_feedback(strongest)] if text and rubric[strongest] >= 65 else []
     improvements = [_corrective_feedback(weakest, code_mode)] if rubric[weakest] < 70 else []
     if repeated:
-        improvements.insert(0, "Do not reuse the same response for different questions; answer the specific prompt with distinct evidence.")
+        improvements.insert(
+            0,
+            "Do not reuse the same response for different questions; answer the specific prompt with distinct evidence.",
+        )
     return {
         "question_id": str(question_item.get("id") or ""),
         "question": question,
@@ -95,12 +100,7 @@ def _spoken_rubric(text: str, question: str) -> dict[str, int]:
     question_terms = _meaningful_terms(question)
     overlap = len(question_terms & set(words))
 
-    if 45 <= count <= 180:
-        communication = 72
-    elif 25 <= count <= 240:
-        communication = 58
-    else:
-        communication = 35
+    communication = 72 if 45 <= count <= 180 else 58 if 25 <= count <= 240 else 35
     communication += 12 if sentences >= 2 else 0
     communication += 10 if unique_ratio >= 0.55 else 3
     communication -= 12 if _filler_ratio(words) > 0.08 else 0
@@ -111,13 +111,23 @@ def _spoken_rubric(text: str, question: str) -> dict[str, int]:
         "security", "latency", "reliability", "validation", "design", "stakeholder", "delivery",
     )
     technical_hits = sum(term in lower for term in technical_terms)
-    reasoning = sum(term in lower for term in ("because", "therefore", "trade-off", "tradeoff", "instead", "chose", "root cause", "constraint", "validated", "verified"))
+    reasoning = sum(
+        term in lower
+        for term in (
+            "because", "therefore", "trade-off", "tradeoff", "instead", "chose", "root cause", "constraint",
+            "validated", "verified",
+        )
+    )
     technical = 35 + min(25, overlap * 7) + min(25, technical_hits * 6) + min(15, reasoning * 5)
 
-    ownership = sum(term in lower for term in ("i ", "my ", "personally", "i led", "i decided", "i built", "i implemented", "i owned"))
+    ownership = sum(
+        term in lower
+        for term in ("i ", "my ", "personally", "i led", "i decided", "i built", "i implemented", "i owned")
+    )
     hedges = sum(term in lower for term in ("maybe", "probably", "i guess", "sort of", "kind of", "not sure"))
     direct = any(lower.startswith(term) for term in ("i ", "the ", "first", "my ", "we "))
-    confidence = 38 + min(32, ownership * 7) + (15 if direct else 0) + (10 if count >= 35 else 0) - min(30, hedges * 10)
+    confidence = 38 + min(32, ownership * 7) + (15 if direct else 0) + (10 if count >= 35 else 0)
+    confidence -= min(30, hedges * 10)
 
     problem = 30
     problem += 15 * any(term in lower for term in ("problem", "challenge", "issue", "requirement", "constraint", "situation"))
@@ -125,12 +135,14 @@ def _spoken_rubric(text: str, question: str) -> dict[str, int]:
     problem += 15 * any(term in lower for term in ("tested", "validated", "monitored", "measured", "verified"))
     problem += 10 * any(term in lower for term in ("alternative", "trade-off", "tradeoff", "instead", "option"))
     problem += 10 * any(term in lower for term in ("result", "outcome", "reduced", "improved", "increased", "saved"))
-    return _clamp_rubric({
-        "Communication": communication,
-        "Technical accuracy": technical,
-        "Confidence": confidence,
-        "Problem solving": problem,
-    })
+    return _clamp_rubric(
+        {
+            "Communication": communication,
+            "Technical accuracy": technical,
+            "Confidence": confidence,
+            "Problem solving": problem,
+        }
+    )
 
 
 def _code_rubric(code: str, question: str) -> dict[str, int]:
@@ -148,15 +160,20 @@ def _code_rubric(code: str, question: str) -> dict[str, int]:
     comments = bool(re.search(r"(^|\s)(#|//|/\*|--)", code))
 
     communication = 38 + min(22, len(lines) * 2) + (15 if readable_names else 0) + (10 if comments else 0)
-    technical = 35 + min(20, alignment * 7) + (25 if has_logic else 0) + (12 if balanced else -18) - (18 if placeholder else 0)
-    confidence = 40 + (20 if len(lines) >= 4 else 5) + (20 if has_logic else 0) + (10 if balanced else 0) - (25 if placeholder else 0)
-    problem = 35 + (20 if has_logic else 0) + (15 if validation else 0) + (15 if decomposition else 0) + min(15, alignment * 5)
-    return _clamp_rubric({
-        "Communication": communication,
-        "Technical accuracy": technical,
-        "Confidence": confidence,
-        "Problem solving": problem,
-    })
+    technical = 35 + min(20, alignment * 7) + (25 if has_logic else 0) + (12 if balanced else -18)
+    technical -= 18 if placeholder else 0
+    confidence = 40 + (20 if len(lines) >= 4 else 5) + (20 if has_logic else 0) + (10 if balanced else 0)
+    confidence -= 25 if placeholder else 0
+    problem = 35 + (20 if has_logic else 0) + (15 if validation else 0) + (15 if decomposition else 0)
+    problem += min(15, alignment * 5)
+    return _clamp_rubric(
+        {
+            "Communication": communication,
+            "Technical accuracy": technical,
+            "Confidence": confidence,
+            "Problem solving": problem,
+        }
+    )
 
 
 def _build_report(
@@ -212,13 +229,16 @@ def _preparation_plan(rubric: dict[str, int], topics: list[str]) -> list[dict[st
     for dimension in weakest[:3]:
         title, action, practice, target = actions[dimension]
         plan.append({"focus": dimension, "title": title, "action": action, "practice": practice, "target": target})
-    plan.append({
-        "focus": "Mock interview",
-        "title": "Next-round checkpoint",
-        "action": "Run the same interview mode again after completing the drills and use fresh examples.",
-        "practice": "Compare the four dimension scores with this report.",
-        "target": f"Raise the lowest dimension above {max(60, min(80, rubric.get(weakest[0], 0) + 10)) if weakest else 70}/100",
-    })
+    lowest_target = max(60, min(80, rubric.get(weakest[0], 0) + 10)) if weakest else 70
+    plan.append(
+        {
+            "focus": "Mock interview",
+            "title": "Next-round checkpoint",
+            "action": "Run the same interview mode again after completing the drills and use fresh examples.",
+            "practice": "Compare the four dimension scores with this report.",
+            "target": f"Raise the lowest dimension above {lowest_target}/100",
+        }
+    )
     return plan
 
 
@@ -226,34 +246,80 @@ def _llm_interview_evaluation(evaluated: list[dict]) -> dict[str, Any] | None:
     api_key = os.getenv("JOB_AGENT_INTERVIEW_LLM_API_KEY", "").strip() or os.getenv("JOB_AGENT_LLM_API_KEY", "").strip()
     if not api_key or sum(len(item["answer"]) for item in evaluated) < 80:
         return None
-    endpoint = os.getenv("JOB_AGENT_INTERVIEW_LLM_ENDPOINT", "").strip() or os.getenv("JOB_AGENT_LLM_ENDPOINT", "https://api.openai.com/v1/responses").strip()
-    model = os.getenv("JOB_AGENT_INTERVIEW_LLM_MODEL", "").strip() or os.getenv("JOB_AGENT_LLM_MODEL", "gpt-4o-mini").strip()
-    evidence = [{"question": item["question"], "category": item["category"], "answer": item["answer"], "answer_type": item["answer_type"]} for item in evaluated]
+    endpoint = os.getenv("JOB_AGENT_INTERVIEW_LLM_ENDPOINT", "").strip() or os.getenv(
+        "JOB_AGENT_LLM_ENDPOINT", "https://api.openai.com/v1/responses"
+    ).strip()
+    model = os.getenv("JOB_AGENT_INTERVIEW_LLM_MODEL", "").strip() or os.getenv(
+        "JOB_AGENT_LLM_MODEL", "gpt-4o-mini"
+    ).strip()
+    evidence = [
+        {
+            "question": item["question"],
+            "category": item["category"],
+            "answer": item["answer"],
+            "answer_type": item["answer_type"],
+        }
+        for item in evaluated
+    ]
     prompt = (
         "Evaluate only the supplied mock-interview questions and answers. Assess communication, technical accuracy, "
         "confidence expressed through wording and ownership, and problem-solving reasoning. For code, perform static "
-        "reasoning only; do not claim it was executed. Do not invent candidate facts. Return concise, actionable JSON.\nEVIDENCE:\n"
-        + json.dumps(evidence, ensure_ascii=False)[:16000]
+        "reasoning only; do not claim it was executed. Do not invent candidate facts. Return concise, actionable JSON.\n"
+        "EVIDENCE:\n" + json.dumps(evidence, ensure_ascii=False)[:16000]
     )
     schema = {
         "type": "object",
         "properties": {
-            "dimension_scores": {"type": "object", "properties": {name: {"type": "number", "minimum": 0, "maximum": 100} for name in DIMENSIONS}, "required": list(DIMENSIONS), "additionalProperties": False},
+            "dimension_scores": {
+                "type": "object",
+                "properties": {name: {"type": "number", "minimum": 0, "maximum": 100} for name in DIMENSIONS},
+                "required": list(DIMENSIONS),
+                "additionalProperties": False,
+            },
             "summary": {"type": "string"},
             "strengths": {"type": "array", "items": {"type": "string"}},
             "weaknesses": {"type": "array", "items": {"type": "string"}},
             "improvement_areas": {"type": "array", "items": {"type": "string"}},
-            "preparation_plan": {"type": "array", "items": {"type": "object", "properties": {"focus": {"type": "string"}, "title": {"type": "string"}, "action": {"type": "string"}, "practice": {"type": "string"}, "target": {"type": "string"}}, "required": ["focus", "title", "action", "practice", "target"], "additionalProperties": False}},
+            "preparation_plan": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "focus": {"type": "string"}, "title": {"type": "string"}, "action": {"type": "string"},
+                        "practice": {"type": "string"}, "target": {"type": "string"},
+                    },
+                    "required": ["focus", "title", "action", "practice", "target"],
+                    "additionalProperties": False,
+                },
+            },
             "rationale": {"type": "string"},
         },
         "required": ["dimension_scores", "summary", "strengths", "weaknesses", "improvement_areas", "preparation_plan", "rationale"],
         "additionalProperties": False,
     }
     try:
-        response = post(endpoint, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json={"model": model, "store": False, "input": prompt, "text": {"format": {"type": "json_schema", "name": "interview_evaluation", "strict": True, "schema": schema}}}, timeout=25)
+        response = post(
+            endpoint,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "store": False,
+                "input": prompt,
+                "text": {"format": {"type": "json_schema", "name": "interview_evaluation", "strict": True, "schema": schema}},
+            },
+            timeout=25,
+        )
         response.raise_for_status()
         payload = response.json()
-        output_text = payload.get("output_text") or next((content.get("text", "") for item in payload.get("output", []) for content in item.get("content", []) if content.get("type") == "output_text"), "")
+        output_text = payload.get("output_text") or next(
+            (
+                content.get("text", "")
+                for item in payload.get("output", [])
+                for content in item.get("content", [])
+                if content.get("type") == "output_text"
+            ),
+            "",
+        )
         parsed = json.loads(output_text)
         return parsed if isinstance(parsed, dict) else None
     except (requests.RequestException, KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -264,27 +330,39 @@ def _merge_llm_report(base: dict[str, Any], ai: dict[str, Any]) -> dict[str, Any
     ai_scores = ai.get("dimension_scores") or {}
     if not all(isinstance(ai_scores.get(name), (int, float)) for name in DIMENSIONS):
         return base
-    rubric = {name: round(base["rubric"][name] * 0.65 + max(0, min(100, ai_scores[name])) * 0.35) for name in DIMENSIONS}
+    rubric = {
+        name: round(base["rubric"][name] * 0.65 + max(0, min(100, ai_scores[name])) * 0.35)
+        for name in DIMENSIONS
+    }
     score = round(sum(rubric.values()) / len(DIMENSIONS))
     merged = dict(base)
-    merged.update({
-        "score": score,
-        "confidence": "Strong" if score >= 78 else "Developing" if score >= 58 else "Needs practice",
-        "rubric": rubric,
-        "summary": _safe_text(ai.get("summary"), base["summary"]),
-        "strengths": _combined_list(ai.get("strengths"), base["strengths"], 4),
-        "weaknesses": _combined_list(ai.get("weaknesses"), base["weaknesses"], 4),
-        "improvements": _combined_list(ai.get("improvement_areas"), base["improvements"], 5),
-        "improvement_areas": _combined_list(ai.get("improvement_areas"), base["improvement_areas"], 5),
-        "preparation_plan": _combined_plan(ai.get("preparation_plan"), base["preparation_plan"]),
-        "evaluation_mode": "hybrid_ai",
-        "ai_rationale": _safe_text(ai.get("rationale"), "AI feedback was blended with the evidence-based scoring baseline."),
-    })
+    merged.update(
+        {
+            "score": score,
+            "confidence": "Strong" if score >= 78 else "Developing" if score >= 58 else "Needs practice",
+            "rubric": rubric,
+            "summary": _safe_text(ai.get("summary"), base["summary"]),
+            "strengths": _combined_list(ai.get("strengths"), base["strengths"], 4),
+            "weaknesses": _combined_list(ai.get("weaknesses"), base["weaknesses"], 4),
+            "improvements": _combined_list(ai.get("improvement_areas"), base["improvements"], 5),
+            "improvement_areas": _combined_list(ai.get("improvement_areas"), base["improvement_areas"], 5),
+            "preparation_plan": _combined_plan(ai.get("preparation_plan"), base["preparation_plan"]),
+            "evaluation_mode": "hybrid_ai",
+            "ai_rationale": _safe_text(
+                ai.get("rationale"),
+                "AI feedback was blended with the evidence-based scoring baseline.",
+            ),
+        }
+    )
     return merged
 
 
 def _meaningful_terms(text: str) -> set[str]:
-    stop = {"about", "after", "before", "could", "describe", "explain", "how", "would", "their", "there", "which", "where", "while", "with", "from", "that", "this", "what", "when", "your", "have", "into", "write", "implement"}
+    stop = {
+        "about", "after", "before", "could", "describe", "explain", "how", "would", "their", "there",
+        "which", "where", "while", "with", "from", "that", "this", "what", "when", "your", "have", "into",
+        "write", "implement",
+    }
     return {word for word in re.findall(r"[a-z0-9+#.-]+", text.casefold()) if len(word) > 3 and word not in stop}
 
 
@@ -322,7 +400,11 @@ def _weakness_feedback(dimension: str, score: int) -> str:
 
 def _corrective_feedback(dimension: str, code_mode: bool) -> str:
     return {
-        "Communication": "Use a concise opening, ordered supporting points, and a clear conclusion." if not code_mode else "Use readable names, consistent formatting, and brief comments for non-obvious decisions.",
+        "Communication": (
+            "Use readable names, consistent formatting, and brief comments for non-obvious decisions."
+            if code_mode
+            else "Use a concise opening, ordered supporting points, and a clear conclusion."
+        ),
         "Technical accuracy": "State assumptions, explain why the approach is correct, and describe how you validated it.",
         "Confidence": "Lead with your decision and ownership, then describe uncertainty precisely instead of hedging.",
         "Problem solving": "Structure the response as constraints, options, chosen approach, validation, and outcome.",
@@ -358,7 +440,10 @@ def _safe_plan(value: Any, fallback: list[dict[str, str]]) -> list[dict[str, str
     for item in value[:5]:
         if not isinstance(item, dict):
             continue
-        step = {name: str(item.get(name) or "").strip()[:800] for name in ("focus", "title", "action", "practice", "target")}
+        step = {
+            name: str(item.get(name) or "").strip()[:800]
+            for name in ("focus", "title", "action", "practice", "target")
+        }
         if step["title"] and step["action"]:
             plan.append(step)
     return plan or fallback

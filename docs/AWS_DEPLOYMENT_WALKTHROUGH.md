@@ -1,117 +1,17 @@
 # AWS Deployment Walkthrough
 
-This document explains the Job Hunting Agent production deployment target in the same spirit as the Multi RAG Agentic AI deployment notes.
-
-## Planned Production Deployment
+Last updated: 10 September 2026.
 
 ```text
-User browser
-    |
-    v
-Elastic Beanstalk public URL
-    |
-    v
-EC2 instance managed by Elastic Beanstalk
-    |
-    v
-FastAPI application on port 8000
-    |
-    +-- RDS PostgreSQL for users, OTPs, runs, schedules, and application history
-    +-- Private S3 bucket for uploaded resumes, reports, and drafts
-    +-- SES API or SMTP provider for registration verification and login OTP delivery
+jobhuntingagent.in -> CloudFront -> shared ALB -> Job Agent ECS web
+                                                    |
+user daily schedule -> EventBridge Scheduler -> SQS -> ECS worker -> DLQ
+                                                    |
+                                      dedicated database/role + private S3
 ```
 
-## Job Hunt AWS Resources
+The domain and browser flow are unchanged. CloudFront handles TLS; the private origin header selects the application's ALB target group. The web handles interactive requests. EventBridge, rather than a web-process sleep loop, owns daily timing. SQS buffers due runs and enables retry across deployments; the worker owns execution.
 
-```text
-AWS account ID: 453732174568
-AWS account name: Mriganka
-AWS region: us-east-1
-Elastic Beanstalk application: job-hunt-agent
-Elastic Beanstalk environment: job-hunt-agent-prod
-RDS DB identifier: job-hunt-agent-prod-db
-RDS database name: job_hunt_agent
-RDS user: job_agent_user
-S3 bucket: job-hunt-agent-prod-uploads-453732174568-us-east-1
-```
+Web and worker may start concurrently because PostgreSQL schema initialization uses an advisory transaction lock. Scale web for interactive load and worker from queue age/depth. Review the DLQ before redriving a failed schedule.
 
-These resources are separate from Multi RAG Agentic AI. Do not point this app at Multi RAG buckets, databases, policies, or EB environments.
-
-## Why Elastic Beanstalk
-
-Elastic Beanstalk gives a managed deployment flow while still using EC2 underneath. It handles:
-
-- EC2 provisioning.
-- Application process startup through `Procfile`.
-- Health reporting.
-- Log access.
-- Public environment URL.
-- Deployment versions.
-
-This matches the deployment approach used for the Multi RAG project while keeping all Job Hunt resources separate.
-
-## Why RDS PostgreSQL
-
-The app stores production records in PostgreSQL:
-
-- Signed-in users.
-- OTP requests.
-- Manual and scheduled run history.
-- Application action history.
-- Active daily schedule configuration, including the browser timezone.
-- Email verification records.
-- Mock-interview sessions, text answers, and scorecards.
-
-Local development falls back to SQLite under `data/`, but production should always use RDS PostgreSQL through `JOB_AGENT_DATABASE_URL`.
-
-## Before Running Deployment Scripts
-
-Install:
-
-- AWS CLI
-- Elastic Beanstalk CLI
-
-Authenticate to account `453732174568` and region `us-east-1`.
-
-Required secrets:
-
-```bash
-RDS_MASTER_PASSWORD='<new-rds-password>'
-JOB_AGENT_SECRET_KEY='<long-random-secret>'
-JOB_AGENT_SMTP_HOST='<smtp-host>'
-JOB_AGENT_SMTP_PORT='587'
-JOB_AGENT_SMTP_USERNAME='<smtp-user>'
-JOB_AGENT_SMTP_PASSWORD='<smtp-password>'
-JOB_AGENT_SMTP_FROM='<from-email>'
-JOB_AGENT_EMAIL_PROVIDER='ses'
-JOB_AGENT_SES_REGION='us-east-1'
-JOB_AGENT_SES_FROM='<verified-sender-email>'
-JOB_AGENT_S3_BUCKET='job-hunt-agent-prod-uploads-453732174568-us-east-1'
-```
-
-Then run:
-
-```bash
-scripts/aws/deploy_job_hunt_prod.sh
-```
-
-## Public URL
-
-After deployment, Elastic Beanstalk prints the environment CNAME. That CNAME is the first public URL you can share for testing.
-
-For client-facing usage, add:
-
-- HTTPS certificate through ACM.
-- Custom domain through Route 53.
-- EventBridge/SQS/ECS worker execution if the app needs multiple EB instances or many concurrent client schedules.
-- Rate limiting and CSRF protection.
-
-## Daily Schedule Behavior On AWS
-
-The browser sends its IANA timezone, for example `Asia/Kolkata`, along with the selected `HH:MM` time. The server stores that timezone in PostgreSQL and computes the next run in that timezone. This prevents the old AWS issue where EC2 UTC time caused an India-time schedule to run several hours later than expected.
-
-The current EB web process restores the latest active schedule on startup. This is suitable for a single-instance production environment. For a larger public rollout, use EventBridge plus a worker so schedule execution is durable across scaling and deployments.
-
-## SES And HTTPS Inputs Still Needed
-
-SES API mode uses a verified sender and asks each new user to verify their email identity before requesting a login OTP. SMTP mode remains available. A custom HTTPS URL can be enabled once the target domain, DNS access, and ACM certificate are available. Until then, keep `JOB_AGENT_COOKIE_SECURE=false` for the plain Elastic Beanstalk HTTP URL.
+A release is complete only after ECS stability and checks for health, login, immediate run, schedule lifecycle, scheduled execution, downloads, and mock interview. The paused Elastic Beanstalk environment is temporary rollback history, not active.

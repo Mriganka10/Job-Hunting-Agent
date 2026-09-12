@@ -1,28 +1,27 @@
-# Mock Interview Evaluation And Feedback
+# Mock Interview Evaluation
 
-Every completed Quick, Standard, or Deep interview automatically produces a saved evaluation report. The evaluator works without an external service and can optionally blend its evidence-based baseline with a strict-JSON LLM assessment.
+Each quick, standard, or deep interview section produces a feedback report when the user finishes it. The report includes:
 
-## Report contents
+- an overall score and readiness label;
+- communication, technical accuracy, confidence, and problem-solving scores;
+- strengths, weaknesses, and prioritized improvement areas;
+- feedback for each submitted answer; and
+- a four-step preparation plan for the next interview.
 
-- Overall score and readiness level.
-- Communication, technical accuracy, confidence, and problem-solving scores from 0 to 100.
-- Strengths, weaknesses, and prioritized improvement areas.
-- Per-answer scores and corrective feedback.
-- A personalized four-step preparation plan based on the weakest dimensions and question categories.
-- A measurable checkpoint for the next mock interview.
+## Cost Model
 
-Confidence is inferred from answer completeness, direct wording, ownership, and hedging. It is not a voice-tone or biometric assessment. Code answers receive static checks for relevance, completeness, readability, basic structural balance, validation, and problem-solving signals; code is never executed.
+The evidence-based evaluator runs locally and requires no API key. It scores the submitted text using question alignment, clarity, reasoning, ownership, validation, and outcome signals. Code answers receive static checks for relevant structure, logic, validation, readability, and incomplete placeholders. Code is never compiled or executed.
 
-## Optional AI assessment
+An optional LLM can refine the report. To control cost, the app makes at most one request after a complete interview section and makes no request for very short submissions. The LLM scores are blended 35 percent with the 65 percent local baseline, so an external response cannot fully replace the transparent evidence score. A timeout, provider error, invalid schema, or missing key falls back to the local report.
 
-Set `JOB_AGENT_LLM_API_KEY` to reuse the general configured model, or use the interview-specific overrides:
+Configure either the shared `JOB_AGENT_LLM_*` variables or the interview-only overrides:
 
 ```env
 JOB_AGENT_INTERVIEW_LLM_API_KEY=
-JOB_AGENT_INTERVIEW_LLM_MODEL=
-JOB_AGENT_INTERVIEW_LLM_ENDPOINT=
+JOB_AGENT_INTERVIEW_LLM_MODEL=gpt-4o-mini
+JOB_AGENT_INTERVIEW_LLM_ENDPOINT=https://api.openai.com/v1/responses
 ```
 
-When configured, interview questions and submitted answers are sent to that endpoint. Its assessment is schema validated, sanitized, and blended at 35 percent with the deterministic baseline. A timeout, invalid response, or missing key automatically returns the complete evidence-based report instead.
+## Privacy And Interpretation
 
-The response field `evaluation_mode` is `hybrid_ai` when AI feedback was blended and `evidence_based` when the local evaluator was used alone.
+Only questions, categories, submitted answers, and answer types are included in an enabled LLM request. Profile contact fields, camera frames, and audio are excluded. Confidence measures directness, ownership, completeness, and hedging in the submitted wording; it is not an emotion, facial, voice, or personality assessment.

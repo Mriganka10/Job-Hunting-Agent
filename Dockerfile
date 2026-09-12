@@ -17,4 +17,4 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 EXPOSE 8000
 
-CMD ["python", "-m", "job_hunting_agent", "serve"]
+CMD ["sh", "-c", "if [ \"${SERVICE_MODE:-web}\" = \"worker\" ]; then exec python -m job_hunting_agent.worker; else exec python -m job_hunting_agent serve; fi"]
