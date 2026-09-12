@@ -66,7 +66,7 @@ Responsibilities:
 - Expose public `GET /health` without user data and authenticated `GET /api/dashboard`, `POST /api/run`, and scheduler endpoints.
 - Render only the signed-in user's latest manual or scheduled run.
 - Generate and serve an improved ATS resume for an authorized run.
-- Provide a virtual mock-interview studio with profile-derived questions, browser camera/speech enhancements, deterministic scoring, and persisted history.
+- Provide a virtual mock-interview studio with profile-derived questions, browser camera/speech enhancements, evidence-based section reports, and persisted history.
 - Support SMTP OTP login or SES identity registration/verification plus OTP delivery.
 
 ### Agent Orchestrator
@@ -105,7 +105,7 @@ Files: `src/job_hunting_agent/web.py`, `src/job_hunting_agent/db.py`, and `src/j
 
 ### Mock Interview Service
 
-The authenticated interview studio builds deterministic behavioral, role, and skill questions from the saved profile. It persists session questions, submitted text answers, and scorecards. Browser camera preview, speech synthesis, and speech recognition are optional client-side enhancements; no camera recording is uploaded or stored.
+The authenticated interview studio selects behavioral, role, skill, and coding questions from the saved profile while avoiding each user's prior questions when possible. At section completion, a dedicated evaluator scores communication, technical accuracy, confidence expressed in the submitted wording, and problem solving. It returns strengths, weaknesses, improvement areas, per-answer evidence, and a preparation plan. The local evaluator is always available; an optional single structured LLM request is blended with that baseline. Browser camera preview, speech synthesis, and speech recognition are optional client-side enhancements; no camera recording is uploaded or stored, and submitted code is inspected statically rather than executed.
 
 ### Resume Parser
 

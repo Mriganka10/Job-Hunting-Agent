@@ -39,6 +39,8 @@ The system may process:
 
 All such data should be treated as private.
 
+When interview LLM evaluation is enabled, the completed section's questions, categories, answer text, and answer type are sent to the configured endpoint. The request excludes profile contact fields and uses `store: false` for compatible providers. Camera frames and audio are not sent to the evaluator, confidence is inferred only from submitted wording, and code is never executed.
+
 ## Recommended Production Controls
 
 ### Secrets

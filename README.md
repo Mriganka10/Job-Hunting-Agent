@@ -19,8 +19,8 @@ Resume-first job-search assistant that evaluates ATS readiness, generates an imp
 - Keeps a local ledger so the same job is not applied twice.
 - Creates email-ready applications and can send them through SMTP.
 - Provides an OTP-protected web UI for resume upload, profile settings, immediate runs, downloads, and daily scheduling.
-- Includes a virtual mock-interview studio with profile-derived questions, optional camera preview and browser speech features, typed-answer fallback, transcripts, scorecards, and recent-session history.
-- Varies question selection by quick, standard, and deep modes; preserves speech transcripts across pauses; selects only a matching installed female voice for Sarah; and scores answers with a visible relevance, structure, specificity, technical-depth, and communication rubric.
+- Includes a virtual mock-interview studio with profile-derived questions, optional camera preview and browser speech features, a code editor, transcripts, section-end feedback reports, and recent-session history.
+- Varies question selection by quick, standard, and deep modes; avoids prior user questions when possible; and evaluates communication, technical accuracy, confidence in the submitted wording, and problem solving.
 - Persists user profiles, verification state, runs, schedules, application history, and mock interviews in SQLite locally or PostgreSQL in production.
 - Supports SMTP login OTP delivery or Amazon SES registration verification and OTP delivery.
 - Isolates database records, local working files, and optional S3 artifacts by authenticated email address.
@@ -65,6 +65,7 @@ http://127.0.0.1:8000/mock-interview
 ```
 
 The studio derives questions from the saved target roles and skills. Camera preview stays in the browser and is not uploaded or stored. Speech recognition and speech synthesis depend on browser support; answers can always be typed.
+At the end of each section, the app produces strengths, weaknesses, improvement areas, per-answer feedback, and a personalized preparation plan. This uses a local evidence-based evaluator by default. Configuring the optional interview LLM adds one structured evaluation request per completed section and blends it with the local baseline.
 
 The public health check exposes service health only:
 
@@ -92,6 +93,7 @@ Edit `config.toml` after copying `config.example.toml`.
 - `profile.experience_years`: professional experience used to request suitable portal seniority; use `0` for a fresher.
 - `profile.job_description`: optional target job description used for keyword, embedding-relevance, and missing-skill scoring.
 - `JOB_AGENT_LLM_API_KEY`: optional API key for the 15-point LLM writing-quality evaluation. Configure `JOB_AGENT_LLM_MODEL` and `JOB_AGENT_LLM_ENDPOINT` when needed; never commit the key.
+- `JOB_AGENT_INTERVIEW_LLM_API_KEY`: optional interview-only key. Leave it blank to reuse `JOB_AGENT_LLM_API_KEY`; without either key, interview reports remain available through the local evaluator. The model and endpoint can likewise be overridden with `JOB_AGENT_INTERVIEW_LLM_MODEL` and `JOB_AGENT_INTERVIEW_LLM_ENDPOINT`.
 - `JOB_AGENT_ENABLE_LOCAL_EMBEDDINGS`: enables a trained Sentence Transformers model after installing `.[semantic]`. An OpenAI-compatible embedding service can instead be configured with `JOB_AGENT_EMBEDDING_API_KEY`, `JOB_AGENT_EMBEDDING_ENDPOINT`, and `JOB_AGENT_EMBEDDING_MODEL`. Without either provider, matching uses a disclosed TF-IDF fallback and lowers score confidence.
 - `profile.linkedin_profile_url` and `profile.naukri_profile_url`: profile links included in application drafts/emails and available to future authenticated portal adapters.
 - `application.mode`: `draft` or `email`.

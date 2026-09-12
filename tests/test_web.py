@@ -105,7 +105,8 @@ def test_mock_score_uses_rubric_and_counts_unanswered_questions() -> None:
     assert scorecard["answered"] == 1
     assert scorecard["question_count"] == 2
     assert scorecard["answers"][1]["score"] == 0
-    assert set(scorecard["rubric"]) == {"Relevance", "Structure", "Specificity", "Technical depth", "Communication"}
+    assert set(scorecard["rubric"]) == {"Communication", "Technical accuracy", "Confidence", "Problem solving"}
+    assert len(scorecard["preparation_plan"]) == 4
 
 
 def authenticated_client(email: str = "client@example.com") -> TestClient:
@@ -392,6 +393,9 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert "/api/mock-interview/questions" in page.text
     assert "/api/mock-interview/start" in page.text
     assert "/api/mock-interview/complete" in page.text
+    assert "Performance dimensions" in page.text
+    assert "Preparation plan for your next interview" in page.text
+    assert "Weaknesses" in page.text
 
     questions = client.get("/api/mock-interview/questions")
     assert questions.status_code == 200
@@ -458,8 +462,14 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert scorecard["score"] >= 40
     assert scorecard["score"] < 70
     assert scorecard["answered"] == 5
-    assert set(scorecard["rubric"]) == {"Relevance", "Structure", "Specificity", "Technical depth", "Communication"}
+    assert set(scorecard["rubric"]) == {"Communication", "Technical accuracy", "Confidence", "Problem solving"}
     assert "answers" in scorecard
+    assert scorecard["evaluation_mode"] == "evidence_based"
+    assert scorecard["target_role"] == "Data Engineer"
+    assert scorecard["interview_mode"] == "quick"
+    assert scorecard["weaknesses"]
+    assert scorecard["improvement_areas"]
+    assert len(scorecard["preparation_plan"]) == 4
     assert any("reuse the same response" in item for item in scorecard["improvements"])
 
     history = client.get("/api/mock-interview/history")

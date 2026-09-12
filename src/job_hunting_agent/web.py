@@ -54,6 +54,7 @@ from .db import (
 )
 from .models import AtsReport, CandidateProfile, JobLead, Resume
 from .job_pagination import DEFAULT_JOB_PAGE_SIZE, paginate_jobs
+from .interview_evaluator import evaluate_interview
 from .interview_questions import build_question_groups, select_question_sequence
 from .performance_cache import cached_document, document_cache_key
 from .resume_builder import write_base_resume, write_tailored_resume
@@ -689,7 +690,13 @@ def complete_mock_interview(
     if not session:
         raise HTTPException(status_code=404, detail="Interview session not found.")
     session_questions = session.get("questions") or []
-    scorecard = _score_mock_interview(answers, session_questions)
+    scorecard = _score_mock_interview(
+        answers,
+        session_questions,
+        roles=tuple(session.get("roles") or ()),
+        skills=tuple(session.get("skills") or ()),
+        interview_mode=_interview_mode_for_limit(len(session_questions)),
+    )
     saved = complete_mock_interview_session(
         user_email,
         session_id,
@@ -1545,153 +1552,21 @@ def _azure_speech_audio(text: str, voice: dict) -> bytes:
     return response.content
 
 
-def _score_mock_interview(answers: list[dict], questions: list[dict]) -> dict:
-    answers_by_id = {str(item.get("question_id") or ""): item for item in answers if item.get("question_id")}
-    scored_answers: list[dict] = []
-    answered = 0
-    seen_answers: set[str] = set()
-    for index, question_item in enumerate(questions):
-        answer = answers_by_id.get(str(question_item.get("id") or ""))
-        if answer is None and index < len(answers):
-            answer = answers[index]
-        answer = answer or {}
-        text = str(answer.get("answer") or "").strip()
-        question = str(question_item.get("question") or "")
-        rubric = _answer_rubric(text, question)
-        score = round(
-            rubric.get("Relevance", 0) * 0.30
-            + rubric.get("Structure", 0) * 0.20
-            + rubric.get("Specificity", 0) * 0.20
-            + rubric.get("Technical depth", 0) * 0.20
-            + rubric.get("Communication", 0) * 0.10
-        ) if rubric else 0
-        signals: list[str] = []
-        improvements: list[str] = []
-        feedback = {
-            "Relevance": ("Stayed focused on the question and its technical intent.", "Answer the exact question first and connect the example to its core topic."),
-            "Structure": ("Used a clear context-to-action-to-outcome flow.", "Organize the answer as context, responsibility, action, and outcome."),
-            "Specificity": ("Used concrete evidence rather than only general claims.", "Add a truthful example with scope, ownership, constraints, and measurable evidence."),
-            "Technical depth": ("Explained implementation choices and technical reasoning.", "Explain the tools used, implementation decision, trade-off, and why it worked."),
-            "Communication": ("The response was sufficiently detailed and readable.", "Give a focused 45–150 word answer and avoid fragments, repetition, or filler."),
-        }
-        for dimension, dimension_score in rubric.items():
-            positive, corrective = feedback[dimension]
-            if dimension_score >= 75:
-                signals.append(positive)
-            elif dimension_score < 55:
-                improvements.append(corrective)
-        answer_fingerprint = " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
-        if text and rubric.get("Relevance", 0) < 50:
-            score = min(score, 60)
-        if answer_fingerprint and answer_fingerprint in seen_answers:
-            score = min(score, 45)
-            improvements.insert(0, "Do not reuse the same response for different questions; give evidence that directly answers this prompt.")
-        if answer_fingerprint:
-            seen_answers.add(answer_fingerprint)
-        if text:
-            answered += 1
-        scored_answers.append(
-            {
-                "question": question,
-                "answer": text,
-                "score": score,
-                "rubric": rubric,
-                "signals": signals,
-                "improvements": improvements[:5],
-            }
-        )
-    average = round(sum(item["score"] for item in scored_answers) / len(scored_answers)) if scored_answers else 0
-    rubric_summary = {
-        dimension: round(sum(item["rubric"].get(dimension, 0) for item in scored_answers) / len(scored_answers))
-        for dimension in ("Relevance", "Structure", "Specificity", "Technical depth", "Communication")
-    } if scored_answers else {}
-    confidence = "Strong" if average >= 78 else "Developing" if average >= 58 else "Needs practice"
-    return {
-        "score": average,
-        "confidence": confidence,
-        "answered": answered,
-        "question_count": len(scored_answers),
-        "summary": _interview_summary(average, answered, len(scored_answers)),
-        "strengths": _scorecard_strengths(scored_answers),
-        "improvements": _scorecard_improvements(scored_answers),
-        "rubric": rubric_summary,
-        "answers": scored_answers,
-    }
-
-
-def _answer_rubric(text: str, question: str) -> dict[str, int]:
-    if not text.strip():
-        return {name: 0 for name in ("Relevance", "Structure", "Specificity", "Technical depth", "Communication")}
-    lower = text.casefold()
-    words = re.findall(r"[a-z0-9+#.-]+", lower)
-    word_count = len(words)
-    unique_ratio = len(set(words)) / max(1, word_count)
-    stopwords = {"about", "after", "before", "could", "explain", "would", "their", "there", "which", "where", "while", "with", "from", "that", "this", "what", "when", "your", "have", "into"}
-    question_terms = {word for word in re.findall(r"[a-z0-9+#.-]+", question.casefold()) if len(word) > 3 and word not in stopwords}
-    overlap = sum(1 for term in question_terms if term in lower)
-    relevance = min(100, 35 + overlap * 13) if question_terms else 65
-
-    context_markers = ("situation", "context", "challenge", "problem", "responsible", "task", "required")
-    action_markers = ("i built", "i designed", "i implemented", "i created", "i analyzed", "i led", "i decided", "my role", "we used")
-    outcome_markers = ("result", "outcome", "impact", "reduced", "improved", "increased", "saved", "delivered")
-    structure = 25 + 25 * any(marker in lower for marker in context_markers) + 25 * any(marker in lower for marker in action_markers) + 25 * any(marker in lower for marker in outcome_markers)
-
-    evidence = any(char.isdigit() for char in text) or any(term in lower for term in ("percent", "%", "users", "records", "hours", "days", "sla", "latency", "cost", "revenue", "gb", "tb"))
-    ownership = any(term in lower for term in ("i ", "my ", "personally", "owned", "responsible"))
-    example = any(term in lower for term in ("for example", "in one project", "at my", "during", "when we", "the project"))
-    specificity = min(100, 25 + 30 * evidence + 25 * ownership + 20 * example)
-
-    technical_markers = ("architecture", "pipeline", "database", "query", "api", "python", "sql", "spark", "aws", "azure", "gcp", "model", "deployment", "testing", "monitoring", "schema", "index", "partition", "algorithm")
-    reasoning_markers = ("because", "therefore", "trade-off", "tradeoff", "instead", "chose", "decision", "root cause", "constraint")
-    technical_hits = sum(1 for marker in technical_markers if marker in lower)
-    technical_depth = min(100, 25 + technical_hits * 10 + 25 * any(marker in lower for marker in reasoning_markers))
-
-    if 45 <= word_count <= 180:
-        length_score = 75
-    elif 25 <= word_count < 45 or 181 <= word_count <= 240:
-        length_score = 55
-    else:
-        length_score = 30
-    communication = min(100, length_score + (15 if unique_ratio >= 0.55 else 5) + (10 if text.count(".") + text.count("?") >= 2 else 0))
-    return {
-        "Relevance": int(relevance),
-        "Structure": int(structure),
-        "Specificity": int(specificity),
-        "Technical depth": int(technical_depth),
-        "Communication": int(communication),
-    }
-
-
-def _interview_summary(score: int, answered: int, total: int) -> str:
-    if not total:
-        return "No answers were submitted for evaluation."
-    if score >= 78:
-        return f"Strong mock interview. You answered {answered} of {total} questions with good structure and role relevance."
-    if score >= 58:
-        return f"Good practice round. You answered {answered} of {total} questions; add sharper examples and measurable outcomes to build confidence."
-    return f"Useful first practice round. You answered {answered} of {total} questions; focus on longer structured answers with specific project evidence."
-
-
-def _scorecard_strengths(scored_answers: list[dict]) -> list[str]:
-    strengths: list[str] = []
-    for answer in scored_answers:
-        for signal in answer.get("signals") or []:
-            if signal not in strengths:
-                strengths.append(signal)
-        if len(strengths) >= 3:
-            break
-    return strengths or ["Completed a structured practice interview round."]
-
-
-def _scorecard_improvements(scored_answers: list[dict]) -> list[str]:
-    improvements: list[str] = []
-    for answer in scored_answers:
-        for item in answer.get("improvements") or []:
-            if item not in improvements:
-                improvements.append(item)
-        if len(improvements) >= 4:
-            break
-    return improvements or ["Keep practicing concise examples using situation, action, technical depth, and business impact."]
+def _score_mock_interview(
+    answers: list[dict],
+    questions: list[dict],
+    *,
+    roles: tuple[str, ...] = (),
+    skills: tuple[str, ...] = (),
+    interview_mode: str = "",
+) -> dict:
+    return evaluate_interview(
+        answers,
+        questions,
+        roles=roles,
+        skills=skills,
+        interview_mode=interview_mode,
+    )
 
 
 def _ordered_unique(values: tuple[str, ...]) -> tuple[str, ...]:
@@ -2128,11 +2003,29 @@ def _mock_interview_page(user_email: str) -> str:
     .score {{ display:grid; grid-template-columns:140px minmax(0,1fr); gap:16px; align-items:center; }}
     .score-circle {{ width:118px; height:118px; border-radius:50%; display:grid; place-items:center; background:conic-gradient(#38bdf8 calc(var(--score,0) * 1%), #1e293b 0); }}
     .score-circle span {{ width:88px; height:88px; border-radius:50%; display:grid; place-items:center; background:#0f172a; color:#fff; font-size:30px; font-weight:950; }}
+    .report-meta {{ margin-top:5px; color:#93c5fd; font-size:12px; font-weight:850; }}
+    .feedback-columns {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; margin-top:20px; }}
     .feedback-list {{ margin:10px 0 0; padding-left:22px; }}
     .feedback-list li {{ margin:7px 0; line-height:1.4; }}
+    .report-section {{ margin-top:22px; padding-top:18px; border-top:1px solid rgba(148,163,184,.25); }}
+    .rubric-list {{ display:grid; gap:10px; margin-top:12px; }}
+    .rubric-row {{ display:grid; grid-template-columns:150px minmax(0,1fr) 45px; gap:10px; align-items:center; }}
+    .rubric-track {{ height:9px; border-radius:999px; background:#1e293b; overflow:hidden; }}
+    .rubric-track span {{ display:block; height:100%; background:#38bdf8; }}
+    .rubric-value {{ color:#fff; font-weight:900; text-align:right; }}
+    .plan-list {{ display:grid; gap:0; margin-top:12px; }}
+    .plan-step {{ display:grid; grid-template-columns:34px minmax(0,1fr); gap:12px; padding:14px 0; border-bottom:1px solid rgba(148,163,184,.2); }}
+    .plan-step:last-child {{ border-bottom:0; }}
+    .plan-number {{ width:30px; height:30px; border-radius:50%; display:grid; place-items:center; background:#2563eb; color:#fff; font-weight:900; }}
+    .plan-step h4 {{ margin:0 0 5px; color:#fff; }}
+    .plan-step p {{ margin:4px 0; line-height:1.45; }}
+    .answer-review {{ padding:11px 0; border-bottom:1px solid rgba(148,163,184,.2); }}
+    .answer-review summary {{ cursor:pointer; color:#fff; font-weight:850; }}
+    .answer-review p {{ line-height:1.45; }}
     .hidden {{ display:none !important; }}
     .notice {{ margin-top:12px; padding:10px; border:1px solid rgba(245,158,11,.5); border-radius:8px; color:#fde68a; background:rgba(120,53,15,.28); }}
-    @media (max-width: 1100px) {{ .interview-grid, .setup-panel {{ grid-template-columns:1fr; }} .right-stack {{ grid-template-rows:auto; }} .stage {{ min-height:480px; }} .topbar {{ width:min(100% - 28px, 760px); flex-wrap:wrap; }} main {{ width:min(100% - 28px, 760px); }} .stat-grid {{ grid-template-columns:1fr; }} }}
+    @media (max-width: 1100px) {{ .interview-grid, .setup-panel, .feedback-columns {{ grid-template-columns:1fr; }} .right-stack {{ grid-template-rows:auto; }} .stage {{ min-height:480px; }} .topbar {{ width:min(100% - 28px, 760px); flex-wrap:wrap; }} main {{ width:min(100% - 28px, 760px); }} .stat-grid {{ grid-template-columns:1fr; }} }}
+    @media (max-width: 620px) {{ .score {{ grid-template-columns:1fr; }} .rubric-row {{ grid-template-columns:115px minmax(0,1fr) 38px; }} }}
   </style>
 </head>
 <body>
@@ -2624,19 +2517,47 @@ def _mock_interview_page(user_email: str) -> str:
     }}
     function renderScorecard(card) {{
       scorecard.classList.remove('hidden');
+      const mode = card.evaluation_mode === 'hybrid_ai' ? 'AI-assisted evaluation' : 'Evidence-based evaluation';
+      const list = (items) => (items || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('');
+      const rubric = Object.entries(card.rubric || {{}}).map(([name, value]) => `
+        <div class="rubric-row">
+          <span>${{escapeHtml(name)}}</span>
+          <div class="rubric-track" aria-hidden="true"><span style="width:${{Math.max(0, Math.min(100, Number(value) || 0))}}%"></span></div>
+          <span class="rubric-value">${{escapeHtml(value)}}</span>
+        </div>`).join('');
+      const plan = (card.preparation_plan || []).map((step, index) => `
+        <div class="plan-step">
+          <span class="plan-number">${{index + 1}}</span>
+          <div>
+            <h4>${{escapeHtml(step.title || step.focus)}}</h4>
+            <p>${{escapeHtml(step.action)}}</p>
+            <p class="muted"><strong>Practice:</strong> ${{escapeHtml(step.practice)}} <strong>Target:</strong> ${{escapeHtml(step.target)}}</p>
+          </div>
+        </div>`).join('');
+      const answerReview = (card.answers || []).map((item, index) => `
+        <details class="answer-review">
+          <summary>Question ${{index + 1}} · ${{escapeHtml(item.category)}} · ${{escapeHtml(item.score)}}/100</summary>
+          <p><strong>${{escapeHtml(item.question)}}</strong></p>
+          <p class="muted">${{escapeHtml(item.answer_type === 'code' ? 'Code response · ' + (item.code_language || 'plain text') : item.answer || 'No answer submitted.')}}</p>
+          ${{(item.improvements || []).length ? `<ul class="feedback-list">${{list(item.improvements)}}</ul>` : ''}}
+        </details>`).join('');
       scorecard.innerHTML = `
         <div class="score">
           <div class="score-circle" style="--score:${{card.score || 0}}"><span>${{card.score || 0}}</span></div>
           <div>
             <h2>${{escapeHtml(card.confidence)}} interview readiness</h2>
             <p class="muted">${{escapeHtml(card.summary)}}</p>
+            <div class="report-meta">${{escapeHtml(mode)}} · ${{escapeHtml(card.answered || 0)}} of ${{escapeHtml(card.question_count || 0)}} answered</div>
           </div>
         </div>
-        <div class="setup-panel" style="grid-template-columns:1fr 1fr;margin:16px 0 0">
-          <div><h3>Strengths</h3><ul class="feedback-list">${{(card.strengths || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
-          <div><h3>Next improvements</h3><ul class="feedback-list">${{(card.improvements || []).map((item) => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul></div>
+        <div class="feedback-columns">
+          <div><h3>Strengths</h3><ul class="feedback-list">${{list(card.strengths)}}</ul></div>
+          <div><h3>Weaknesses</h3><ul class="feedback-list">${{list(card.weaknesses)}}</ul></div>
+          <div><h3>Improvement areas</h3><ul class="feedback-list">${{list(card.improvement_areas || card.improvements)}}</ul></div>
         </div>
-        <div style="margin-top:16px"><h3>Scoring rubric</h3><div class="stat-grid">${{Object.entries(card.rubric || {{}}).map(([name, value]) => `<div class="stat"><strong>${{value}}</strong><span>${{escapeHtml(name)}} / 100</span></div>`).join('')}}</div></div>
+        <section class="report-section"><h3>Performance dimensions</h3><div class="rubric-list">${{rubric}}</div></section>
+        <section class="report-section"><h3>Preparation plan for your next interview</h3><div class="plan-list">${{plan}}</div></section>
+        <section class="report-section"><h3>Answer review</h3>${{answerReview}}</section>
       `;
       statusText.textContent = 'Scorecard ready. Review your transcript and practice again when ready.';
     }}

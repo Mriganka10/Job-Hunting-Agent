@@ -127,7 +127,9 @@ The UI supports:
 - Daily schedule while the server process is running locally; production schedules are external.
 - Improved ATS resume generation and DOCX download.
 - Virtual mock interviews tailored to saved roles and skills.
-- Optional camera preview, browser text-to-speech/speech recognition, typed-answer fallback, transcripts, scorecards, and recent interview history.
+- Optional camera preview, browser text-to-speech/speech recognition, typed/code-answer fallback, four-dimension feedback reports, preparation plans, and recent interview history.
+
+Interview reports work without an external AI service. To add one structured LLM review at section completion, configure `JOB_AGENT_INTERVIEW_LLM_API_KEY`, `JOB_AGENT_INTERVIEW_LLM_MODEL`, and `JOB_AGENT_INTERVIEW_LLM_ENDPOINT`. Blank interview-specific values reuse the shared `JOB_AGENT_LLM_*` settings.
 
 Local OTP behavior:
 
