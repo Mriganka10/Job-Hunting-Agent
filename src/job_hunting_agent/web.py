@@ -56,6 +56,7 @@ from .models import AtsReport, CandidateProfile, JobLead, Resume
 from .job_pagination import DEFAULT_JOB_PAGE_SIZE, paginate_jobs
 from .interview_evaluator import evaluate_interview
 from .interview_questions import build_question_groups, select_question_sequence
+from .interview_evaluator import evaluate_interview
 from .performance_cache import cached_document, document_cache_key
 from .resume_builder import write_base_resume, write_tailored_resume
 from .scheduler_backend import delete_user_schedule, upsert_user_schedule, uses_eventbridge_scheduler

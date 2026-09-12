@@ -24,7 +24,7 @@ The current proof of concept focuses on these capabilities:
 9. Web UI for resume upload, portal profile URLs, immediate execution, and daily scheduling.
 10. Deterministic improved-resume generation with an authenticated DOCX download.
 11. Email OTP authentication, per-user profiles, run history, and schedule persistence in SQLite or PostgreSQL.
-12. A role- and skill-aware virtual mock interview with optional browser camera/speech support, transcripts, scorecards, and recent-session history.
+12. A role- and skill-aware virtual mock interview with optional browser camera/speech support, non-repeating questions, text and code responses, four-dimension evaluation reports, preparation plans, and recent-session history.
 
 The prototype does not yet perform authenticated one-click portal submissions. LinkedIn and Naukri often require login, CAPTCHA, changing application forms, and user-specific consent flows. Those flows should be implemented as authenticated browser adapters after account-specific testing.
 

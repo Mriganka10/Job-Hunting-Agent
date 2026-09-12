@@ -382,6 +382,9 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert "item.answer_mode === 'code'" in page.text
     assert "Your code is saved as written and is not executed." in page.text
     assert '<option value="plaintext">Other / Plain text</option>' in page.text
+    assert "Preparation plan for your next interview" in page.text
+    assert "Performance dimensions" in page.text
+    assert "Weaknesses" in page.text
     assert "Your video" in page.text
     assert "function stopCamera()" in page.text
     assert "mediaStream.getTracks().forEach((track) => track.stop())" in page.text

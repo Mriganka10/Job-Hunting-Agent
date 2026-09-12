@@ -34,7 +34,7 @@ The system may process:
 - LinkedIn and Naukri profile URLs.
 - SMTP credentials.
 - Future portal login cookies or session data.
-- Mock-interview questions, typed or speech-transcribed answers, and scorecards.
+- Mock-interview questions, typed, code, or speech-transcribed answers, and evaluation reports. When optional interview LLM evaluation is configured, the questions and answers are sent to that configured endpoint; camera content is never included.
 - Generated improved resumes and download links.
 
 All such data should be treated as private.

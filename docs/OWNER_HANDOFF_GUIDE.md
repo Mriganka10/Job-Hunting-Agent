@@ -195,7 +195,7 @@ Use this flow for a demo:
 - The web UI is still a prototype and needs production abuse/privacy hardening.
 - No authenticated portal browser automation yet.
 - Portal CAPTCHA and portal OTP flows are intentionally not bypassed; login OTP for this application is implemented.
-- Resume generation and interview scoring are deterministic, not LLM-based.
+- Resume generation remains source-grounded and deterministic. Interview evaluation always has an evidence-based baseline and can optionally blend a schema-validated LLM assessment when configured.
 - No job-description-specific resume tailoring yet.
 
 ## 7. Recommended Next Sprint
