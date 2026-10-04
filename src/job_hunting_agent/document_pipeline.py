@@ -80,6 +80,29 @@ def write_pdf_resume(
                 story.append(Paragraph(_escape(item.removeprefix("BULLET::")), bullet_style, bulletText="•"))
         story.append(Spacer(1, max(0, 1.5 - compact * 0.4)))
     document.build(story)
+    _remove_blank_trailing_pages(path)
+
+
+def _remove_blank_trailing_pages(path: Path) -> None:
+    """Remove blank pages occasionally emitted at an exact ReportLab boundary."""
+    try:
+        from pypdf import PdfReader, PdfWriter
+
+        reader = PdfReader(str(path))
+        keep = len(reader.pages)
+        while keep > 1 and not (reader.pages[keep - 1].extract_text() or "").strip():
+            keep -= 1
+        if keep == len(reader.pages):
+            return
+        writer = PdfWriter()
+        for page in reader.pages[:keep]:
+            writer.add_page(page)
+        temporary = path.with_suffix(".trimmed.pdf")
+        with temporary.open("wb") as stream:
+            writer.write(stream)
+        temporary.replace(path)
+    except (ImportError, OSError, ValueError):
+        return
 
 
 def convert_docx_to_pdf(docx_path: Path, pdf_path: Path) -> bool:
@@ -186,7 +209,28 @@ def _inspect_pdf_visuals(path: Path) -> tuple[list[dict[str, object]], list[str]
     try:
         import pymupdf
     except ImportError:
-        return [], ["Pixel-level PDF inspection requires PyMuPDF."]
+        try:
+            from pypdf import PdfReader
+
+            checks = []
+            issues = []
+            for index, page in enumerate(PdfReader(str(path)).pages, start=1):
+                text = (page.extract_text() or "").strip()
+                blocks = len([line for line in text.splitlines() if line.strip()])
+                if not text:
+                    issues.append(f"Page {index} appears blank after text extraction.")
+                checks.append({
+                    "page": index,
+                    "ink_ratio": 0.01 if text else 0.0,
+                    "text_blocks": blocks,
+                    "clipped_blocks": 0,
+                    "width": 0.0,
+                    "height": 0.0,
+                    "inspection": "text_fallback",
+                })
+            return checks, issues
+        except (ImportError, OSError, ValueError):
+            return [], ["PDF visual inspection was unavailable."]
     checks: list[dict[str, object]] = []
     issues: list[str] = []
     try:

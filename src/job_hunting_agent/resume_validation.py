@@ -17,6 +17,7 @@ FACT_SECTIONS = {
     "ACHIEVEMENTS",
     "PUBLICATIONS & RESEARCH",
     "VOLUNTEER & LEADERSHIP EXPERIENCE",
+    "PROFESSIONAL MEMBERSHIPS",
 }
 GENERATED_TERMS = {
     "built", "conducted", "contributed", "developed", "designed", "employed", "implemented",
@@ -108,7 +109,10 @@ def classify_section_item(value: str) -> tuple[str, float]:
     text = normalize_ats_text(value).casefold()
     scores: Counter[str] = Counter()
     phone_like = bool(re.fullmatch(r"\+?[\d\s().-]{8,}", text)) and len(re.sub(r"\D", "", text)) >= 10
-    if re.search(r"@|https?://|linkedin\.com|github\.com", text) or phone_like:
+    email_like = bool(re.search(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", text))
+    profile_link = bool(re.search(r"linkedin\.com", text))
+    short_link = bool(re.search(r"https?://|github\.com", text)) and len(text.split()) <= 12
+    if email_like or profile_link or short_link or phone_like:
         scores["CONTACT"] += 5
     if re.search(r"\b(?:b\.?tech|m\.?tech|mba|bachelor|master|ph\.?d|diploma|degree|higher secondary|secondary education)\b", text):
         scores["EDUCATION"] += 5
@@ -116,7 +120,7 @@ def classify_section_item(value: str) -> tuple[str, float]:
         scores["EDUCATION"] += 4
     if re.search(r"\b(?:university|college|school|institute|academy)\b", text):
         scores["EDUCATION"] += 1
-    if re.search(r"\b(?:present|engineer|developer|analyst|consultant|manager|officer|associate|intern)\b", text):
+    if re.search(r"\b(?:present|engineer|developer|analyst|consultant|manager|officer|associate|intern|nurse|physician|lawyer|attorney|designer|teacher|accountant|auditor|specialist)\b", text):
         scores["PROFESSIONAL EXPERIENCE"] += 2
     if re.search(r"\b(?:pvt|ltd|limited|corp|corporation|services|technologies)\b", text):
         scores["PROFESSIONAL EXPERIENCE"] += 2

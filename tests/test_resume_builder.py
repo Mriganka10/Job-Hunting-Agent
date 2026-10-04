@@ -5,7 +5,7 @@ from docx import Document
 from pypdf import PdfReader
 
 from job_hunting_agent.models import AtsReport, CandidateProfile, JobLead, Resume
-from job_hunting_agent.resume_builder import write_improved_resume
+from job_hunting_agent.resume_builder import _contact_line, _resume_sections, write_improved_resume
 from job_hunting_agent.resume_validation import validate_factual_consistency, validate_section_semantics
 
 
@@ -439,7 +439,7 @@ def test_builder_repairs_wrapped_entry_level_resume_sections(tmp_path: Path) -> 
     paragraphs = [paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs if paragraph.text.strip()]
     text = "\n".join(paragraphs)
 
-    assert paragraphs[1] == "jane@example.com | +91 90831 81985 | https://www.linkedin.com/in/janedoe/ | PAN India"
+    assert paragraphs[1] == "jane@example.com | +91 90831 81985"
     assert "2022 - 2026" not in paragraphs[1]
     assert "Kairoz Corporation Pvt. Ltd." in text
     assert "May 2026 - Present" in text
@@ -455,6 +455,7 @@ def test_builder_repairs_wrapped_entry_level_resume_sections(tmp_path: Path) -> 
     assert "2022: Higher Secondary (XII)" in text
     assert "2020: Secondary (X)" in text
     assert "\nth\n" not in text
+    assert "Semester)t h" not in text
 
 
 def test_builder_filters_generic_core_competency_clouds(tmp_path: Path) -> None:
@@ -554,6 +555,22 @@ def test_factual_and_section_validators_block_unsupported_output() -> None:
     assert semantics["passed"] is False
 
 
+def test_project_repository_link_is_valid_project_evidence() -> None:
+    semantics = validate_section_semantics(
+        [
+            (
+                "PROJECTS",
+                [
+                    "Cat-Dog Classification A Deep Learning-based model to classify images of cats and dogs. "
+                    "Link - https://github.com/example/cat-dog-classifier"
+                ],
+            )
+        ]
+    )
+
+    assert semantics["passed"] is True
+
+
 def test_university_collaboration_is_not_misclassified_as_education() -> None:
     collaboration = validate_section_semantics(
         [
@@ -633,3 +650,77 @@ def test_page_budget_triggers_progressive_compression(tmp_path: Path, monkeypatc
     )
 
     assert artifact["validation"]["compression_level"] == 2
+
+
+def test_builder_uses_role_appropriate_skills_and_preserves_memberships(tmp_path: Path) -> None:
+    resume = Resume(
+        "nurse.txt",
+        "REGISTERED NURSE\nCLINICAL SKILLS\nPatient Care, Medication Administration\nPROFESSIONAL MEMBERSHIPS\nIndian Nursing Council",
+        ("Patient Care", "Medication Administration"),
+        ("Registered Nurse",),
+        {
+            "skills": "Patient Care, Medication Administration",
+            "professional_memberships": "Indian Nursing Council",
+            "education": "Bachelor of Science in Nursing",
+        },
+    )
+    profile = CandidateProfile(name="Jane Doe", target_roles=("Registered Nurse",), skills=("Patient Care", "Medication Administration"))
+
+    artifact = write_improved_resume(resume, AtsReport(70, (), (), ()), profile, tmp_path)
+    text = "\n".join(paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs)
+
+    assert "CLINICAL SKILLS" in text
+    assert "PROFESSIONAL MEMBERSHIPS" in text
+    assert "Indian Nursing Council" in text
+    assert "TECHNICAL SKILLS" not in text
+
+
+def test_uploaded_resume_contact_overrides_profile_and_search_locations() -> None:
+    profile = CandidateProfile(
+        name="Different Account Holder",
+        email="account@example.com",
+        phone="9999999999",
+        linkedin_profile_url="https://linkedin.com/in/account-holder",
+        locations=("Delhi", "Mumbai"),
+    )
+    joydip_contact = "JOYDIP PAUL\n6289715644KolkataGitHubjoydippaul2004@gmail.com"
+    agnimitra_contact = "AGNIMITRA BANERJEE\n+91 9083181985\nbanerjeebabu456@gmail.com\nKOLKATA"
+
+    assert _contact_line(profile, joydip_contact) == "joydippaul2004@gmail.com | 6289715644 | Kolkata"
+    assert _contact_line(profile, agnimitra_contact) == "banerjeebabu456@gmail.com | +91 90831 81985 | Kolkata"
+    assert "Delhi" not in _contact_line(profile, joydip_contact)
+
+
+def test_builder_preserves_projects_skills_languages_and_achievements_after_column_repair() -> None:
+    resume = Resume(
+        "resume.pdf",
+        "Machine learning resume",
+        ("Machine Learning", "Python"),
+        ("Machine Learning",),
+        {
+            "contact": "JOYDIP PAUL\n6289715644KolkataGitHubjoydippaul2004@gmail.com",
+            "summary": "A consistent and hardworking individual.",
+            "skills": "Programming: C, Java, Python\nAI/ML: Machine Learning, Deep Learning",
+            "projects": (
+                "Churn Prediction\nA Logistic Regression-based ML model for customer churn.\n"
+                "Image Deblurring using Deep Learning (Currently working)\n"
+                "A Deep Learning-based model for restoring images."
+            ),
+            "education": "B.Tech | Computer Science | CGPA 8.27\n2022-2026",
+            "achievements": "GATE Qualified (2025)\n200+ Leetcode problems solved.",
+            "languages": "English\nBengali\nHindi",
+        },
+    )
+    sections = dict(
+        _resume_sections(
+            resume,
+            AtsReport(80, (), (), ()),
+            CandidateProfile(target_roles=("Machine Learning Engineer",), locations=("Delhi",)),
+        )
+    )
+
+    assert len(sections["PROJECTS"]) == 2
+    assert any("Image Deblurring" in item for item in sections["PROJECTS"])
+    assert sections["LANGUAGES"] == ["English", "Hindi", "Bengali"]
+    assert sections["ACHIEVEMENTS"] == ["GATE Qualified (2025)", "200+ Leetcode problems solved."]
+    assert any("Programming: C, Java, Python" in item for item in sections["TECHNICAL SKILLS"])

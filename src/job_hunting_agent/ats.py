@@ -20,6 +20,9 @@ ACTION_VERBS = {
     "developed", "directed", "implemented", "improved", "increased", "launched", "led", "managed",
     "optimized", "performed", "prepared", "reduced", "resolved", "scaled", "spearheaded", "streamlined",
     "supported", "transformed", "utilized",
+    "administered", "advised", "audited", "authored", "coached", "coordinated", "counseled",
+    "diagnosed", "drafted", "evaluated", "facilitated", "forecasted", "negotiated", "operated",
+    "oversaw", "planned", "produced", "reconciled", "reviewed", "scheduled", "secured", "trained",
     # PDF resumes often preserve original gerund bullets. Treat these as action-led
     # enough for scoring so feedback focuses on real problems, not grammar trivia.
     "building", "conducting", "contributing", "designing", "directing", "employing", "implementing",
@@ -63,9 +66,9 @@ def score_resume(resume: Resume, profile: CandidateProfile) -> AtsReport:
         jd,
     )
     layout = analyze_resume_layout(resume.path, resume.text)
-    desired = _target_keywords(jd, profile.skills, resume.inferred_skills)
+    desired = _target_keywords(jd, profile.skills, resume.inferred_skills, role_profile.priority_keywords)
     weights = role_profile.category_weights
-    structure, structure_detail = _score_structure(resume.text, sections, profile, layout, weights[0])
+    structure, structure_detail = _score_structure(resume.text, sections, profile, layout, weights[0], role_profile)
     keywords, matched, missing, similarity, keyword_detail = _score_keywords(
         resume.text,
         desired,
@@ -203,9 +206,11 @@ def _score_structure(
     profile: CandidateProfile | None = None,
     layout: dict[str, object] | None = None,
     maximum: int = 20,
+    role_profile: AtsRoleProfile | None = None,
 ) -> tuple[int, dict[str, object]]:
     present = [name for name in SECTION_POINTS if sections.get(name)]
-    missing = [name for name in CORE_ATS_SECTIONS if not sections.get(name)]
+    required = _required_sections(role_profile, profile)
+    missing = [name for name in required if not sections.get(name)]
     raw = sum(points for name, points in SECTION_POINTS.items() if sections.get(name))
     profile_contact = ""
     if profile:
@@ -246,6 +251,7 @@ def _score_structure(
         recommendations.append("Move content into the correct resume section; possible mixed sections: " + ", ".join(contamination[:4]) + ".")
     return score, {
         "present_sections": present,
+        "required_sections": list(required),
         "missing_sections": missing,
         "contact": {"email": has_email, "phone": has_phone, "profile": has_profile},
         "contact_points": round(contact_points, 2),
@@ -259,6 +265,24 @@ def _score_structure(
         "recommendations": recommendations,
         "critical_issues": missing + education_issues + contamination,
     }
+
+
+def _required_sections(
+    role_profile: AtsRoleProfile | None,
+    profile: CandidateProfile | None,
+) -> tuple[str, ...]:
+    """Return a fair minimum structure for the candidate's career context."""
+    key = role_profile.key if role_profile else "general"
+    years = profile.experience_years if profile else 0.0
+    if key == "academic_teaching":
+        return ("contact", "summary", "education", "experience")
+    if key in {"healthcare_clinical", "legal_compliance", "accounting_audit"}:
+        return ("contact", "summary", "skills", "experience", "education")
+    if years <= 1:
+        # Entry-level candidates may demonstrate readiness through projects,
+        # placements, clinical rotations, research, or volunteering.
+        return ("contact", "summary", "skills", "education")
+    return CORE_ATS_SECTIONS
 
 
 def _score_keywords(
@@ -317,12 +341,12 @@ def _score_experience_projects(
     supporting_present = [name for name in supporting_sections if sections.get(name)]
     evidence_terms = role_profile.evidence_terms if role_profile else ()
     evidence_term_hits = [term for term in evidence_terms if _contains_keyword(evidence, term)]
-    supporting_points = min(4, len(supporting_present) * 2)
+    supporting_points = min(5, len(supporting_present) * 2)
     role_evidence_points = min(2, len(evidence_term_hits) * 0.5)
     base_score = min(
         35,
         round(
-            (5 if sections.get("experience") else 0)
+            (5 if sections.get("experience") else (3 if years <= 1 and evidence else 0))
             + supporting_points
             + min(6, len(bullets) * 1.1)
             + min(8, metrics * 2.0)
@@ -618,11 +642,21 @@ def _llm_quality_evaluation(sections: dict[str, str], jd: str) -> dict[str, obje
         return None
 
 
-def _target_keywords(jd: str, profile_skills: tuple[str, ...], resume_skills: tuple[str, ...]) -> list[str]:
+def _target_keywords(
+    jd: str,
+    profile_skills: tuple[str, ...],
+    resume_skills: tuple[str, ...],
+    role_keywords: tuple[str, ...] = (),
+) -> list[str]:
     terms = [canonicalize_skill(skill) for skill in profile_skills if skill.strip()] + _extract_jd_keywords(jd)
+    # With no job description or configured skills, score general readiness
+    # against a small role baseline. Do not compare the resume only with itself,
+    # which previously produced a misleading perfect keyword match.
+    if not terms:
+        terms = [canonicalize_skill(skill) for skill in role_keywords]
     unique: list[str] = []
     seen: set[str] = set()
-    for term in terms or [canonicalize_skill(skill) for skill in resume_skills]:
+    for term in terms:
         key = " ".join(_match_tokens(term))
         if key and key not in seen:
             seen.add(key)
@@ -638,8 +672,41 @@ def _extract_jd_keywords(text: str) -> list[str]:
         "numpy", "matplotlib", "seaborn", "mongodb", "mysql", "postgresql", "snowflake",
         "databricks", "hadoop", "kafka", "git", "github", "rest api", "microservices",
         "data structures", "algorithms", "dbms", "oop", "computer vision", "opencv",
+        "patient care", "clinical documentation", "medication administration", "electronic health records",
+        "legal research", "contract drafting", "contract management", "regulatory compliance", "litigation",
+        "financial reporting", "reconciliation", "general ledger", "taxation", "audit", "gaap", "ifrs",
+        "inventory management", "procurement", "logistics", "vendor management", "process improvement",
+        "customer service", "customer success", "issue resolution", "crm", "salesforce",
+        "user research", "wireframing", "prototyping", "visual design", "figma", "adobe creative suite",
+        "curriculum development", "lesson planning", "classroom management", "instructional design",
+        "quality assurance", "risk management", "stakeholder management", "project management",
     }
-    return [canonicalize_skill(term) for term in sorted(skill_terms) if _contains_keyword(text, term)]
+    found = [canonicalize_skill(term) for term in sorted(skill_terms) if _contains_keyword(text, term)]
+    found.extend(_explicit_jd_skill_phrases(text))
+    return list(dict.fromkeys(found))[:40]
+
+
+def _explicit_jd_skill_phrases(text: str) -> list[str]:
+    """Extract domain skills from labelled requirement lists without a fixed vocabulary."""
+    phrases: list[str] = []
+    for raw_line in text.splitlines():
+        line = re.sub(r"^[\s•▪●*\-–—]+", "", raw_line).strip()
+        labelled = re.match(
+            r"^(?:required|preferred|minimum|key)?\s*(?:skills?|competencies|requirements?|qualifications?)\s*[:\-]\s*(.+)$",
+            line,
+            flags=re.I,
+        )
+        source = labelled.group(1) if labelled else ""
+        if not source and re.search(r"\b(?:proficiency|experience|knowledge|expertise)\s+(?:in|with)\b", line, flags=re.I):
+            source = re.split(r"\b(?:in|with)\b", line, maxsplit=1, flags=re.I)[-1]
+        if not source:
+            continue
+        source = re.split(r"[.!?]", source, maxsplit=1)[0]
+        for value in re.split(r"[,;|•]|\s+and\s+", source):
+            cleaned = re.sub(r"\s+", " ", value).strip(" .:()")
+            if 1 <= len(cleaned.split()) <= 5 and len(cleaned) <= 60 and not re.search(r"\b(?:years?|degree|candidate|ability|must|will|outcomes?|communication|responsibilities?)\b", cleaned, flags=re.I):
+                phrases.append(canonicalize_skill(cleaned))
+    return phrases
 
 
 def _embedding_similarity(left: str, right: str, dimensions: int = 384) -> float:
