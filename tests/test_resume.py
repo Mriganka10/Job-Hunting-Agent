@@ -2,7 +2,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
-from job_hunting_agent.resume import _read_pdf, detect_sections, extract_sections, normalize_text, parse_resume
+from job_hunting_agent.resume import _read_pdf, detect_sections, extract_roles, extract_sections, extract_skills, normalize_text, parse_resume
 
 
 def test_parse_text_resume_extracts_skills(tmp_path: Path) -> None:
@@ -188,3 +188,81 @@ AI developer focused on applied machine learning.
     assert "jane@example.com" in sections["contact"]
     assert "+91 9083181985" in sections["contact"]
     assert "2022 - 2026" not in sections["contact"]
+
+
+def test_section_parser_does_not_treat_prose_beginning_with_experience_as_heading() -> None:
+    sections = extract_sections("""PROFESSIONAL SUMMARY
+Experience building accessible services for vulnerable communities.
+CORE SKILLS
+Case Management, Crisis Intervention, Community Outreach
+""")
+
+    assert "Experience building accessible services" in sections["summary"]
+    assert "Case Management" in sections["skills"]
+
+
+def test_domain_skills_and_roles_generalize_beyond_technology() -> None:
+    text = """REGISTERED NURSE
+CLINICAL SKILLS
+Patient Care, Medication Administration, Wound Care, Discharge Planning
+PROFESSIONAL MEMBERSHIPS
+Indian Nursing Council
+"""
+
+    skills = extract_skills(text)
+    assert {"Patient Care", "Medication Administration", "Wound Care", "Discharge Planning"} <= set(skills)
+    assert "Registered Nurse" in extract_roles(text)
+    assert "professional_memberships" in extract_sections(text)
+
+
+def test_extract_sections_repairs_canva_column_order_by_content_type() -> None:
+    sections = extract_sections("""ABOUT ME
+Entry-level machine learning candidate.
+LANGUAGES
+JOYDIP PAUL
+6289715644KolkataGitHubjoydippaul2004@gmail.com
+EDUCATION
+B.Tech | Computer Science | CGPA 8.27
+English
+Bengali
+Hindi
+PROJECTS
+Churn Prediction
+A Logistic Regression-based ML model for customer churn.
+CORE SKILLS
+LinkedIn
+ACHIEVEMENTS
+GATE Qualified (2025)
+Programming: C, Java, Python.
+AI/ML: Machine Learning, Deep Learning, TensorFlow.
+Soft Skills: Problem-Solving, Collaboration
+Image Deblurring using Deep Learning (Currently working)
+A Deep Learning-based model for restoring images.
+""")
+
+    assert sections["languages"] == "English\nBengali\nHindi"
+    assert "Programming: C, Java, Python." in sections["skills"]
+    assert "AI/ML: Machine Learning" in sections["skills"]
+    assert "Programming:" not in sections["achievements"]
+    assert "Image Deblurring" in sections["projects"]
+    assert "JOYDIP PAUL" in sections["contact"]
+
+
+def test_contact_recovery_ignores_project_links_and_language_lines() -> None:
+    sections = extract_sections("""PROJECTS
+Classifier
+Link - https://github.com/example/cat-dog-classifier
+LANGUAGES
+English
+Hindi
+JANE DOE
++91 9083181985
+jane@example.com
+KOLKATA
+CAREER OBJECTIVE
+Machine learning developer.
+""")
+
+    assert "https://github.com/example/cat-dog-classifier" not in sections["contact"]
+    assert "English" not in sections["contact"]
+    assert "KOLKATA" in sections["contact"]

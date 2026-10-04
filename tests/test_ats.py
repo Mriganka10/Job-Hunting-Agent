@@ -128,3 +128,40 @@ MBA - Finance
 
     assert not any("Projects" in item for item in report.improvements)
     assert not any("contact line" in item for item in report.improvements)
+
+
+def test_scoring_selects_healthcare_profile_and_domain_keywords() -> None:
+    text = """CONTACT
+nurse@example.com | +91 9876543210
+PROFESSIONAL SUMMARY
+Registered nurse supporting acute-care patients and safe discharge planning.
+CLINICAL SKILLS
+Patient Care, Medication Administration, Clinical Documentation, Safety
+PROFESSIONAL EXPERIENCE
+Registered Nurse | City Hospital | 2022 - Present
+- Administered medication and documented care for 18 patients per shift.
+- Coordinated discharge planning with physicians and families.
+EDUCATION
+Bachelor of Science in Nursing | 2022
+CERTIFICATIONS
+Basic Life Support
+"""
+    resume = Resume("nurse.txt", text, ("Patient Care", "Medication Administration", "Clinical Documentation", "Safety"), ("Registered Nurse",))
+    profile = CandidateProfile(target_roles=("Registered Nurse",), skills=("Patient Care", "Medication Administration", "Clinical Documentation", "Safety"), experience_years=3)
+
+    report = score_resume(resume, profile)
+
+    assert report.role_profile == "Healthcare and Clinical"
+    assert report.missing_keywords == ()
+    assert report.category_details["structure"]["required_sections"] == ["contact", "summary", "skills", "experience", "education"]
+
+
+def test_unconfigured_resume_is_not_given_self_referential_keyword_credit() -> None:
+    text = "SUMMARY\nProfessional profile.\nSKILLS\nUncommon Internal Tool\nEDUCATION\nBachelor degree"
+    resume = Resume("generic.txt", text, ("Uncommon Internal Tool",), (), {"summary": "Professional profile.", "skills": "Uncommon Internal Tool", "education": "Bachelor degree"})
+
+    report = score_resume(resume, CandidateProfile())
+
+    detail = report.category_details["skills_keywords"]
+    assert detail["semantic_provider"] == "profile_keyword_overlap"
+    assert report.role_profile == "General Professional"

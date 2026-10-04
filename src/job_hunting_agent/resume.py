@@ -217,12 +217,19 @@ GENERIC_SKILL_LABELS = {
     "database",
     "databases",
     "development tools",
+    "design tools",
     "devops tool",
     "domain expertise",
     "eagle technology",
     "frameworks",
     "languages",
     "methodologies",
+    "clinical skills",
+    "legal skills",
+    "accounting skills",
+    "functional skills",
+    "professional skills",
+    "management skills",
     "operating systems",
     "platforms",
     "programming",
@@ -251,13 +258,23 @@ ROLE_HINTS = (
     "backend developer",
     "full stack developer",
     "devops engineer",
+    "product manager", "project manager", "program manager", "scrum master",
+    "financial analyst", "accountant", "auditor", "investment banker",
+    "registered nurse", "nurse", "physician", "pharmacist", "therapist",
+    "lawyer", "attorney", "legal counsel", "compliance officer",
+    "operations manager", "supply chain analyst", "procurement specialist", "logistics manager",
+    "sales manager", "marketing manager", "business development manager",
+    "human resources manager", "recruiter", "talent acquisition specialist",
+    "graphic designer", "ux designer", "ui designer", "product designer", "content writer",
+    "mechanical engineer", "civil engineer", "electrical engineer", "quality engineer",
+    "teacher", "lecturer", "professor", "researcher", "customer success manager",
 )
 
 SECTION_ALIASES = {
     "contact": ("contact", "contact details", "personal details"),
     "summary": ("summary", "professional summary", "career summary", "profile", "profile summary", "objective", "career objective", "carrer objective", "about me"),
     "experience": ("experience", "work experience", "professional experience", "corporate experience", "employment", "employment history", "work history", "professional history", "internship", "internships"),
-    "skills": ("skills", "technical skills", "core skills", "core skills and tools", "key skills", "competencies", "technical competencies", "technologies", "tools and technologies", "domain expertise"),
+    "skills": ("skills", "technical skills", "core skills", "core skills and tools", "key skills", "competencies", "technical competencies", "technologies", "tools and technologies", "domain expertise", "clinical skills", "legal skills", "accounting skills", "design skills", "functional skills", "professional skills"),
     "education": ("education", "academic credentials", "academic background", "academic qualifications", "educational qualifications", "qualifications"),
     "projects": ("projects", "project experience", "academic projects", "personal projects", "key projects", "portfolio"),
     "certifications": ("certifications", "certification", "licenses and certifications", "courses", "training"),
@@ -266,6 +283,7 @@ SECTION_ALIASES = {
     "publications": ("publications", "publication", "research publications", "research papers"),
     "volunteering": ("volunteering", "volunteer experience", "community involvement", "leadership experience"),
     "interests": ("interests", "areas of interest", "professional interests", "hobbies"),
+    "professional_memberships": ("professional memberships", "memberships", "affiliations", "professional affiliations", "associations"),
     "core_competencies": ("core competencies", "areas of expertise", "key competencies"),
     "soft_skills": ("soft skills", "professional strengths", "personal skills", "interpersonal skills"),
     "career_timeline": ("career timeline", "employment timeline", "career progression"),
@@ -313,9 +331,7 @@ def extract_sections(text: str) -> dict[str, str]:
         cleaned = re.sub(r"^[\s\-–—•▪●*#|]+", "", raw_line).strip()
         heading_part = re.split(r"\s*[:|]\s*", cleaned, maxsplit=1)[0]
         key = _heading_key(heading_part)
-        matched = aliases.get(key)
-        if not matched and len(cleaned) <= 80:
-            matched = next((section for alias, section in aliases.items() if key.startswith(f"{alias} ")), None)
+        matched = _match_section_heading(cleaned, aliases)
         if matched:
             if matched == current and cleaned != cleaned.upper():
                 sections[current].append(raw_line)
@@ -352,7 +368,81 @@ def extract_sections(text: str) -> dict[str, str]:
         ]
         if achievement_lines:
             result["achievements"] = "\n".join(achievement_lines)
-    return result
+    return _repair_section_contamination(result)
+
+
+_LANGUAGE_NAMES = (
+    "English", "Hindi", "Bengali", "Tamil", "Telugu", "Marathi", "Gujarati", "Kannada",
+    "Malayalam", "Punjabi", "Urdu", "French", "German", "Spanish", "Mandarin", "Japanese",
+)
+
+
+def _repair_section_contamination(sections: dict[str, str]) -> dict[str, str]:
+    """Recover common Canva/two-column reading-order mistakes by content type."""
+    repaired = dict(sections)
+    language_pattern = re.compile(
+        rf"^(?:{'|'.join(map(re.escape, _LANGUAGE_NAMES))})(?:\s*[-:|]\s*(?:native|fluent|professional|working|basic|beginner|intermediate|advanced))?$",
+        flags=re.I,
+    )
+    languages: list[str] = []
+    for section_name, body in list(repaired.items()):
+        if section_name == "contact":
+            continue
+        retained: list[str] = []
+        for line in body.splitlines():
+            cleaned = line.strip(" \t•▪●*-")
+            if language_pattern.fullmatch(cleaned):
+                languages.append(cleaned)
+            else:
+                retained.append(line)
+        repaired[section_name] = "\n".join(retained).strip()
+    if languages:
+        repaired["languages"] = "\n".join(dict.fromkeys(languages))
+
+    skill_label = re.compile(
+        r"^(?:programming(?: languages?)?|ai\s*/?\s*ml|data science(?:\s*&\s*ai\s*/?\s*ml)?|"
+        r"data analytics(?:\s*&\s*visualization)?|databases?|web technologies|tools?|"
+        r"cs[- ]?fundamentals|mlops(?:\s*&\s*cloud)?|cloud|natural language processing|"
+        r"image processing|frameworks?|libraries|platforms?|operating systems?)\s*:",
+        flags=re.I,
+    )
+    recovered_skills: list[str] = []
+    for section_name in ("achievements", "certifications", "soft_skills"):
+        body = repaired.get(section_name, "")
+        if not body:
+            continue
+        retained = []
+        for line in body.splitlines():
+            if skill_label.match(line.strip()):
+                recovered_skills.append(line.strip())
+            else:
+                retained.append(line)
+        repaired[section_name] = "\n".join(retained).strip()
+    if recovered_skills:
+        current = repaired.get("skills", "")
+        existing = [line for line in current.splitlines() if line.strip() and line.strip().casefold() not in {"linkedin", "github"}]
+        repaired["skills"] = "\n".join(dict.fromkeys([*existing, *recovered_skills]))
+
+    # Some visual editors place the last project immediately after the soft
+    # skills block in the PDF content stream. Move only a strongly signalled
+    # project title plus its description, leaving genuine soft skills intact.
+    soft_lines = [line for line in repaired.get("soft_skills", "").splitlines() if line.strip()]
+    project_start = next(
+        (
+            index for index, line in enumerate(soft_lines)
+            if re.search(r"\b(?:currently working|project|system|prediction|classification|detection|using (?:deep |machine )?learning)\b", line, flags=re.I)
+            and not re.match(r"^soft skills?\s*:", line, flags=re.I)
+        ),
+        None,
+    )
+    if project_start is not None:
+        project_tail = soft_lines[project_start:]
+        repaired["soft_skills"] = "\n".join(soft_lines[:project_start]).strip()
+        repaired["projects"] = "\n".join(
+            part for part in (repaired.get("projects", "").strip(), "\n".join(project_tail)) if part
+        )
+
+    return {name: body for name, body in repaired.items() if body.strip()}
 
 
 def normalize_text(text: str) -> str:
@@ -414,16 +504,64 @@ def _repair_spaced_glyphs(line: str) -> str:
 def _contact_block(lines: list[str]) -> str:
     heading_keys = {_heading_key(alias) for names in SECTION_ALIASES.values() for alias in names}
     name_candidates: list[str] = []
-    contact_values: list[str] = []
+    anchor_indexes: list[int] = []
+    segments: list[int] = []
+    segment = 0
+    for line in lines:
+        if _heading_key(line.strip()) in heading_keys:
+            segment += 1
+        segments.append(segment)
     for index, line in enumerate(lines):
         cleaned = line.strip()
         if not cleaned or _heading_key(cleaned) in heading_keys:
             continue
         if index < 16 and _looks_like_name(cleaned):
             name_candidates.append(cleaned)
-        if _contains_contact_value(cleaned):
+        if re.search(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", cleaned, flags=re.I) or any(
+            _looks_like_phone_number(match.group(0))
+            for match in re.finditer(r"(?<!\d)\+?[\d][\d\s().-]{7,}\d(?!\d)", cleaned)
+        ):
+            anchor_indexes.append(index)
+    if not name_candidates:
+        name_candidates.extend(line.strip() for line in lines if _looks_like_name(line.strip()))
+
+    contact_values: list[str] = []
+    nearby = {
+        index
+        for anchor in anchor_indexes
+        for index in range(max(0, anchor - 5), min(len(lines), anchor + 6))
+        if segments[index] == segments[anchor]
+    }
+    for index, line in enumerate(lines):
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        if index in anchor_indexes:
+            contact_values.append(cleaned)
+        elif index in nearby and (
+            re.search(r"https?://|(?:www\.)?(?:linkedin\.com|github\.com)/|\b(?:linkedin|github)\b", cleaned, flags=re.I)
+            or _looks_like_location_line(cleaned, heading_keys)
+        ):
             contact_values.append(cleaned)
     return "\n".join(dict.fromkeys([*name_candidates[:1], *contact_values])).strip()
+
+
+def _looks_like_location_line(value: str, heading_keys: set[str]) -> bool:
+    cleaned = value.strip(" |,•▪●")
+    if not cleaned or _heading_key(cleaned) in heading_keys or _looks_like_name(cleaned):
+        return False
+    if cleaned.casefold() in {language.casefold() for language in _LANGUAGE_NAMES}:
+        return False
+    if re.fullmatch(r"(?:phone|email|linkedin|github)", cleaned, flags=re.I):
+        return False
+    if re.match(r"^(?:location|address|city)\s*[:\-]", cleaned, flags=re.I):
+        return True
+    return bool(
+        len(cleaned.split()) <= 5
+        and len(cleaned) <= 70
+        and not re.search(r"@|https?://|\d", cleaned)
+        and (cleaned.isupper() or cleaned.istitle())
+    )
 
 
 def _contains_contact_value(value: str) -> bool:
@@ -476,17 +614,10 @@ def detect_sections(text: str) -> tuple[str, ...]:
         line = re.sub(r"^[\s\-–—•▪●*#|]+", "", raw_line).strip()
         if not line:
             continue
-        heading_part = re.split(r"\s*[:|]\s*", line, maxsplit=1)[0]
-        heading_key = _heading_key(heading_part)
-        for section, section_aliases in aliases.items():
-            if heading_key in section_aliases:
-                if section not in found:
-                    found.append(section)
-                break
-            if len(line) <= 80 and any(heading_key.startswith(f"{alias} ") for alias in section_aliases):
-                if section not in found:
-                    found.append(section)
-                break
+        flat_aliases = {alias: section for section, section_aliases in aliases.items() for alias in section_aliases}
+        section = _match_section_heading(line, flat_aliases)
+        if section and section not in found:
+            found.append(section)
     normalized_text = unicodedata.normalize("NFKC", text)
     for section, section_aliases in aliases.items():
         if section in found:
@@ -501,6 +632,36 @@ def detect_sections(text: str) -> tuple[str, ...]:
 
 def _heading_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _match_section_heading(value: str, aliases: dict[str, str]) -> str | None:
+    """Match heading-like lines without treating ordinary prose as a heading.
+
+    The previous starts-with rule classified lines such as "Experience building
+    customer platforms" as an Experience heading and silently dropped words.
+    This accepts exact headings, labelled inline headings, uppercase decorated
+    headings, and short parenthetical qualifiers such as "Experience (12 years)".
+    """
+    cleaned = re.sub(r"^[\s\-–—•▪●*#|]+", "", value).strip()
+    heading_part = re.split(r"\s*[:|]\s*", cleaned, maxsplit=1)[0]
+    key = _heading_key(heading_part)
+    if key in aliases:
+        return aliases[key]
+    if len(cleaned) > 90:
+        return None
+    for alias, section in sorted(aliases.items(), key=lambda item: len(item[0]), reverse=True):
+        if not key.startswith(f"{alias} "):
+            continue
+        suffix = key[len(alias):].strip()
+        decorated = bool(
+            cleaned.isupper()
+            or re.search(rf"^\s*{re.escape(heading_part[:len(heading_part)])}\s*[:|]", cleaned, flags=re.I)
+            or re.search(r"\([^)]{1,35}\)\s*$", cleaned)
+            or re.fullmatch(r"(?:and|&)\s+[a-z ]{2,30}", suffix)
+        )
+        if decorated and len(suffix.split()) <= 6:
+            return section
+    return None
 
 
 def extract_skills(text: str) -> tuple[str, ...]:
@@ -520,7 +681,7 @@ def _skills_from_explicit_section(text: str) -> list[str]:
             continue
         if ":" in line:
             label, line = line.split(":", 1)
-            if 1 <= len(label.split()) <= 5 and not _is_generic_skill_label(label):
+            if 1 <= len(label.split()) <= 5 and not _is_generic_skill_label(label) and not re.search(r"\b(?:skills?|tools?|technologies|competencies|platforms?|languages?)\b", label, flags=re.I):
                 found.append(canonicalize_skill(label))
         for value in re.split(r"\s*[•▪●|;,]\s*", line):
             cleaned = _clean_skill_candidate(value)
@@ -571,7 +732,18 @@ def _is_skill_like_value(value: str) -> bool:
         return True
     if len(value.split()) == 1:
         return bool(re.fullmatch(r"[A-Z0-9]{2,6}", value) or re.fullmatch(r"[A-Z][A-Za-z0-9.+#-]{1,18}", value) and value in {"Bloomberg", "FactSet", "Dealogic", "Euromonitor", "Gartner", "Factiva", "FinBERT", "DSPy", "UiPath", "Copilot", "Perplexity"})
-    return bool(re.search(r"\b(?:ai|ml|data|research|analysis|analytics|financial|finance|market|strategy|modelling|engineering|automation|intelligence)\b", value, flags=re.I))
+    if re.search(r"@|https?://|\b(?:19|20)\d{2}\b", value, flags=re.I):
+        return False
+    if re.search(r"[.!?]$", value) or re.search(
+        r"\b(?:responsible|worked|developed|managed|performed|achieved|seeking|experience|education|university|college)\b",
+        value,
+        flags=re.I,
+    ):
+        return False
+    # Values are already constrained to an explicit Skills section. Preserve
+    # domain skills from professions outside the built-in lexicon (for example
+    # patient care, contract drafting, inventory control, or visual design).
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9+#&/().' -]{1,68}", value))
 
 
 def canonicalize_skill(value: str) -> str:
@@ -605,8 +777,14 @@ def _is_generic_skill_label(value: str) -> bool:
 
 
 def extract_roles(text: str) -> tuple[str, ...]:
-    lower = text.lower()
-    roles = [role.title() for role in ROLE_HINTS if role in lower]
+    lower = text.casefold()
+    roles = [role.title() for role in ROLE_HINTS if re.search(rf"(?<![a-z0-9]){re.escape(role)}(?![a-z0-9])", lower)]
+    # Reuse the scoring taxonomy so parser and scorer cannot drift apart.
+    from .ats_profiles import ROLE_PROFILES
+    for profile in ROLE_PROFILES:
+        for role in profile.aliases:
+            if re.search(rf"(?<![a-z0-9]){re.escape(role.casefold())}(?![a-z0-9])", lower):
+                roles.append(role.title())
     return tuple(dict.fromkeys(roles))
 
 
@@ -675,8 +853,22 @@ def _read_docx(path: Path) -> str:
         raise RuntimeError("Install DOCX support with: pip install -e '.[docs]'") from exc
 
     document = Document(str(path))
-    blocks = [paragraph.text for paragraph in document.paragraphs]
-    for table in document.tables:
-        for row in table.rows:
-            blocks.append(" | ".join(cell.text.strip() for cell in row.cells if cell.text.strip()))
+    blocks: list[str] = []
+    # Contact details are frequently placed in a header. Read them for parsing,
+    # while the layout analyzer can still flag header-based ATS risk.
+    for section in document.sections:
+        blocks.extend(paragraph.text for paragraph in section.header.paragraphs if paragraph.text.strip())
+    try:
+        from docx.table import Table
+        for block in document.iter_inner_content():
+            if isinstance(block, Table):
+                for row in block.rows:
+                    blocks.append(" | ".join(cell.text.strip() for cell in row.cells if cell.text.strip()))
+            elif block.text.strip():
+                blocks.append(block.text)
+    except AttributeError:
+        blocks.extend(paragraph.text for paragraph in document.paragraphs)
+        for table in document.tables:
+            for row in table.rows:
+                blocks.append(" | ".join(cell.text.strip() for cell in row.cells if cell.text.strip()))
     return "\n".join(blocks)

@@ -7,17 +7,17 @@ from job_hunting_agent import ats_semantic
 from job_hunting_agent.ats import score_resume
 from job_hunting_agent.ats_calibration import calibration_cases, load_calibration_manifest, run_calibration_benchmark
 from job_hunting_agent.ats_layout import analyze_resume_layout
-from job_hunting_agent.ats_profiles import select_role_profile
+from job_hunting_agent.ats_profiles import ROLE_PROFILES, select_role_profile
 from job_hunting_agent.ats_semantic import semantic_similarity
 from job_hunting_agent.models import CandidateProfile, Resume
 from job_hunting_agent.resume import extract_sections
 
 
-def test_calibration_corpus_has_sixty_role_diverse_anonymized_cases() -> None:
+def test_calibration_corpus_covers_every_role_family_with_six_quality_bands() -> None:
     cases = calibration_cases()
 
-    assert len(cases) == 60
-    assert len({case.role_family for case in cases}) == 10
+    assert len(cases) == len(ROLE_PROFILES) * 6
+    assert len({case.role_family for case in cases}) == len(ROLE_PROFILES)
     assert {case.quality_tier for case in cases} == {"weak", "basic", "developing", "solid", "strong", "excellent"}
     assert all(case.provenance == "anonymized_role_archetype" for case in cases)
 
@@ -25,7 +25,7 @@ def test_calibration_corpus_has_sixty_role_diverse_anonymized_cases() -> None:
 def test_calibration_benchmark_meets_v1_coverage_baseline() -> None:
     result = run_calibration_benchmark()
 
-    assert result["case_count"] == 60
+    assert result["case_count"] == len(ROLE_PROFILES) * 6
     assert result["band_coverage"] >= 0.90
     assert result["mean_absolute_error"] <= 6.0
 

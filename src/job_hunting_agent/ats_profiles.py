@@ -15,6 +15,8 @@ class AtsRoleProfile:
     supporting_sections: tuple[str, ...] = ()
     metric_ratio: float = 0.20
     action_ratio: float = 0.45
+    skill_heading: str = "CORE SKILLS"
+    preferred_sections: tuple[str, ...] = ()
 
 
 ROLE_PROFILES = (
@@ -26,6 +28,7 @@ ROLE_PROFILES = (
         ("Git", "REST API", "Data Structures", "Algorithms"),
         ("developed", "implemented", "designed", "latency", "users", "tests", "availability"),
         ("projects",),
+        skill_heading="TECHNICAL SKILLS",
     ),
     AtsRoleProfile(
         "data_engineering",
@@ -37,6 +40,7 @@ ROLE_PROFILES = (
         ("projects", "certifications"),
         0.25,
         0.45,
+        "TECHNICAL SKILLS",
     ),
     AtsRoleProfile(
         "data_analytics",
@@ -59,6 +63,7 @@ ROLE_PROFILES = (
         ("projects", "publications"),
         0.25,
         0.45,
+        "TECHNICAL SKILLS",
     ),
     AtsRoleProfile(
         "cloud_devops",
@@ -70,6 +75,7 @@ ROLE_PROFILES = (
         ("certifications", "projects"),
         0.25,
         0.50,
+        "TECHNICAL SKILLS",
     ),
     AtsRoleProfile(
         "product_project_management",
@@ -126,6 +132,92 @@ ROLE_PROFILES = (
         0.35,
         0.50,
     ),
+    AtsRoleProfile(
+        "healthcare_clinical",
+        "Healthcare and Clinical",
+        ("nurse", "registered nurse", "physician", "doctor", "pharmacist", "therapist", "clinical", "healthcare", "medical officer"),
+        (21, 24, 40, 15),
+        ("Patient Care", "Clinical Documentation", "Safety"),
+        ("patients", "care", "clinical", "safety", "compliance", "treatment", "outcomes"),
+        ("certifications", "professional_memberships"),
+        0.15,
+        0.45,
+        "CLINICAL SKILLS",
+        ("CERTIFICATIONS", "PROFESSIONAL MEMBERSHIPS"),
+    ),
+    AtsRoleProfile(
+        "operations_supply_chain",
+        "Operations and Supply Chain",
+        ("operations", "supply chain", "procurement", "logistics", "warehouse", "inventory", "vendor management", "quality manager"),
+        (20, 27, 38, 15),
+        ("Operations", "Process Improvement", "Stakeholder Management"),
+        ("cost", "inventory", "supplier", "delivery", "quality", "cycle time", "process"),
+        ("certifications", "achievements"),
+        0.30,
+        0.50,
+    ),
+    AtsRoleProfile(
+        "legal_compliance",
+        "Legal and Compliance",
+        ("lawyer", "attorney", "legal counsel", "paralegal", "compliance", "risk officer", "company secretary"),
+        (22, 24, 39, 15),
+        ("Legal Research", "Compliance", "Contract Management"),
+        ("matters", "contracts", "regulatory", "compliance", "risk", "cases", "advice"),
+        ("certifications", "professional_memberships", "publications"),
+        0.15,
+        0.45,
+        "LEGAL SKILLS",
+        ("CERTIFICATIONS", "PROFESSIONAL MEMBERSHIPS"),
+    ),
+    AtsRoleProfile(
+        "creative_design",
+        "Creative and Design",
+        ("designer", "graphic designer", "ux designer", "ui designer", "product designer", "content writer", "copywriter", "creative director"),
+        (19, 29, 37, 15),
+        ("Design", "Portfolio", "Collaboration"),
+        ("portfolio", "campaign", "design", "brand", "research", "engagement", "conversion"),
+        ("projects", "achievements"),
+        0.20,
+        0.45,
+        "DESIGN SKILLS",
+        ("PROJECTS",),
+    ),
+    AtsRoleProfile(
+        "accounting_audit",
+        "Accounting and Audit",
+        ("accountant", "auditor", "tax", "chartered accountant", "accounts payable", "accounts receivable", "controller"),
+        (21, 26, 38, 15),
+        ("Accounting", "Financial Reporting", "Compliance"),
+        ("audit", "reconciliation", "close", "tax", "controls", "accuracy", "compliance"),
+        ("certifications", "achievements"),
+        0.25,
+        0.45,
+        "ACCOUNTING SKILLS",
+        ("CERTIFICATIONS",),
+    ),
+    AtsRoleProfile(
+        "customer_service",
+        "Customer Service and Success",
+        ("customer service", "customer success", "support specialist", "service desk", "call center", "client success"),
+        (20, 25, 40, 15),
+        ("Customer Service", "Issue Resolution", "Communication"),
+        ("customers", "resolution", "satisfaction", "retention", "sla", "tickets", "escalations"),
+        ("achievements",),
+        0.30,
+        0.50,
+    ),
+    AtsRoleProfile(
+        "engineering_manufacturing",
+        "Engineering and Manufacturing",
+        ("mechanical engineer", "civil engineer", "electrical engineer", "manufacturing engineer", "quality engineer", "maintenance engineer"),
+        (20, 28, 38, 14),
+        ("Engineering", "Quality", "Safety"),
+        ("design", "production", "quality", "safety", "downtime", "cost", "maintenance"),
+        ("projects", "certifications"),
+        0.25,
+        0.45,
+        "TECHNICAL SKILLS",
+    ),
 )
 
 GENERAL_PROFILE = AtsRoleProfile(
@@ -148,6 +240,9 @@ def select_role_profile(
     inferred = " ".join(inferred_roles).casefold()
     jd = job_description.casefold()
     ranked: list[tuple[float, AtsRoleProfile, list[str]]] = []
+    explicit_tokens = set(re.findall(r"[a-z0-9]+", explicit))
+    inferred_tokens = set(re.findall(r"[a-z0-9]+", inferred))
+    jd_tokens = set(re.findall(r"[a-z0-9]+", jd))
     for profile in ROLE_PROFILES:
         score = 0.0
         signals: list[str] = []
@@ -162,6 +257,22 @@ def select_role_profile(
             if jd and re.search(pattern, jd):
                 score += 0.35
                 signals.append(f"job description: {alias}")
+        # Unseen titles often still share the profession's vocabulary. Use that
+        # evidence only as a fallback and keep exact target-title matches dominant.
+        family_terms = set()
+        for value in (*profile.aliases, *profile.priority_keywords, *profile.evidence_terms):
+            family_terms.update(re.findall(r"[a-z0-9]+", value.casefold()))
+        family_terms -= {"and", "manager", "management", "engineer", "analyst", "specialist", "officer"}
+        explicit_overlap = len(explicit_tokens & family_terms)
+        inferred_overlap = len(inferred_tokens & family_terms)
+        jd_overlap = len(jd_tokens & family_terms)
+        if explicit_overlap:
+            score += min(0.75, explicit_overlap * 0.25)
+            signals.append(f"target-role vocabulary: {explicit_overlap} signal(s)")
+        if inferred_overlap:
+            score += min(0.35, inferred_overlap * 0.12)
+        if jd_overlap >= 2:
+            score += min(0.35, jd_overlap * 0.07)
         ranked.append((score, profile, signals))
     best_score, selected, signals = max(ranked, key=lambda item: item[0])
     if best_score <= 0:
