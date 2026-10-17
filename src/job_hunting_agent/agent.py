@@ -13,7 +13,7 @@ from .job_validation import deduplicate_job_leads, validate_job_leads
 from .portals import build_search_intent, get_adapters, rank_job_leads
 from .reports import write_ats_report, write_run_summary
 from .resume import parse_resume
-from .resume_builder import write_improved_resume
+from .resume_builder import job_skill_additions, write_improved_resume
 from .performance_cache import ats_cache_key, load_ats_result, resume_fingerprint, save_ats_result, tailored_artifact_id
 
 
@@ -51,7 +51,15 @@ class JobHuntingAgent:
                 jobs.extend(future.result())
         jobs = deduplicate_job_leads(jobs)
         jobs = validate_job_leads(jobs, self.config.search)
-        return resume, report, rank_job_leads(jobs, intent, resume, self.config.search)
+        ranked = rank_job_leads(jobs, intent, resume, self.config.search)
+        counts: dict[str, int] = {}
+        limited: list[JobLead] = []
+        for job in ranked:
+            if counts.get(job.portal, 0) >= self.config.search.max_jobs_per_portal:
+                continue
+            counts[job.portal] = counts.get(job.portal, 0) + 1
+            limited.append(job)
+        return resume, report, limited
 
     def _search_adapter(self, adapter, intent) -> list[JobLead]:
         try:
@@ -64,7 +72,11 @@ class JobHuntingAgent:
     ) -> tuple[AtsReport, list[JobLead], list[ApplicationResult], dict[str, object]]:
         resume, report, jobs = self.search(resume_path)
         jobs = [
-            replace(job, tailored_resume_id=tailored_artifact_id(job))
+            replace(
+                job,
+                tailored_resume_id=tailored_artifact_id(job),
+                additional_skills=job_skill_additions(resume, self.config.profile, job),
+            )
             if self.config.application.tailor_each_job else job
             for job in jobs
         ]

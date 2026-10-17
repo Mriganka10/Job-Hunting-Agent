@@ -63,6 +63,14 @@ KNOWN_SKILLS = {
 }
 
 CANONICAL_SKILL_LABELS = {
+    "rag": "RAG",
+    "mcp": "MCP",
+    "llm": "LLM",
+    "genai": "GenAI",
+    "aws bedrock": "AWS Bedrock",
+    "vertex ai": "Vertex AI",
+    "langchain": "LangChain",
+    "llamaindex": "LlamaIndex",
     "airflow": "Airflow",
     "algorithms": "Algorithms",
     "apache nifi": "Apache NiFi",
@@ -592,15 +600,18 @@ def _looks_like_name(value: str) -> bool:
 def _recover_education(lines: list[str]) -> str:
     terms = re.compile(r"\b(?:b\.?tech|bachelor|master|university|college|school|secondary|cgpa|gpa|marks?|percentage|semester)\b", flags=re.I)
     heading_keys = {_heading_key(alias) for names in SECTION_ALIASES.values() for alias in names}
-    recovered: list[str] = []
     education_heading = next((index for index, line in enumerate(lines) if _heading_key(line) == "education"), len(lines))
     candidate_lines = lines[:education_heading + 1]
+    recovered_indexes: set[int] = set()
     for index, line in enumerate(candidate_lines):
         if terms.search(line):
-            for nearby in candidate_lines[max(0, index - 1):min(len(candidate_lines), index + 2)]:
-                if nearby and nearby not in recovered and _heading_key(nearby) not in heading_keys:
-                    recovered.append(nearby)
-    return "\n".join(recovered[:18]).strip()
+            for nearby_index in range(max(0, index - 1), min(len(candidate_lines), index + 2)):
+                nearby = candidate_lines[nearby_index]
+                if nearby and _heading_key(nearby) not in heading_keys:
+                    recovered_indexes.add(nearby_index)
+    # The same school can appear for both Class X and Class XII. Deduplicating by
+    # text loses the second entry; retain its position and its neighboring date.
+    return "\n".join(candidate_lines[index] for index in sorted(recovered_indexes)[:40]).strip()
 
 
 def detect_sections(text: str) -> tuple[str, ...]:

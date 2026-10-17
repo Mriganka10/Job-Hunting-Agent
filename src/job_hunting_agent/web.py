@@ -1161,13 +1161,14 @@ def _config_from_snapshot(source: dict) -> AppConfig:
     email = dict(source.get("email") or {})
     for field in ("target_roles", "locations", "skills"):
         profile[field] = tuple(profile.get(field, ()))
-    search["portals"] = tuple(search.get("portals", ("remotive", "arbeitnow", "linkedin", "naukri")))
+    search["portals"] = tuple(search.get("portals", ("himalayas", "remotive", "arbeitnow", "linkedin", "naukri")))
     return AppConfig(CandidateProfile(**profile), SearchConfig(**search), ApplicationConfig(**application), EmailConfig(**email))
 
 
 def _job_from_payload(source: dict) -> JobLead:
     values = dict(source)
     values["match_reasons"] = tuple(values.get("match_reasons", ()))
+    values["additional_skills"] = tuple(values.get("additional_skills", ()))
     return JobLead(**values)
 
 
@@ -1689,10 +1690,10 @@ def _config_from_payload(payload: dict) -> AppConfig:
         ),
         search=SearchConfig(
             max_jobs_per_portal=int(search.get("max_jobs_per_portal", 10)),
-            freshness_days=int(search.get("freshness_days", 7)),
+            freshness_days=int(search.get("freshness_days", 14)),
             include_remote=bool(search.get("include_remote", True)),
             validate_job_links=bool(search.get("validate_job_links", True)),
-            portals=tuple(search.get("portals", ("remotive", "arbeitnow", "linkedin", "naukri"))),
+            portals=tuple(search.get("portals", ("himalayas", "remotive", "arbeitnow", "linkedin", "naukri"))),
         ),
         application=ApplicationConfig(
             mode=application.get("mode", "draft"),
@@ -3095,13 +3096,19 @@ def _page(user_email: str, profile: dict) -> str:
         const jobDetails = [job.workplace_mode, job.employment_type, job.salary_text, job.posted_at ? `Posted ${job.posted_at.slice(0, 10)}` : '', job.freshness_verified ? 'date verified' : 'date unverified'].filter((item) => item && item !== 'unknown').map(escapeHtml).join(' · ');
         const sourceState = job.source_validated ? 'Validated API' : 'Public discovery';
         const normalizedCompany = job.normalized_company && job.normalized_company !== job.company ? `<br><span class="muted">${escapeHtml(job.normalized_company)}</span>` : '';
+        const addedSkills = (job.additional_skills || []).length
+          ? job.additional_skills.map(escapeHtml).join(', ')
+          : '<span class="muted">No source-backed additions</span>';
+        const missingRequirements = (job.source_metadata?.missing_required_skills || []).length
+          ? `<br><span class="muted">Missing required skills: ${job.source_metadata.missing_required_skills.map(escapeHtml).join(', ')}</span>`
+          : '';
         const tailoredState = payload.improved_resume?.tailored_statuses?.[job.tailored_resume_id]?.status || 'idle';
         const tailored = job.tailored_resume_id && tailoredState === 'ready'
           ? `<br><a href="/api/runs/${encodeURIComponent(payload.run_id)}/tailored-resumes/${encodeURIComponent(job.tailored_resume_id)}/docx">DOCX</a> · <a href="/api/runs/${encodeURIComponent(payload.run_id)}/tailored-resumes/${encodeURIComponent(job.tailored_resume_id)}/pdf">PDF</a>`
           : job.tailored_resume_id
             ? `<br><button type="button" class="prepare-tailored" data-artifact-id="${escapeHtml(job.tailored_resume_id)}" ${tailoredState === 'preparing' ? 'disabled' : ''}>${tailoredState === 'preparing' ? 'Preparing resume...' : tailoredState === 'failed' ? 'Retry resume' : 'Prepare resume'}</button>`
             : '';
-        return `<tr><td>${escapeHtml(job.portal)}<br><span class="muted">${escapeHtml(sourceState)}</span></td><td><strong>${escapeHtml(job.title)}</strong><br><span class="muted">${escapeHtml(job.location || '')}</span><br><span class="muted">${jobDetails}</span></td><td>${escapeHtml(job.company)}${normalizedCompany}</td><td><strong>${escapeHtml(job.match_score || 0)}%</strong><br>${reasons}</td><td><a href="${escapeHtml(job.url)}" target="_blank" rel="noreferrer">Open job</a>${tailored}<br><span class="muted">${escapeHtml(job.link_status || 'unchecked')}</span></td></tr>`;
+        return `<tr><td>${escapeHtml(job.portal)}<br><span class="muted">${escapeHtml(sourceState)}</span></td><td><strong>${escapeHtml(job.title)}</strong><br><span class="muted">${escapeHtml(job.location || '')}</span><br><span class="muted">${jobDetails}</span></td><td>${escapeHtml(job.company)}${normalizedCompany}</td><td><strong>${escapeHtml(job.match_score || 0)}%</strong><br>${reasons}${missingRequirements}</td><td>${addedSkills}</td><td><a href="${escapeHtml(job.url)}" target="_blank" rel="noreferrer">Open job</a>${tailored}<br><span class="muted">${escapeHtml(job.link_status || 'unchecked')}</span></td></tr>`;
       }).join('');
       const remainingJobs = Math.max(0, (jobPage.total || totalJobs) - payload.jobs.length);
       const showMoreJobs = jobPage.has_more
@@ -3120,8 +3127,8 @@ def _page(user_email: str, profile: dict) -> str:
         </section>
         <section class="result-section">
           <h3>Job Leads</h3>
-          <p class="muted">Ranked using target roles, combined profile/resume skills, location, experience, resume summary, and the optional job description.</p>
-          <div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role & Location</th><th>Company</th><th>Match</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>
+          <p class="muted">Individual postings are matched by role, skills, and location. Experience is checked when stated; otherwise the requirement is marked unverified for your review.</p>
+          ${jobs ? `<div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role & Location</th><th>Company</th><th>Match</th><th>Additional Skills</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>` : '<p class="muted">No matching individual postings were found in this run. Try a broader role or location, or search again later.</p>'}
           ${showMoreJobs}
         </section>
         <section class="result-section">

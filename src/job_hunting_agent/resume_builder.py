@@ -8,6 +8,7 @@ from pathlib import Path
 from .document_pipeline import (
     convert_docx_to_pdf,
     has_sparse_trailing_page,
+    highlighted_resume_parts,
     pdf_page_count,
     validate_document_artifact,
     write_pdf_resume,
@@ -15,6 +16,7 @@ from .document_pipeline import (
 from .models import AtsReport, CandidateProfile, JobLead, Resume
 from .ats_profiles import select_role_profile
 from .resume import canonicalize_skill, normalize_ats_text
+from .portals import job_requirement_skills
 from .resume_validation import relevance_score, tailoring_analysis, validate_factual_consistency
 
 ACTION_VERB_REPLACEMENTS = {
@@ -85,14 +87,55 @@ def write_tailored_resume(
         replace(profile, target_roles=(job.title,)), display_name,
         page_target=max(1, min(int(page_target), 3)), job=job,
     )
+    additions = tuple(job.additional_skills) or job_skill_additions(resume, profile, job)
+    analysis = tailoring_analysis(resume, profile, job)
+    analysis["additional_skills_added"] = list(additions)
     artifact.update({
         "artifact_id": artifact_id,
         "job_id": job.stable_id,
         "job_title": job.title,
         "company": job.company,
-        "tailoring": tailoring_analysis(resume, profile, job),
+        "tailoring": analysis,
     })
     return artifact
+
+
+def job_skill_additions(resume: Resume, profile: CandidateProfile, job: JobLead) -> tuple[str, ...]:
+    """Skills present in candidate evidence and the job, but absent from base skills."""
+    original_skills = normalize_ats_text((resume.sections or {}).get("skills", "")).casefold()
+    if not original_skills.strip() or not job.description.strip():
+        return ()
+    declared_skills = normalize_ats_text(" ".join(profile.skills)).casefold()
+    evidence = normalize_ats_text("\n".join(
+        value for key, value in (resume.sections or {}).items()
+        if key not in {"skills", "soft_skills", "contact"}
+    ) or resume.text).casefold()
+    requirement = normalize_ats_text(job.description).casefold()
+    additions: list[str] = []
+    # The resume parser's built-in vocabulary can lag behind job terminology.
+    # A new term is still eligible only when the candidate's own resume text
+    # explicitly supports it outside the skills list.
+    candidates = _ordered_skills((*resume.inferred_skills, *job_requirement_skills(job.description)))
+    for skill in candidates:
+        if not _contains_named_skill(requirement, skill):
+            continue
+        if _contains_named_skill(original_skills, skill) or _contains_named_skill(declared_skills, skill):
+            continue
+        if _contains_named_skill(evidence, skill):
+            additions.append(skill)
+    return tuple(additions)
+
+
+def _contains_named_skill(text: str, skill: str) -> bool:
+    normalized = normalize_ats_text(skill).casefold()
+    aliases = {
+        "eda": r"(?:eda|exploratory data analysis)",
+        "nlp": r"(?:nlp|natural language processing)",
+        "ner": r"(?:ner|named entity recognition)",
+    }
+    if normalized in aliases:
+        return bool(re.search(rf"(?<![\w]){aliases[normalized]}(?![\w])", text, re.I))
+    return bool(re.search(rf"(?<![\w]){re.escape(normalized)}(?![\w])", text))
 
 
 def _write_resume_artifact(
@@ -167,7 +210,8 @@ def _resume_sections(
     role_profile, _, _ = select_role_profile(profile.target_roles, resume.inferred_roles, profile.job_description)
     # Never inject a missing ATS keyword unless it is already supported by the
     # candidate profile or resume evidence.
-    skills = _ordered_skills((*profile.skills, *resume.inferred_skills))
+    additions = job_skill_additions(resume, profile, job) if job else ()
+    skills = _ordered_skills((*profile.skills, *resume.inferred_skills, *additions))
     target_text = f"{job.title} {job.description} {profile.job_description}" if job else profile.job_description
     if target_text:
         skills = sorted(skills, key=lambda value: relevance_score(value, target_text), reverse=True)
@@ -196,7 +240,14 @@ def _resume_sections(
         "ACHIEVEMENTS",
     )
     languages = _language_lines(resume.text)
-    technical_skill_lines = _skill_section_lines(parsed_sections.get("skills", ""), skills)
+    source_skill_section = parsed_sections.get("skills", "")
+    if source_skill_section.strip():
+        job_additions = (tuple(job.additional_skills) or job_skill_additions(resume, profile, job)) if job else ()
+        additions = (*profile.skills, *job_additions)
+        displayed_skills = _ordered_skills(additions)
+    else:
+        displayed_skills = skills
+    technical_skill_lines = _skill_section_lines(source_skill_section, displayed_skills)
     original_summary = (resume.sections or {}).get("summary", "").strip()
     summary_items = _summary_section_items(original_summary, resume, profile, target_roles, skills, achievements, experience_bullets)
     contact = _contact_line(profile, parsed_sections.get("contact", ""))
@@ -392,7 +443,7 @@ def _write_docx(path: Path, sections: list[tuple[str, list[str]]], display_name:
                 paragraph.paragraph_format.keep_together = True
             elif heading in {"CONTACT", "PROFESSIONAL SUMMARY", "TEACHING VISION", "CORE COMPETENCIES", "SOFT SKILLS"} or heading.endswith("SKILLS"):
                 paragraph = document.add_paragraph(style="ResumeBody")
-                _add_labelled_text(paragraph, item)
+                _add_labelled_text(paragraph, item, heading=heading)
             elif heading == "PROFESSIONAL EXPERIENCE":
                 if item.startswith("ROLE::"):
                     paragraph = document.add_paragraph(item.removeprefix("ROLE::"), style="ResumeRole")
@@ -421,6 +472,7 @@ def _write_docx(path: Path, sections: list[tuple[str, list[str]]], display_name:
                 _add_labelled_text(
                     paragraph,
                     _clean_sentence(item),
+                    heading=heading,
                     bold_dash_prefix=heading in {"EDUCATION", "PROJECTS", "PUBLICATIONS & RESEARCH"},
                 )
                 paragraph.paragraph_format.keep_together = True
@@ -507,8 +559,14 @@ def _add_bottom_border(paragraph) -> None:
     borders.append(bottom)
 
 
-def _add_labelled_text(paragraph, text: str, *, bold_dash_prefix: bool = False) -> None:
+def _add_labelled_text(paragraph, text: str, *, heading: str = "", bold_dash_prefix: bool = False) -> None:
     """Bold compact labels/titles while keeping content as plain ATS-readable text."""
+    prefix, suffix = highlighted_resume_parts(heading, text)
+    if prefix:
+        lead = paragraph.add_run(prefix)
+        lead.bold = True
+        paragraph.add_run(suffix)
+        return
     separator = ":" if ":" in text else (" - " if bold_dash_prefix and " - " in text else "")
     if not separator:
         paragraph.add_run(text)
@@ -930,7 +988,10 @@ def _structured_experience_entries(text: str) -> list[dict[str, str | list[str]]
             current = _ensure_entry(entries, current)
             date_match = _find_date_range(line)
             current["dates"] = _clean_sentence(date_match.group(0) if date_match else line)
-            company_prefix = _clean_sentence(line[:date_match.start()] if date_match else "").strip(" |,(-")
+            company_prefix = _clean_sentence(line[:date_match.start()] if date_match else "").strip(" |,-")
+            # A wrapped role qualifier such as "(XPro Project) | Employer (Nov"
+            # belongs to the title. Strip only the date's opening parenthesis.
+            company_prefix = re.sub(r"\s*\($", "", company_prefix).strip()
             if company_prefix and not current["company"] and "|" in company_prefix and current["title"]:
                 left, right = [_clean_sentence(part) for part in company_prefix.split("|", 1)]
                 current["title"] = _clean_sentence(f"{current['title']} {left}")
@@ -984,7 +1045,21 @@ def _structured_experience_entries(text: str) -> list[dict[str, str | list[str]]
 
 
 def _experience_section_lines(text: str) -> list[str]:
-    lines = _resume_lines(text)
+    raw_lines = _resume_lines(text)
+    lines: list[str] = []
+    index = 0
+    while index < len(raw_lines):
+        line = raw_lines[index]
+        if (
+            index + 1 < len(raw_lines)
+            and "|" in line
+            and re.search(r"\(\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*$", line, flags=re.I)
+            and re.match(r"^(?:19|20)\d{2}\b", raw_lines[index + 1])
+        ):
+            line = _clean_sentence(f"{line} {raw_lines[index + 1]}")
+            index += 1
+        lines.append(line)
+        index += 1
     heading_indexes = [
         index
         for index, line in enumerate(lines)
@@ -1038,7 +1113,7 @@ def _role_first_timeline_match(line: str) -> dict[str, str] | None:
         return None
     return {
         "title": parts[0],
-        "company": " | ".join(parts[1:]),
+        "company": re.sub(r"\s*\($", "", " | ".join(parts[1:])).strip(),
         "location": "",
         "dates": _clean_sentence(date_match.group(0)),
     }
@@ -1368,6 +1443,35 @@ def _parallel_education_entries(lines: list[str]) -> list[str]:
     ]
     if len(credential_indexes) < 2 or credential_indexes[0] <= 2:
         return []
+    # Some two-column PDFs extract each row as date/grade, credential, school,
+    # then the next row. Keep each row together instead of pairing all dates
+    # and grades found before the first credential with later credentials.
+    if any(_is_standalone_education_date(line) for line in lines[credential_indexes[0] + 1:]):
+        rows: list[list[str]] = []
+        current: list[str] = []
+        for line in lines:
+            if _is_standalone_education_date(line) and current and any(_looks_like_education_credential(item) for item in current):
+                rows.append(current)
+                current = []
+            current.append(line)
+        if current:
+            rows.append(current)
+        entries: list[str] = []
+        for row in rows:
+            credential_index = next((index for index, item in enumerate(row) if _looks_like_education_credential(item)), -1)
+            if credential_index < 0:
+                continue
+            date = next((item for item in row[:credential_index] if _is_standalone_education_date(item)), "")
+            metrics = _education_metrics(row[:credential_index])
+            details = [item for item in row[credential_index + 1:] if not _is_standalone_education_date(item)]
+            parts = [f"{date}:" if date else "", row[credential_index]]
+            if details:
+                parts.append("- " + _clean_sentence(" ".join(details)))
+            if metrics:
+                parts.append("; " + _format_education_metric(metrics[0]))
+            entries.append(_clean_sentence(" ".join(part for part in parts if part)))
+        if entries:
+            return _dedupe_secondary_education_labels(_dedupe_lines(entries))[:10]
     dates = [line for line in lines[:credential_indexes[0]] if _is_standalone_education_date(line)]
     metrics = _education_metrics(lines[:credential_indexes[0]])
     if not dates:
@@ -1435,6 +1539,14 @@ def _education_metrics(lines: list[str]) -> list[str]:
             metrics.append(value)
         index += 1
     return metrics
+
+
+def _format_education_metric(value: str) -> str:
+    value = _repair_ordinal_metric(value)
+    percentage = re.search(r"\b\d+(?:\.\d+)?\s*%", value)
+    if percentage and re.search(r"\b(?:marks?|percentage)\b", value, flags=re.I):
+        return percentage.group(0).replace(" ", "")
+    return re.sub(r"^CGPA\s*[-:]\s*", "CGPA ", value, flags=re.I)
 
 
 def _repair_ordinal_metric(value: str) -> str:
@@ -1668,8 +1780,8 @@ def _technical_skill_lines(skills: list[str]) -> list[str]:
         if matched:
             lines.append(f"{label}: {', '.join(_ordered_skills(tuple(matched)))}")
     if remaining:
-        lines.append(f"Additional Skills: {', '.join(_ordered_skills(tuple(remaining[:10])))}")
-    return lines[:7]
+        lines.append(", ".join(_ordered_skills(tuple(remaining[:10]))))
+    return lines
 
 
 def _skill_section_lines(original: str, inferred: list[str]) -> list[str]:
@@ -1687,13 +1799,47 @@ def _skill_section_lines(original: str, inferred: list[str]) -> list[str]:
         cleaned = re.sub(r"\s*[|;•▪●]\s*", ", ", line)
         cleaned = re.sub(r",\s*,+", ", ", cleaned).strip(" ,")
         if cleaned:
+            if re.match(r"^additional\s+skills\s*:", cleaned, flags=re.I):
+                cleaned = cleaned.split(":", 1)[1].strip()
             preserved.append(_normalize_skill_line(cleaned))
 
     searchable = " ".join(preserved).casefold()
-    additions = [skill for skill in inferred if canonicalize_skill(skill).casefold() not in searchable]
-    if additions:
-        preserved.append(f"Additional Skills: {', '.join(_ordered_skills(tuple(additions)))}")
+    additions = [skill for skill in inferred if not _contains_named_skill(searchable, canonicalize_skill(skill))]
+    uncategorized: list[str] = []
+    for skill in _ordered_skills(tuple(additions)):
+        category_index = _preferred_skill_category(skill, preserved)
+        if category_index is None:
+            uncategorized.append(skill)
+            continue
+        label, values = preserved[category_index].split(":", 1)
+        preserved[category_index] = f"{label}: {values.strip()}, {skill}"
+    if uncategorized:
+        existing_plain = next((index for index, line in enumerate(preserved) if ":" not in line), None)
+        if existing_plain is None:
+            preserved.append(", ".join(uncategorized))
+        else:
+            preserved[existing_plain] = f"{preserved[existing_plain]}, {', '.join(uncategorized)}"
     return _dedupe_lines(preserved)[:14] if preserved else _technical_skill_lines(inferred)
+
+
+def _preferred_skill_category(skill: str, lines: list[str]) -> int | None:
+    """Use a matching existing category; leave unfamiliar terms unlabelled."""
+    families = (
+        (r"bert|\bnlp\b|spacy|nltk|sentiment|text classification|named entity|transformer", r"natural language|\bnlp\b|text"),
+        (r"\beda\b|exploratory data|pandas|numpy|power bi|tableau|visuali[sz]", r"analytics|visuali[sz]|business intelligence"),
+        (r"dspy|machine learning|deep learning|tensorflow|keras|scikit|\bml\b|artificial intelligence", r"data science|machine learning|\bai\b|\bml\b"),
+        (r"postgres|mysql|mongodb|snowflake|\bsql\b|database", r"database|data storage"),
+        (r"\baws\b|\bazure\b|\bgcp\b|docker|kubernetes|terraform|\bci/cd\b", r"cloud|devops|mlops|infrastructure"),
+        (r"python|javascript|typescript|\bjava\b|\bc\+\+\b|\bc#\b|\brust\b", r"programming|languages"),
+    )
+    key = skill.casefold()
+    for skill_pattern, label_pattern in families:
+        if not re.search(skill_pattern, key):
+            continue
+        for index, line in enumerate(lines):
+            if ":" in line and re.search(label_pattern, line.split(":", 1)[0], flags=re.I):
+                return index
+    return None
 
 
 def _skill_raw_lines(text: str) -> list[str]:
@@ -1829,7 +1975,7 @@ def _looks_like_skill_label(value: str) -> bool:
         and re.search(
             r"\b(?:skills?|tools?|expertise|technology|technologies|databases?|platforms?|"
             r"languages?|frameworks?|systems?|methods?|competencies|devops|cloud|mlops|"
-            r"analytics|visualization|processing|fundamentals|domain|data|science|ai|ml|programming)\b",
+            r"analytics|visualization|processing|fundamentals|domain|data|science|ai|ml|nlp|programming)\b",
             label,
             flags=re.I,
         )

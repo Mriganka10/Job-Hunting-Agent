@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from job_hunting_agent.config import SearchConfig
-from job_hunting_agent.job_sources import ArbeitnowAdapter, RemotiveAdapter
+from job_hunting_agent.job_sources import ArbeitnowAdapter, HimalayasAdapter, RemotiveAdapter
 from job_hunting_agent.job_validation import (
     canonicalize_job_url,
     deduplicate_job_leads,
@@ -59,6 +59,41 @@ def test_remotive_adapter_maps_validated_api_metadata(monkeypatch) -> None:
     assert jobs[0].salary_text == "$90k - $120k"
 
 
+def test_remotive_searches_all_configured_roles_and_deduplicates_postings(monkeypatch) -> None:
+    requested: list[str] = []
+
+    def fake_get_json(url, **kwargs):
+        requested.append(url)
+        role = "AI Developer" if "AI+Developer" in url else "Data Analyst"
+        shared = {"id": 1, "url": "https://example.com/shared", "title": "AI Developer", "company_name": "Shared Co", "candidate_required_location": "India", "description": "Python; 0-1 years experience"}
+        unique = {"id": 2, "url": "https://example.com/analyst", "title": "Data Analyst", "company_name": "Analyst Co", "candidate_required_location": "India", "description": "SQL; 0-1 years experience"}
+        return {"jobs": [shared] if role == "AI Developer" else [shared, unique]}
+
+    monkeypatch.setattr("job_hunting_agent.job_sources.http_client.get_json", fake_get_json)
+    intent = SearchIntent(("AI Developer", "Data Analyst"), ("Python", "SQL"), ("Kolkata",), 0.5)
+
+    jobs = RemotiveAdapter().search(intent, SearchConfig(max_jobs_per_portal=1), CandidateProfile())
+
+    assert len(requested) == 2
+    assert [job.company for job in jobs] == ["Shared Co", "Analyst Co"]
+
+
+def test_arbeitnow_ignores_unrelated_titles_even_when_description_has_candidate_skill(monkeypatch) -> None:
+    payload = {
+        "data": [
+            {"title": "Office Assistant", "company_name": "Office Co", "url": "https://example.com/office", "location": "Remote", "remote": True, "description": "Experience with Python spreadsheets."},
+            {"title": "Data Engineer", "company_name": "Data Co", "url": "https://example.com/data", "location": "Remote", "remote": True, "description": "Build Python pipelines; 0-1 years experience."},
+        ],
+        "links": {"next": None},
+    }
+    monkeypatch.setattr("job_hunting_agent.job_sources.http_client.get_json", lambda *args, **kwargs: payload)
+    intent = SearchIntent(("Data Engineer",), ("Python",), ("Remote",), 0.5)
+
+    jobs = ArbeitnowAdapter().search(intent, SearchConfig(max_jobs_per_portal=1), CandidateProfile())
+
+    assert [job.company for job in jobs] == ["Data Co"]
+
+
 def test_arbeitnow_adapter_maps_pagination_and_expiry_metadata(monkeypatch) -> None:
     created = int(datetime(2026, 9, 1, tzinfo=timezone.utc).timestamp())
     payload = {
@@ -91,6 +126,37 @@ def test_arbeitnow_adapter_maps_pagination_and_expiry_metadata(monkeypatch) -> N
     assert jobs[0].posted_at.startswith("2026-09-01")
     assert jobs[0].expires_at.startswith("2026-10-01")
     assert jobs[0].source_metadata["expiry_inferred_from_board_policy"] is True
+
+
+def test_himalayas_finds_real_individual_entry_postings_eligible_for_india(monkeypatch) -> None:
+    requested: list[str] = []
+    record = {
+        "title": "Data Scientist Intern", "companyName": "Example AI",
+        "description": "<h3>Required Skills</h3><p>Python and Machine Learning.</p>",
+        "applicationLink": "https://himalayas.app/companies/example-ai/jobs/data-scientist-intern",
+        "guid": "intern-1", "pubDate": 1791981177, "expiryDate": 1797165176,
+        "employmentType": "Intern", "seniority": ["Entry-level"],
+        "locationRestrictions": [{"alpha2": "IN", "name": "India"}],
+    }
+    excluded = {**record, "guid": "us-only", "applicationLink": "https://himalayas.app/companies/example-ai/jobs/us-only",
+                "locationRestrictions": [{"alpha2": "US", "name": "United States"}]}
+
+    def fake_json(url, **kwargs):
+        requested.append(url)
+        return {"jobs": [record, excluded]}
+
+    monkeypatch.setattr("job_hunting_agent.job_sources.http_client.get_json", fake_json)
+    jobs = HimalayasAdapter().search(
+        SearchIntent(("Data Scientist",), ("Python",), ("Kolkata",), 0.5),
+        SearchConfig(), CandidateProfile(),
+    )
+    assert len(jobs) == 1
+    assert jobs[0].company == "Example AI"
+    assert jobs[0].location == "Remote India"
+    assert jobs[0].source_validated
+    assert "Required Skills" in jobs[0].description
+    assert "country=IN" in requested[0]
+    assert "seniority=Entry-level" in requested[0]
 
 
 def test_freshness_is_independently_verified_and_stale_jobs_are_removed() -> None:

@@ -87,6 +87,21 @@ Certified training
     assert "175+ problems solved" in sections["achievements"]
 
 
+def test_extract_sections_preserves_repeated_school_in_column_order() -> None:
+    text = normalize_text(
+        "Candidate Name\nname@example.com\n"
+        "2022 - 2026\nCGPA - 9.38 (till 7\nSemester)\nth\n"
+        "B.Tech in CSE\nExample University\n"
+        "2022\nMarks (in percentage)-\n94.4%\nHigher Secondary (XII)\n"
+        "Example High School\n"
+        "2020\nMarks (in percentage)-\n93.4%\nSecondary (X)\n"
+        "Example High School\nEDUCATION\nPROJECTS\nBuilt an analytics dashboard."
+    )
+    education = extract_sections(text)["education"]
+    assert education.count("Example High School") == 2
+    assert "2020\nMarks (in percentage)-\n93.4%\nSecondary (X)" in education
+
+
 def test_extract_sections_returns_all_requested_ats_sections() -> None:
     sections = extract_sections("""Jane Doe | jane@example.com
 CAREER OBJECTIVE
