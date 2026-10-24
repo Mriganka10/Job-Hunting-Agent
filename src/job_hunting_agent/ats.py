@@ -573,6 +573,9 @@ def _first_summary_candidate(text: str) -> str:
 
 
 def _style_issues(text: str) -> list[str]:
+    # URLs and email addresses are lowercase by convention ("github.com/name");
+    # they are not keyword-casing mistakes.
+    text = re.sub(r"(?:https?://)?(?:www\.)?[\w.-]+\.(?:com|in|io|dev|org|net|me|app)(?:/\S*)?|\S+@\S+", " ", text, flags=re.I)
     checks = (
         (r"\baws\b", "AWS"),
         (r"\bgitlab\b", "GitLab"),
@@ -629,7 +632,7 @@ def _llm_quality_evaluation(sections: dict[str, str], jd: str) -> dict[str, obje
             "required": ["score", "strengths", "recommendations", "rationale"],
             "additionalProperties": False,
         }
-        response = requests.post(endpoint, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json={"model": model, "store": False, "input": prompt, "text": {"format": {"type": "json_schema", "name": "resume_quality", "strict": True, "schema": schema}}}, timeout=30)
+        response = requests.post(endpoint, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json={"model": model, "store": False, "input": prompt, "text": {"format": {"type": "json_schema", "name": "resume_quality", "strict": True, "schema": schema}}}, timeout=(5, 25))
         response.raise_for_status()
         payload = response.json()
         output_text = payload.get("output_text") or next(

@@ -836,3 +836,65 @@ def test_job_expanded_eda_phrase_promotes_resume_backed_eda() -> None:
     job = JobLead("api", "Data Scientist Intern", "Example", "Remote worldwide", "https://example/job",
                   "Required Skills: Python. Perform exploratory data analysis on datasets.")
     assert job_skill_additions(resume, profile, job) == ("EDA",)
+
+
+def test_multiple_dated_roles_keep_their_own_dates_and_bullets_when_tailored(tmp_path: Path) -> None:
+    experience = (
+        "Senior Data Engineer, FinEdge Analytics Pvt Ltd, Pune | Apr 2022 - Present\n"
+        "• Designed Kafka streaming pipelines processing 2 TB/day.\n"
+        "• Migrated 120 Airflow DAGs to Databricks, lowering cost by 35%.\n"
+        "Data Engineer, RetailCo India, Bengaluru | Jul 2020 - Mar 2022\n"
+        "• Developed PySpark ETL jobs on AWS EMR and S3 for 30M daily transactions.\n"
+    )
+    resume = Resume(
+        path="resume.txt",
+        text="ROHIT VERMA\nrohit@example.com | +91 91234 56789\nSKILLS\nPython, Spark\nEXPERIENCE\n" + experience,
+        inferred_skills=("Python", "Spark", "Kafka", "Airflow", "PySpark", "AWS", "S3", "ETL"),
+        inferred_roles=("Data Engineer",),
+        sections={"contact": "ROHIT VERMA\nrohit@example.com | +91 91234 56789", "skills": "Python, Spark", "experience": experience},
+    )
+    job = JobLead("api", "Data Engineer", "Example", "Pune", "https://example.com/job", "PySpark ETL on AWS S3 with Kafka.")
+    artifact = write_tailored_resume(resume, AtsReport(80, (), (), ()), CandidateProfile(experience_years=5), tmp_path, job)
+    lines = [p.text for p in Document(artifact["docx_path"]).paragraphs if p.text.strip()]
+    text = "\n".join(lines)
+    assert "Apr 2022 - Present" in text and "Jul 2020 - Mar 2022" in text
+    retail = lines.index(next(line for line in lines if line.startswith("RetailCo India")))
+    assert any("PySpark ETL" in line for line in lines[retail:])
+    assert not any("PySpark ETL" in line for line in lines[:retail])
+    assert all("Migrated 120 Airflow" not in line for line in lines[retail:])
+
+
+def test_programming_languages_label_is_not_rendered_as_spoken_languages(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text="JANE DOE\njane@example.com | +91 98765 43210\nSKILLS\nLanguages: Python, C++, SQL\nLANGUAGES\nEnglish, Hindi",
+        inferred_skills=("Python", "C++", "SQL"),
+        inferred_roles=("Software Engineer",),
+        sections={
+            "contact": "JANE DOE\njane@example.com | +91 98765 43210",
+            "skills": "Languages: Python, C++, SQL",
+            "languages": "English, Hindi",
+        },
+    )
+    artifact = write_improved_resume(resume, AtsReport(80, (), (), ()), CandidateProfile(), tmp_path)
+    lines = [p.text for p in Document(artifact["docx_path"]).paragraphs if p.text.strip()]
+    spoken = lines[lines.index("LANGUAGES") + 1:]
+    assert "Python" not in " ".join(spoken)
+    assert "English" in " ".join(spoken)
+
+
+def test_uncategorised_job_additions_get_a_labelled_line_and_are_reported(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text="JANE DOE\njane@example.com\nSKILLS\nLanguages: Python\nPROJECTS\nValidated data with Great Expectations.",
+        inferred_skills=("Python", "Great Expectations"),
+        inferred_roles=("Data Engineer",),
+        sections={"contact": "JANE DOE\njane@example.com", "skills": "Languages: Python", "projects": "Validated data with Great Expectations."},
+    )
+    job = JobLead("api", "Data Engineer", "Example", "Remote", "https://example.com/job", "Required: Python, Great Expectations.",
+                  additional_skills=("Great Expectations",))
+    artifact = write_tailored_resume(resume, AtsReport(80, (), (), ()), CandidateProfile(), tmp_path, job)
+    text = "\n".join(p.text for p in Document(artifact["docx_path"]).paragraphs)
+    assert "Additional Skills: Great Expectations" in text
+    assert artifact["tailoring"]["additional_skills_added"] == ["Great Expectations"]
+    assert artifact["tailoring"]["additional_skills_missing_from_output"] == []

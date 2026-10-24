@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from datetime import timedelta
 from typing import TYPE_CHECKING
 from urllib.parse import quote_plus
@@ -18,7 +19,12 @@ if TYPE_CHECKING:
 
 
 API_HEADERS = {"Accept": "application/json", "User-Agent": "JobHuntingAgent/1.0"}
-API_TIMEOUT_SECONDS = 12
+API_TIMEOUT_SECONDS = (4, 10)
+
+
+def _out_of_time(adapter: object) -> bool:
+    """True once the run's search budget is nearly spent (set by the agent)."""
+    return time.monotonic() > getattr(adapter, "deadline", float("inf")) - 2
 
 
 class RemotiveAdapter:
@@ -30,6 +36,8 @@ class RemotiveAdapter:
         leads: list[JobLead] = []
         seen_urls: set[str] = set()
         for query in intent.roles[:5] or (intent.query,):
+            if _out_of_time(self):
+                break
             try:
                 payload = http_client.get_json(
                     f"{self.endpoint}?search={quote_plus(query)}&limit={max(10, config.max_jobs_per_portal * 3)}",
@@ -85,6 +93,8 @@ class ArbeitnowAdapter:
         del profile
         leads: list[JobLead] = []
         for page in range(1, 4):
+            if _out_of_time(self):
+                break
             try:
                 payload = http_client.get_json(
                     f"{self.endpoint}?page={page}",
@@ -162,6 +172,8 @@ class HimalayasAdapter:
             if seniority:
                 params += f"&seniority={quote_plus(seniority)}"
             for page in (1, 2, 3):
+                if _out_of_time(self):
+                    break
                 try:
                     payload = http_client.get_json(
                         f"{self.endpoint}?{params}&page={page}",
@@ -214,14 +226,21 @@ class HimalayasAdapter:
 
 
 def _matches_intent(title: str, description: str, intent: SearchIntent) -> bool:
+    """Title pre-filter shared with ranking, so feeds and portals agree.
+
+    The ranking matcher understands "Developer" vs "Engineer", "Scientist" vs
+    "Science" and ignores seniority words; the old plain token check did not.
+    """
     del description
+    from .portals import _role_fit
+
     title_tokens = set(_tokens(title))
-    role_match = any(
+    legacy = any(
         len(set(_tokens(role)) & title_tokens) / max(1, len(set(_tokens(role)))) >= 0.5
         for role in intent.roles
         if _tokens(role)
     )
-    return role_match
+    return legacy or _role_fit(intent.roles, title, "", intent.skills) >= 0.6
 
 
 def _tokens(value: str) -> list[str]:

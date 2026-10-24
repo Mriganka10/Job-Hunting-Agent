@@ -13,13 +13,15 @@ Resume-first job-search assistant that evaluates ATS readiness, generates an imp
 - Generates downloadable single-column DOCX and PDF companions while avoiding ATS-hostile text boxes, columns, icons, and fabricated qualifications.
 - Produces a separately tailored DOCX/PDF pair for every job lead by prioritizing only source-supported skills, projects, and experience evidence from that job description.
 - Enforces a configurable one-to-three-page budget with progressive content compression, pixel rendering, PDF text recovery, section-semantic checks, and output-to-source factual validation.
-- Searches validated Remotive and Arbeitnow feeds plus best-effort LinkedIn and Naukri public adapters.
+- Searches validated Himalayas, Remotive, Arbeitnow, Jobicy and Remote OK feeds, optional Adzuna, Careerjet and Jooble partner APIs, and best-effort LinkedIn and Naukri public adapters. See [Job Sources](docs/JOB_SOURCES_AND_PAGINATION.md).
+- Measures recommendation quality on a labelled corpus (`python scripts/evaluate_job_relevance.py`) with precision, recall, nDCG and zero-leak gates.
 - Normalizes posting dates, salary, workplace mode, employment type, company aliases, expiry, and link status before ranking leads.
 - Loads additional leads through an owner-scoped, signed server cursor; `Show More` no longer downloads the full result set on the first request.
 - Keeps a local ledger so the same job is not applied twice.
 - Creates email-ready applications and can send them through SMTP.
 - Provides an OTP-protected web UI for resume upload, profile settings, immediate runs, downloads, and daily scheduling.
-- Includes a virtual mock-interview studio with profile-derived questions, optional camera preview and browser speech features, a code editor, transcripts, section-end feedback reports, and recent-session history.
+- Includes a virtual mock-interview studio that can target a specific job lead (job-fit questions from the posting, its skills and skill gaps) or use profile-derived questions, optional camera preview and browser speech features, a code editor, transcripts, section-end feedback reports, and recent-session history.
+- Includes a Mock Test section with timed MCQ tests tailored to each job lead (required, matched and Additional Skills plus aptitude and reasoning), server-side grading, and a scorecard with topic and difficulty breakdowns, a readiness verdict, study tips, and an answer review. See [Mock Test](docs/MOCK_TEST.md).
 - Varies question selection by quick, standard, and deep modes; avoids prior user questions when possible; and evaluates communication, technical accuracy, confidence in the submitted wording, and problem solving.
 - Persists user profiles, verification state, runs, schedules, application history, and mock interviews in SQLite locally or PostgreSQL in production.
 - Supports SMTP login OTP delivery or Amazon SES registration verification and OTP delivery.
@@ -144,6 +146,7 @@ See [ATS Calibration](docs/ATS_CALIBRATION.md) for testing against a private, co
 - [Setup Guide](docs/SETUP.md)
 - [CLI Reference](docs/CLI_REFERENCE.md)
 - [Agent Workflows](docs/AGENTS.md)
+- [Mock Test](docs/MOCK_TEST.md)
 - [Job Sources and Pagination](docs/JOB_SOURCES_AND_PAGINATION.md)
 - [Resume Tailoring and Render Validation](docs/RESUME_TAILORING_AND_VALIDATION.md)
 - [Security and Compliance](docs/SECURITY_AND_COMPLIANCE.md)

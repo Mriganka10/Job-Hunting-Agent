@@ -154,11 +154,37 @@ def init_db() -> None:
               updated_at TIMESTAMPTZ NOT NULL
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS mock_test_records (
+              id SERIAL PRIMARY KEY,
+              user_email VARCHAR(320) NOT NULL,
+              status VARCHAR(32) NOT NULL,
+              run_id INTEGER,
+              job_id TEXT NOT NULL DEFAULT '',
+              job_title TEXT NOT NULL DEFAULT '',
+              company TEXT NOT NULL DEFAULT '',
+              test_length VARCHAR(16) NOT NULL,
+              difficulty VARCHAR(16) NOT NULL,
+              topics JSONB NOT NULL,
+              questions JSONB NOT NULL,
+              answers JSONB NOT NULL,
+              score INTEGER NOT NULL DEFAULT 0,
+              total INTEGER NOT NULL DEFAULT 0,
+              score_percent DOUBLE PRECISION NOT NULL DEFAULT 0,
+              scorecard JSONB NOT NULL,
+              time_limit_seconds INTEGER NOT NULL DEFAULT 0,
+              started_at TIMESTAMPTZ NOT NULL,
+              completed_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL,
+              updated_at TIMESTAMPTZ NOT NULL
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_otp_codes_email ON otp_codes(email)",
             "CREATE INDEX IF NOT EXISTS idx_run_records_user ON run_records(user_email)",
             "CREATE INDEX IF NOT EXISTS idx_application_records_user ON application_records(user_email)",
             "CREATE INDEX IF NOT EXISTS idx_scheduler_records_active ON scheduler_records(active)",
             "CREATE INDEX IF NOT EXISTS idx_mock_interview_records_user ON mock_interview_records(user_email)",
+            "CREATE INDEX IF NOT EXISTS idx_mock_test_records_user ON mock_test_records(user_email)",
         ]
     else:
         statements = [
@@ -271,11 +297,37 @@ def init_db() -> None:
               updated_at TEXT NOT NULL
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS mock_test_records (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_email TEXT NOT NULL,
+              status TEXT NOT NULL,
+              run_id INTEGER,
+              job_id TEXT NOT NULL DEFAULT '',
+              job_title TEXT NOT NULL DEFAULT '',
+              company TEXT NOT NULL DEFAULT '',
+              test_length TEXT NOT NULL,
+              difficulty TEXT NOT NULL,
+              topics TEXT NOT NULL,
+              questions TEXT NOT NULL,
+              answers TEXT NOT NULL,
+              score INTEGER NOT NULL DEFAULT 0,
+              total INTEGER NOT NULL DEFAULT 0,
+              score_percent REAL NOT NULL DEFAULT 0,
+              scorecard TEXT NOT NULL,
+              time_limit_seconds INTEGER NOT NULL DEFAULT 0,
+              started_at TEXT NOT NULL,
+              completed_at TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_otp_codes_email ON otp_codes(email)",
             "CREATE INDEX IF NOT EXISTS idx_run_records_user ON run_records(user_email)",
             "CREATE INDEX IF NOT EXISTS idx_application_records_user ON application_records(user_email)",
             "CREATE INDEX IF NOT EXISTS idx_scheduler_records_active ON scheduler_records(active)",
             "CREATE INDEX IF NOT EXISTS idx_mock_interview_records_user ON mock_interview_records(user_email)",
+            "CREATE INDEX IF NOT EXISTS idx_mock_test_records_user ON mock_test_records(user_email)",
         ]
     with connection() as conn:
         if IS_POSTGRES:
@@ -295,6 +347,10 @@ def init_db() -> None:
         _ensure_column(conn, "email_verifications", "verified_at", "TEXT")
         _ensure_column(conn, "email_verifications", "last_checked_at", "TEXT")
         _ensure_column(conn, "email_verifications", "detail", "TEXT NOT NULL DEFAULT ''")
+        # Job-specific mock interviews (added later; existing rows default to general practice).
+        _ensure_column(conn, "mock_interview_records", "job_id", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "mock_interview_records", "job_title", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "mock_interview_records", "company", "TEXT NOT NULL DEFAULT ''")
 
 
 def create_mock_interview_session(
@@ -305,6 +361,9 @@ def create_mock_interview_session(
     roles: tuple[str, ...],
     skills: tuple[str, ...],
     questions: list[dict[str, Any]],
+    job_id: str = "",
+    job_title: str = "",
+    company: str = "",
 ) -> int:
     normalized = normalize_email(user_email)
     now = _serialize_time(utcnow())
@@ -314,8 +373,8 @@ def create_mock_interview_session(
             """
             INSERT INTO mock_interview_records
             (user_email, status, region, accent, roles, skills, questions, answers, score, feedback,
-             started_at, completed_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             started_at, completed_at, created_at, updated_at, job_id, job_title, company)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 normalized,
@@ -332,6 +391,9 @@ def create_mock_interview_session(
                 None,
                 now,
                 now,
+                job_id,
+                job_title,
+                company,
             ),
         )
         return int(_lastrowid(conn, cursor))
@@ -383,7 +445,7 @@ def mock_interview_session(user_email: str, session_id: int) -> dict[str, Any] |
             conn,
             """
             SELECT id, user_email, status, region, accent, roles, skills, questions, answers, score,
-                   feedback, started_at, completed_at, created_at, updated_at
+                   feedback, started_at, completed_at, created_at, updated_at, job_id, job_title, company
             FROM mock_interview_records
             WHERE id = ? AND user_email = ?
             """,
@@ -399,7 +461,7 @@ def latest_mock_interviews(user_email: str, limit: int = 3) -> list[dict[str, An
             conn,
             """
             SELECT id, user_email, status, region, accent, roles, skills, questions, answers, score,
-                   feedback, started_at, completed_at, created_at, updated_at
+                   feedback, started_at, completed_at, created_at, updated_at, job_id, job_title, company
             FROM mock_interview_records
             WHERE user_email = ?
             ORDER BY id DESC
@@ -854,6 +916,133 @@ def _decode_schedule(row: dict[str, Any]) -> dict[str, Any]:
         value = row.get(key)
         if isinstance(value, str) and value:
             row[key] = json.loads(value)
+    return row
+
+
+MOCK_TEST_COLUMNS = (
+    "id, user_email, status, run_id, job_id, job_title, company, test_length AS length, difficulty, topics, questions, "
+    "answers, score, total, score_percent AS percent, scorecard, time_limit_seconds, started_at, completed_at, "
+    "created_at, updated_at"
+)
+
+
+def create_mock_test(
+    user_email: str,
+    *,
+    run_id: int | None,
+    job_id: str,
+    job_title: str,
+    company: str,
+    length: str,
+    difficulty: str,
+    topics: list[str],
+    questions: list[dict[str, Any]],
+    time_limit_seconds: int,
+) -> int:
+    """Store a new test with its answer key; only the server ever reads the key."""
+    normalized = normalize_email(user_email)
+    now = _serialize_time(utcnow())
+    with connection() as conn:
+        cursor = _execute(
+            conn,
+            """
+            INSERT INTO mock_test_records
+            (user_email, status, run_id, job_id, job_title, company, test_length, difficulty, topics, questions, answers,
+             score, total, score_percent, scorecard, time_limit_seconds, started_at, completed_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized, "in_progress", run_id, job_id, job_title, company, length, difficulty,
+                _json_dump(topics), _json_dump(questions), _json_dump({}), 0, len(questions), 0.0,
+                _json_dump({}), int(time_limit_seconds), now, None, now, now,
+            ),
+        )
+        return int(_lastrowid(conn, cursor))
+
+
+def mock_test_record(user_email: str, test_id: int) -> dict[str, Any] | None:
+    normalized = normalize_email(user_email)
+    with connection() as conn:
+        row = _fetchone(
+            conn,
+            f"SELECT {MOCK_TEST_COLUMNS} FROM mock_test_records WHERE id = ? AND user_email = ?",
+            (test_id, normalized),
+        )
+    return _decode_mock_test(row) if row else None
+
+
+def complete_mock_test(
+    user_email: str,
+    test_id: int,
+    *,
+    answers: dict[str, Any],
+    scorecard: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Mark a test completed exactly once; a second submission changes nothing."""
+    normalized = normalize_email(user_email)
+    now = _serialize_time(utcnow())
+    with connection() as conn:
+        _execute(
+            conn,
+            """
+            UPDATE mock_test_records
+            SET status = ?, answers = ?, score = ?, total = ?, score_percent = ?, scorecard = ?, completed_at = ?, updated_at = ?
+            WHERE id = ? AND user_email = ? AND status = ?
+            """,
+            (
+                "completed", _json_dump(answers), int(scorecard.get("score", 0)), int(scorecard.get("total", 0)),
+                float(scorecard.get("percent", 0.0)), _json_dump(scorecard), now, now, test_id, normalized, "in_progress",
+            ),
+        )
+    return mock_test_record(user_email, test_id)
+
+
+def latest_mock_tests(user_email: str, limit: int = 10, *, completed_only: bool = True) -> list[dict[str, Any]]:
+    normalized = normalize_email(user_email)
+    status_clause = "AND status = 'completed'" if completed_only else ""
+    with connection() as conn:
+        rows = _fetchall(
+            conn,
+            f"""
+            SELECT {MOCK_TEST_COLUMNS} FROM mock_test_records
+            WHERE user_email = ? {status_clause}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (normalized, limit),
+        )
+    return [_decode_mock_test(row) for row in rows]
+
+
+def mock_test_question_history(user_email: str, test_limit: int = 50) -> set[str]:
+    """Question ids already shown to this user, used to prefer fresh questions."""
+    seen: set[str] = set()
+    for record in latest_mock_tests(user_email, limit=test_limit, completed_only=False):
+        seen.update(str(item.get("id")) for item in record.get("questions") or [] if isinstance(item, dict))
+    return seen
+
+
+def best_mock_test_percent(user_email: str, job_id: str, *, exclude_id: int | None = None) -> float | None:
+    normalized = normalize_email(user_email)
+    with connection() as conn:
+        rows = _fetchall(
+            conn,
+            "SELECT id, score_percent FROM mock_test_records WHERE user_email = ? AND job_id = ? AND status = 'completed'",
+            (normalized, job_id),
+        )
+    values = [float(row["score_percent"]) for row in rows if exclude_id is None or int(row["id"]) != exclude_id]
+    return max(values) if values else None
+
+
+def _decode_mock_test(row: dict[str, Any]) -> dict[str, Any]:
+    for key in ("topics", "questions", "answers", "scorecard"):
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            row[key] = json.loads(value)
+    for key in ("started_at", "completed_at", "created_at", "updated_at"):
+        value = row.get(key)
+        if value is not None and not isinstance(value, str):
+            row[key] = _serialize_time(value)
     return row
 
 

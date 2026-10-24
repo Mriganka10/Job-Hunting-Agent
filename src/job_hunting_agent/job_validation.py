@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -31,6 +31,10 @@ TRACKING_QUERY_KEYS = {
     "ref", "refid", "source", "src", "tracking", "trk", "utm_campaign", "utm_content", "utm_medium", "utm_source", "utm_term",
 }
 LINK_CACHE_TTL_SECONDS = 6 * 60 * 60
+LINK_CHECK_BUDGET_SECONDS = 8.0
+# LinkedIn/Naukri refuse automated checks; Adzuna, Careerjet and Jooble links
+# are click-tracking redirects, so a check would register a fake click.
+LINK_CHECK_SKIPPED_PORTALS = frozenset({"linkedin", "naukri", "adzuna", "careerjet", "jooble"})
 _link_cache: dict[str, tuple[float, str]] = {}
 _link_cache_lock = threading.Lock()
 
@@ -44,11 +48,21 @@ def validate_job_leads(
     current = now or datetime.now(timezone.utc)
     normalized = [_normalize_job(job, config, current) for job in jobs]
     if config.validate_job_links:
-        candidates = [job for job in normalized if job.link_status == "unchecked" and job.url.startswith(("http://", "https://"))]
+        # LinkedIn and Naukri reject automated HEAD/GET checks (999/403/429), so
+        # checking them only added waiting time without telling us anything.
+        candidates = [
+            job for job in normalized
+            if job.link_status == "unchecked"
+            and job.url.startswith(("http://", "https://"))
+            and job.portal not in LINK_CHECK_SKIPPED_PORTALS
+        ]
         if candidates:
-            with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
-                statuses = list(executor.map(_check_link, candidates))
-            status_by_id = {job.stable_id: status for job, status in zip(candidates, statuses)}
+            executor = ThreadPoolExecutor(max_workers=min(12, len(candidates)))
+            futures = {executor.submit(_check_link, job): job for job in candidates}
+            done, _ = wait(futures, timeout=LINK_CHECK_BUDGET_SECONDS)
+            executor.shutdown(wait=False, cancel_futures=True)
+            # Links not checked within the budget stay "unchecked".
+            status_by_id = {futures[future].stable_id: future.result() for future in done}
             normalized = [
                 replace(job, link_status=status_by_id[job.stable_id], link_checked_at=current.isoformat())
                 if job.stable_id in status_by_id
@@ -206,9 +220,9 @@ def _check_link(job: JobLead) -> str:
         if cached and cached[0] > now:
             return cached[1]
     try:
-        response = http_client.head(job.url, allow_redirects=True, timeout=5, headers={"User-Agent": "Mozilla/5.0 JobHuntingAgent/1.0"})
+        response = http_client.head(job.url, allow_redirects=True, timeout=(3, 4), headers={"User-Agent": "Mozilla/5.0 JobHuntingAgent/1.0"})
         if response.status_code == 405:
-            response = http_client.get(job.url, allow_redirects=True, timeout=5, headers={"User-Agent": "Mozilla/5.0 JobHuntingAgent/1.0"}, stream=True)
+            response = http_client.get(job.url, allow_redirects=True, timeout=(3, 4), headers={"User-Agent": "Mozilla/5.0 JobHuntingAgent/1.0"}, stream=True)
     except requests.RequestException:
         status = "unavailable"
     else:

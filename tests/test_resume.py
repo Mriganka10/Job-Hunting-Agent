@@ -281,3 +281,60 @@ Machine learning developer.
     assert "https://github.com/example/cat-dog-classifier" not in sections["contact"]
     assert "English" not in sections["contact"]
     assert "KOLKATA" in sections["contact"]
+
+
+def test_skill_category_labels_stay_inside_skills_and_internship_heading_is_experience() -> None:
+    from job_hunting_agent.resume import extract_sections, extract_skills
+
+    text = (
+        "ANANYA SEN\nananya@example.com | +91 98765 43210\n"
+        "Technical Skills\nLanguages: Python, C, C++, SQL\nTools: Git, Docker, Snowflake, Streamlit\n"
+        "Internship Experience\nML Intern - Acme, Kolkata (Jan 2025 - Jun 2025)\n"
+        "• Built a FastAPI service.\nLanguages\nEnglish, Hindi\n"
+    )
+    sections = extract_sections(text)
+    assert "Languages: Python, C, C++, SQL" in sections["skills"]
+    assert "ML Intern - Acme" in sections["experience"]
+    assert "Python" not in sections.get("languages", "")
+    skills = extract_skills(text)
+    assert {"C", "Snowflake", "Streamlit"} <= set(skills)
+    assert "Languages" not in skills
+
+
+def test_spoken_language_label_inside_skills_goes_to_languages() -> None:
+    from job_hunting_agent.resume import extract_sections
+
+    sections = extract_sections("JOHN DOE\nSkills\nPython, SQL\nLanguages: English, Hindi\nTools: Git\nEducation\nB.Tech")
+    assert sections["languages"] == "English, Hindi"
+    assert "Tools: Git" in sections["skills"]
+
+
+def test_wrapped_pdf_skill_line_does_not_invent_partial_skill() -> None:
+    from job_hunting_agent.resume import extract_skills
+
+    skills = extract_skills("JOHN DOE\nSkills\nPython, Kafka, AWS, Azure\nData Factory, Terraform\n")
+    assert "Azure Data Factory" in skills
+    assert "Data Factory" not in skills
+
+
+def test_docx_list_bullets_are_preserved(tmp_path) -> None:
+    from docx import Document
+    from job_hunting_agent.resume import parse_resume
+
+    document = Document()
+    document.add_paragraph("JOHN DOE")
+    document.add_paragraph("john@example.com | +91 98765 43210")
+    document.add_heading("Projects", 1)
+    document.add_paragraph("Helmet Detection")
+    document.add_paragraph("Trained a YOLOv8 model on 4,000 images.", style="List Bullet")
+    path = tmp_path / "resume.docx"
+    document.save(path)
+    resume = parse_resume(path)
+    assert "• Trained a YOLOv8 model" in resume.sections["projects"]
+
+
+def test_short_skills_are_not_inferred_from_prose() -> None:
+    from job_hunting_agent.resume import extract_skills
+
+    skills = extract_skills("Summary\nI go to work and grow net revenue with a C-level team.")
+    assert not {"Go", "C", ".NET", "R"} & set(skills)

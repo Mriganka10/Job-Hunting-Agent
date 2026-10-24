@@ -288,3 +288,84 @@ def test_detailed_unmet_requirements_do_not_get_high_match_from_generic_skills()
     ]
     ranked = rank_job_leads(jobs, intent, resume)
     assert [job.company for job in ranked] == ["Entry Co"]
+
+
+def test_other_indian_city_is_not_a_location_match_but_aliases_and_remote_are() -> None:
+    from job_hunting_agent.portals import _location_fit
+
+    assert _location_fit(("Kolkata",), "Chennai, Tamil Nadu, India") < 0.7
+    assert _location_fit(("Bangalore",), "Bengaluru, Karnataka, India") == 1.0
+    assert _location_fit(("Gurgaon",), "Gurugram, Haryana, India") == 1.0
+    assert _location_fit(("Remote",), "India (Remote)") == 1.0
+    assert _location_fit(("Remote",), "Kolkata, West Bengal, India", "remote") == 1.0
+    assert _location_fit(("Kolkata",), "Remote - United States") < 0.7
+
+
+def test_role_synonyms_and_seniority_words_do_not_block_matching() -> None:
+    from job_hunting_agent.portals import _role_fit
+
+    assert _role_fit(("Software Developer",), "Software Engineer", "") >= 0.6
+    assert _role_fit(("Data Scientist",), "Data Science Engineer", "") >= 0.6
+    assert _role_fit(("Frontend Developer",), "Front-End Engineer", "") >= 0.6
+    assert _role_fit(("Senior Data Analyst",), "Data Analyst II", "") >= 0.6
+    assert _role_fit(("Developer",), "Civil Engineer", "") == 0.0
+    assert _role_fit(("Data Engineer",), "Data Entry Specialist", "") < 0.38
+
+
+def test_skill_aliases_count_as_matches() -> None:
+    from job_hunting_agent.portals import matched_candidate_skills
+
+    matched = matched_candidate_skills(("PostgreSQL", "Kubernetes", "scikit-learn", "C"), "Postgres, K8s and sklearn on Linux; c-level reports")
+    assert set(matched) == {"PostgreSQL", "Kubernetes", "scikit-learn"}
+
+
+def test_blocked_detail_lead_is_kept_but_never_claims_verified_skills_or_experience() -> None:
+    resume = Resume("resume.txt", "Python", ("Python", "Machine Learning"), ("Machine Learning Engineer",))
+    intent = SearchIntent(("Machine Learning Engineer",), ("Python", "Machine Learning"), ("Kolkata",), 0.5)
+    job = JobLead(
+        "linkedin", "Machine Learning Developer", "Acme", "Kolkata, West Bengal, India", "https://example.com/1",
+        "LinkedIn public listing matched Machine Learning Engineer (internship/entry level)",
+        source_metadata={"detail_unavailable": True},
+    )
+    ranked = rank_job_leads([job], intent, resume)
+    assert len(ranked) == 1
+    assert ranked[0].match_score <= 60
+    assert ranked[0].required_experience is None
+    assert "Skill match" not in ranked[0].match_reasons
+    assert "Experience fit" not in ranked[0].match_reasons
+    assert ranked[0].source_metadata["matched_skills"] == ()
+
+
+def test_naukri_structured_response_is_parsed(monkeypatch) -> None:
+    from job_hunting_agent.portals import NaukriAdapter
+
+    payload = {"jobDetails": [{
+        "jobId": "42", "title": "Data Analyst", "companyName": "Acme Pvt Ltd", "jdURL": "/job-listings-data-analyst-42",
+        "placeholders": [{"type": "experience", "label": "0-2 Yrs"}, {"type": "salary", "label": "Not disclosed"},
+                         {"type": "location", "label": "Hybrid - Pune, Bengaluru"}],
+        "tagsAndSkills": "Python,SQL,Power BI", "jobDescription": "Build dashboards.", "createdDate": 1760000000000,
+    }]}
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return payload
+
+    monkeypatch.setattr("job_hunting_agent.http_client.get", lambda url, **kwargs: Response())
+    leads = NaukriAdapter()._fetch_structured_jobs("Data Analyst", "Pune", SearchConfig(), 1)
+    assert len(leads) == 1
+    lead = leads[0]
+    assert lead.url == "https://www.naukri.com/job-listings-data-analyst-42"
+    assert lead.location == "Pune, Bengaluru"
+    assert lead.workplace_mode == "hybrid"
+    assert "Required Skills: Python, SQL, Power BI" in lead.description
+    assert lead.salary_text == ""
+
+
+def test_linkedin_remote_uses_remote_filter_instead_of_a_place_called_remote() -> None:
+    url = _linkedin_search_url("Data Engineer", "Remote", SearchConfig(), 2)
+    assert "location=India" in url and "f_WT=2" in url

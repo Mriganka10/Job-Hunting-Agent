@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 from pathlib import Path
 
 from .models import Resume
@@ -60,6 +61,29 @@ KNOWN_SKILLS = {
     "solaris", "azure data factory", "azure datalake gen2",
     "azure synapse analytics", "unix shell script", "oracle 11g",
     "ms excel",
+    # Modern engineering, data and AI vocabulary. These are distinctive product
+    # or technique names, so matching them anywhere in the resume is safe.
+    "html", "css", "c#", "golang", "kotlin", "php", "next.js", "angular", "vue.js",
+    "express.js", "spring boot", "redis", "graphql", "sqlite", "cassandra",
+    "elasticsearch", "snowflake", "bigquery", "redshift", "dynamodb", "firebase",
+    "langchain", "langgraph", "llamaindex", "llm", "large language models", "rag",
+    "hugging face", "transformers", "bert", "openai", "prompt engineering", "fine-tuning",
+    "faiss", "pinecone", "chromadb", "vector database", "computer vision", "yolo",
+    "mediapipe", "streamlit", "gradio", "mlflow", "mlops", "kubeflow", "sagemaker",
+    "aws lambda", "ec2", "s3", "xgboost", "lightgbm", "statistics", "data visualization",
+    "data analysis", "data engineering", "etl", "data modeling", "a/b testing", "selenium",
+    "postman", "figma", "agile", "scrum", "ansible", "prometheus", "grafana", "nginx",
+    "power automate", "looker", "sas", "spss", "matlab", "tailwind css", "bootstrap",
+    "redux", "flutter", "react native", "great expectations", "mcp", "graph rag",
+    "knowledge graph", "embeddings", "semantic search", "multi-agent systems",
+    "aws bedrock", "vertex ai", "genai", "google cloud", "azure devops",
+}
+
+# Short or common-English skill names are trusted only inside an explicit
+# Skills section. Matching "C", "R" or "Go" in body prose would invent skills.
+EXPLICIT_ONLY_SKILLS = {
+    "c": "C", "r": "R", "go": "Go", "rust": "Rust", "swift": "Swift", "ruby": "Ruby",
+    "dart": "Dart", "perl": "Perl", "express": "Express.js", "spring": "Spring", "net": ".NET",
 }
 
 CANONICAL_SKILL_LABELS = {
@@ -207,6 +231,17 @@ CANONICAL_SKILL_LABELS = {
     "azure data factory": "Azure Data Factory",
     "azure datalake gen2": "Azure DataLake Gen2",
     "azure synapse analytics": "Azure Synapse Analytics",
+    "html": "HTML", "css": "CSS", "golang": "Golang", "php": "PHP", "next js": "Next.js",
+    "vue js": "Vue.js", "express js": "Express.js", "graphql": "GraphQL",
+    "sqlite": "SQLite", "elasticsearch": "Elasticsearch", "bigquery": "BigQuery",
+    "dynamodb": "DynamoDB", "langgraph": "LangGraph", "hugging face": "Hugging Face",
+    "bert": "BERT", "openai": "OpenAI", "faiss": "FAISS", "chromadb": "ChromaDB",
+    "yolo": "YOLO", "mediapipe": "MediaPipe", "mlflow": "MLflow", "mlops": "MLOps",
+    "sagemaker": "SageMaker", "aws lambda": "AWS Lambda", "ec2": "EC2", "s3": "S3",
+    "xgboost": "XGBoost", "lightgbm": "LightGBM", "etl": "ETL", "a b testing": "A/B Testing",
+    "sas": "SAS", "spss": "SPSS", "matlab": "MATLAB", "tailwind css": "Tailwind CSS",
+    "react native": "React Native", "azure devops": "Azure DevOps", "google cloud": "Google Cloud",
+    "c sharp": "C#",
 }
 
 GENERIC_SKILL_LABELS = {
@@ -280,16 +315,28 @@ ROLE_HINTS = (
 
 SECTION_ALIASES = {
     "contact": ("contact", "contact details", "personal details"),
-    "summary": ("summary", "professional summary", "career summary", "profile", "profile summary", "objective", "career objective", "carrer objective", "about me"),
-    "experience": ("experience", "work experience", "professional experience", "corporate experience", "employment", "employment history", "work history", "professional history", "internship", "internships"),
-    "skills": ("skills", "technical skills", "core skills", "core skills and tools", "key skills", "competencies", "technical competencies", "technologies", "tools and technologies", "domain expertise", "clinical skills", "legal skills", "accounting skills", "design skills", "functional skills", "professional skills"),
-    "education": ("education", "academic credentials", "academic background", "academic qualifications", "educational qualifications", "qualifications"),
-    "projects": ("projects", "project experience", "academic projects", "personal projects", "key projects", "portfolio"),
-    "certifications": ("certifications", "certification", "licenses and certifications", "courses", "training"),
-    "achievements": ("achievements", "achievement", "key achievements", "corporate achievements", "key corporate achievements", "awards", "honors", "accomplishments", "achievement and certification", "achievements and certifications", "achievement certification", "achievements certifications"),
+    "summary": ("summary", "professional summary", "career summary", "profile", "profile summary", "objective", "career objective", "carrer objective", "about me", "professional profile", "summary of qualifications", "executive summary", "personal statement"),
+    "experience": (
+        "experience", "work experience", "professional experience", "corporate experience", "employment", "employment history",
+        "work history", "professional history", "internship", "internships", "internship experience", "internships experience",
+        "work and internship experience", "internship and work experience", "work experience and internships",
+        "experience and internships", "relevant experience", "industry experience", "industrial experience",
+        "industrial training", "internships and training", "professional experience and internships",
+    ),
+    "skills": (
+        "skills", "technical skills", "core skills", "core skills and tools", "key skills", "competencies", "technical competencies",
+        "technologies", "tools and technologies", "domain expertise", "clinical skills", "legal skills", "accounting skills",
+        "design skills", "functional skills", "professional skills", "skills summary", "technical expertise", "skill set",
+        "skillset", "tech stack", "technical proficiency", "technical skills and tools", "additional skills", "it skills",
+        "computer skills", "software skills", "skills and tools", "skills and technologies", "technical summary",
+    ),
+    "education": ("education", "academic credentials", "academic background", "academic qualifications", "educational qualifications", "qualifications", "academic details", "academics", "education details", "educational background", "academic profile", "education and qualifications", "academic qualification", "educational qualification"),
+    "projects": ("projects", "project experience", "academic projects", "personal projects", "key projects", "portfolio", "major projects", "technical projects", "notable projects", "selected projects", "projects undertaken", "academic and personal projects", "personal and academic projects", "project work", "research projects", "capstone project", "projects and research"),
+    "certifications": ("certifications", "certification", "licenses and certifications", "courses", "training", "certificates", "certifications and courses", "courses and certifications", "online certifications", "certifications and training", "training and certifications", "professional certifications"),
+    "achievements": ("achievements", "achievement", "key achievements", "corporate achievements", "key corporate achievements", "awards", "honors", "accomplishments", "achievement and certification", "achievements and certifications", "achievement certification", "achievements certifications", "awards and achievements", "honors and awards", "awards and honors", "awards and recognition", "achievements and awards"),
     "languages": ("languages", "language", "languages known", "language proficiency"),
     "publications": ("publications", "publication", "research publications", "research papers"),
-    "volunteering": ("volunteering", "volunteer experience", "community involvement", "leadership experience"),
+    "volunteering": ("volunteering", "volunteer experience", "community involvement", "leadership experience", "positions of responsibility", "extracurricular activities", "extra curricular activities", "co curricular activities", "leadership and activities"),
     "interests": ("interests", "areas of interest", "professional interests", "hobbies"),
     "professional_memberships": ("professional memberships", "memberships", "affiliations", "professional affiliations", "associations"),
     "core_competencies": ("core competencies", "areas of expertise", "key competencies"),
@@ -341,6 +388,20 @@ def extract_sections(text: str) -> dict[str, str]:
         key = _heading_key(heading_part)
         matched = _match_section_heading(cleaned, aliases)
         if matched:
+            inline_value = cleaned[len(heading_part):].lstrip(" :|").strip() if ":" in cleaned else ""
+            if inline_value and _is_skill_sublabel(current, matched, inline_value):
+                # "Languages: Python, C++" or "Tools: Git" inside a Skills block
+                # is a category label, not a new section. Spoken-language lists
+                # still go to Languages without ending the Skills block.
+                target = "languages" if matched == "languages" and _all_spoken_languages(inline_value) else current
+                sections[target].append(raw_line if target == current else inline_value)
+                continue
+            if matched == "languages" and inline_value and not _all_spoken_languages(inline_value) and _has_technical_skill(inline_value):
+                # A labelled programming-language line outside a Skills heading
+                # starts an unlabelled skills block.
+                current = "skills"
+                sections[current].append(raw_line)
+                continue
             if matched == current and cleaned != cleaned.upper():
                 sections[current].append(raw_line)
                 continue
@@ -383,6 +444,27 @@ _LANGUAGE_NAMES = (
     "English", "Hindi", "Bengali", "Tamil", "Telugu", "Marathi", "Gujarati", "Kannada",
     "Malayalam", "Punjabi", "Urdu", "French", "German", "Spanish", "Mandarin", "Japanese",
 )
+_SKILL_SUBLABEL_SECTIONS = {"languages", "skills", "core_competencies"}
+
+
+def _is_skill_sublabel(current: str, matched: str, inline_value: str) -> bool:
+    return current == "skills" and matched in _SKILL_SUBLABEL_SECTIONS and bool(inline_value)
+
+
+def _all_spoken_languages(value: str) -> bool:
+    names = {name.casefold() for name in _LANGUAGE_NAMES}
+    items = [
+        re.sub(r"\s*\([^)]*\)|\s*[-:]\s*(?:native|fluent|professional|working|basic|beginner|intermediate|advanced).*$", "", part, flags=re.I).strip().casefold()
+        for part in re.split(r"[,;|/•]", value)
+        if part.strip()
+    ]
+    return bool(items) and all(item in names for item in items)
+
+
+def _has_technical_skill(value: str) -> bool:
+    return any(_contains_term(value, skill) for skill in KNOWN_SKILLS) or any(
+        _skill_key(part) in EXPLICIT_ONLY_SKILLS for part in re.split(r"[,;|/•]", value)
+    )
 
 
 def _repair_section_contamination(sections: dict[str, str]) -> dict[str, str]:
@@ -461,36 +543,55 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", normalized).strip()
 
 
+_SKIPPED_CANONICAL_KEYS = {"c plus plus", "ci cd", "pl sql", "react js", "node js", "scikit learn"}
+_NORMALIZE_PATTERNS: tuple[re.Pattern[str], re.Pattern[str], dict[str, str], dict[str, str]] | None = None
+
+
+def _normalize_patterns() -> tuple[re.Pattern[str], re.Pattern[str], dict[str, str], dict[str, str]]:
+    """Compile the keyword-casing rules once.
+
+    Previously ~200 regexes were rebuilt and applied one by one on every call,
+    which made job ranking take tens of seconds. One alternation tried longest
+    key first gives the same result in a single pass.
+    """
+    global _NORMALIZE_PATTERNS
+    if _NORMALIZE_PATTERNS is None:
+        replacements = {"highquality": "high-quality", "high quality": "high-quality", "powerbi": "Power BI"}
+        labels = {key: label for key, label in CANONICAL_SKILL_LABELS.items() if key not in _SKIPPED_CANONICAL_KEYS}
+        replacement_re = re.compile(
+            r"(?<![A-Za-z0-9])(" + "|".join(re.escape(key) for key in sorted(replacements, key=len, reverse=True)) + r")(?![A-Za-z0-9])",
+            re.I,
+        )
+        label_re = re.compile(
+            r"(?<![A-Za-z0-9+#.-])(" + "|".join(re.escape(key) for key in sorted(labels, key=len, reverse=True)) + r")(?![A-Za-z0-9+#.-])",
+            re.I,
+        )
+        _NORMALIZE_PATTERNS = (replacement_re, label_re, replacements, labels)
+    return _NORMALIZE_PATTERNS
+
+
+_CI_CD_RE = re.compile(r"\bci\s*/?\s*cd\b", re.I)
+_PL_SQL_RE = re.compile(r"\bpl\s*/\s*sql\b", re.I)
+_NODE_JS_RE = re.compile(r"\bnode\s*\.?\s*js\b", re.I)
+_REACT_JS_RE = re.compile(r"\breact\s*\.?\s*js\b", re.I)
+_SCIKIT_RE = re.compile(r"\bscikit\s+learn\b", re.I)
+
+
+@lru_cache(maxsize=8192)
+def _normalize_ats_text_cached(value: str) -> str:
+    replacement_re, label_re, replacements, labels = _normalize_patterns()
+    normalized = replacement_re.sub(lambda match: replacements[match.group(1).casefold()], value)
+    normalized = label_re.sub(lambda match: labels[match.group(1).casefold()], normalized)
+    normalized = _CI_CD_RE.sub("CI/CD", normalized)
+    normalized = _PL_SQL_RE.sub("PL/SQL", normalized)
+    normalized = _NODE_JS_RE.sub("Node.js", normalized)
+    normalized = _REACT_JS_RE.sub("React.js", normalized)
+    return _SCIKIT_RE.sub("scikit-learn", normalized)
+
+
 def normalize_ats_text(value: str) -> str:
     """Normalize common ATS keyword casing and resume extraction glitches."""
-    replacements = {
-        "highquality": "high-quality",
-        "high quality": "high-quality",
-        "powerbi": "Power BI",
-    }
-    normalized = value
-    for source, target in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
-        normalized = re.sub(
-            rf"(?<![A-Za-z0-9]){re.escape(source)}(?![A-Za-z0-9])",
-            target,
-            normalized,
-            flags=re.I,
-        )
-    for key, label in sorted(CANONICAL_SKILL_LABELS.items(), key=lambda item: len(item[0]), reverse=True):
-        if key in {"c plus plus", "ci cd", "pl sql", "react js", "node js", "scikit learn"}:
-            continue
-        normalized = re.sub(
-            rf"(?<![A-Za-z0-9+#.-]){re.escape(key)}(?![A-Za-z0-9+#.-])",
-            label,
-            normalized,
-            flags=re.I,
-        )
-    normalized = re.sub(r"\bci\s*/?\s*cd\b", "CI/CD", normalized, flags=re.I)
-    normalized = re.sub(r"\bpl\s*/\s*sql\b", "PL/SQL", normalized, flags=re.I)
-    normalized = re.sub(r"\bnode\s*\.?\s*js\b", "Node.js", normalized, flags=re.I)
-    normalized = re.sub(r"\breact\s*\.?\s*js\b", "React.js", normalized, flags=re.I)
-    normalized = re.sub(r"\bscikit\s+learn\b", "scikit-learn", normalized, flags=re.I)
-    return normalized
+    return _normalize_ats_text_cached(value)
 
 
 def _repair_spaced_glyphs(line: str) -> str:
@@ -627,11 +728,22 @@ def detect_sections(text: str) -> tuple[str, ...]:
             continue
         flat_aliases = {alias: section for section, section_aliases in aliases.items() for alias in section_aliases}
         section = _match_section_heading(line, flat_aliases)
+        if section == "languages" and ":" in line:
+            inline_value = line.split(":", 1)[1].strip()
+            if inline_value and not _all_spoken_languages(inline_value) and _has_technical_skill(inline_value):
+                section = "skills"
         if section and section not in found:
             found.append(section)
     normalized_text = unicodedata.normalize("NFKC", text)
+    technical_language_labels = [
+        match.group(1) for match in re.finditer(r"(?im)^\W*languages?\s*:\s*(.+)$", normalized_text)
+    ]
     for section, section_aliases in aliases.items():
         if section in found:
+            continue
+        if section == "languages" and technical_language_labels and all(
+            not _all_spoken_languages(value) and _has_technical_skill(value) for value in technical_language_labels
+        ):
             continue
         for alias in section_aliases:
             pattern = rf"(?:^|[.!?]\s+)({re.escape(alias)})(?=\s*(?:[:|\-–—]|[A-Z0-9]))"
@@ -692,7 +804,12 @@ def _skills_from_explicit_section(text: str) -> list[str]:
             continue
         if ":" in line:
             label, line = line.split(":", 1)
-            if 1 <= len(label.split()) <= 5 and not _is_generic_skill_label(label) and not re.search(r"\b(?:skills?|tools?|technologies|competencies|platforms?|languages?)\b", label, flags=re.I):
+            label_key = _skill_key(label)
+            # Category labels ("ML/DL", "Data", "Cloud") are not skills; keep a
+            # label only when it is itself a recognised skill ("Python: Pandas").
+            if 1 <= len(label.split()) <= 5 and not _is_generic_skill_label(label) and (
+                label_key in CANONICAL_SKILL_LABELS or label_key in {_skill_key(skill) for skill in KNOWN_SKILLS}
+            ) and label_key not in {"ai", "ml", "data analytics", "artificial intelligence"}:
                 found.append(canonicalize_skill(label))
         for value in re.split(r"\s*[•▪●|;,]\s*", line):
             cleaned = _clean_skill_candidate(value)
@@ -721,8 +838,27 @@ def _skill_section_candidate_lines(text: str) -> list[str]:
         ):
             merged[-1] = f"{merged[-1]} {cleaned}".strip()
             continue
+        if merged and _is_wrapped_skill_list_line(merged[-1], cleaned):
+            # PDF wraps split "Azure Data Factory" into "Azure" + "Data Factory, ...".
+            merged[-1] = f"{merged[-1]} {cleaned}".strip()
+            continue
         merged.append(cleaned)
     return merged
+
+
+def _is_wrapped_skill_list_line(previous: str, current: str) -> bool:
+    """Join a list line that continues the previous comma-separated line."""
+    if not re.search(r"[,;|•]", previous) or re.search(r"[,;|•:]\s*$", previous):
+        return False
+    if re.match(r"^[A-Za-z][A-Za-z0-9 &/+.#()-]{0,40}:", current):
+        return False
+    first_term = re.split(r"[,;|•]", current, maxsplit=1)[0].strip()
+    last_term = re.split(r"[,;|•]", previous)[-1].strip()
+    if not first_term or not last_term:
+        return False
+    joined = _skill_key(f"{last_term} {first_term}")
+    known = {_skill_key(skill) for skill in KNOWN_SKILLS} | set(CANONICAL_SKILL_LABELS)
+    return joined in known
 
 
 def _clean_skill_candidate(value: str) -> str:
@@ -739,10 +875,19 @@ def _is_skill_like_value(value: str) -> bool:
     if len(value) > 70 or len(value.split()) > 7:
         return False
     key = _skill_key(value)
-    if key in CANONICAL_SKILL_LABELS or key in {_skill_key(skill) for skill in KNOWN_SKILLS}:
+    if key in CANONICAL_SKILL_LABELS or key in EXPLICIT_ONLY_SKILLS or key in {_skill_key(skill) for skill in KNOWN_SKILLS}:
         return True
     if len(value.split()) == 1:
-        return bool(re.fullmatch(r"[A-Z0-9]{2,6}", value) or re.fullmatch(r"[A-Z][A-Za-z0-9.+#-]{1,18}", value) and value in {"Bloomberg", "FactSet", "Dealogic", "Euromonitor", "Gartner", "Factiva", "FinBERT", "DSPy", "UiPath", "Copilot", "Perplexity"})
+        # Inside an explicit Skills list a single product-style token
+        # (Snowflake, Streamlit, Postman, YOLOv8, Albumentations) is a skill;
+        # reject only proficiency words and filler.
+        if key in _NON_SKILL_WORDS:
+            return False
+        return bool(
+            re.fullmatch(r"[A-Z0-9]{2,8}", value)
+            or re.fullmatch(r"[A-Z][A-Za-z0-9.+#-]{1,24}", value)
+            or re.fullmatch(r"[a-z]+[A-Z][A-Za-z0-9]*|[a-z][a-z0-9]*[.-][a-z0-9.-]+", value)
+        )
     if re.search(r"@|https?://|\b(?:19|20)\d{2}\b", value, flags=re.I):
         return False
     if re.search(r"[.!?]$", value) or re.search(
@@ -757,11 +902,21 @@ def _is_skill_like_value(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9+#&/().' -]{1,68}", value))
 
 
+_NON_SKILL_WORDS = {
+    "basic", "basics", "intermediate", "advanced", "expert", "proficient", "familiar", "beginner",
+    "good", "excellent", "knowledge", "others", "other", "etc", "and", "tools", "skills", "languages",
+    "frameworks", "libraries", "databases", "platforms", "technologies", "concepts", "fundamentals",
+}
+
+
+@lru_cache(maxsize=8192)
 def canonicalize_skill(value: str) -> str:
     cleaned = normalize_ats_text(value.strip(" .()"))
     key = _skill_key(cleaned)
     if key in CANONICAL_SKILL_LABELS:
         return CANONICAL_SKILL_LABELS[key]
+    if key in EXPLICIT_ONLY_SKILLS and len(cleaned.split()) == 1:
+        return EXPLICIT_ONLY_SKILLS[key]
     if cleaned.isupper() or re.search(r"[A-Z]{2,}|[+#/.-]", cleaned):
         return cleaned
     return " ".join(part.capitalize() if part.lower() not in {"and", "of", "for"} else part.lower() for part in cleaned.split())
@@ -775,7 +930,7 @@ def _contains_term(text: str, term: str) -> bool:
 
 def _skill_tokens(value: str) -> list[str]:
     normalized = unicodedata.normalize("NFKC", value).casefold()
-    normalized = normalized.replace("c++", "c plus plus").replace("ci/cd", "ci cd").replace("pl/sql", "pl sql")
+    normalized = normalized.replace("c++", "c plus plus").replace("c#", "c sharp").replace("ci/cd", "ci cd").replace("pl/sql", "pl sql")
     return re.findall(r"[a-z0-9]+", normalized)
 
 
@@ -876,10 +1031,29 @@ def _read_docx(path: Path) -> str:
                 for row in block.rows:
                     blocks.append(" | ".join(cell.text.strip() for cell in row.cells if cell.text.strip()))
             elif block.text.strip():
-                blocks.append(block.text)
+                blocks.append(_docx_paragraph_text(block))
     except AttributeError:
-        blocks.extend(paragraph.text for paragraph in document.paragraphs)
+        blocks.extend(_docx_paragraph_text(paragraph) for paragraph in document.paragraphs)
         for table in document.tables:
             for row in table.rows:
                 blocks.append(" | ".join(cell.text.strip() for cell in row.cells if cell.text.strip()))
     return "\n".join(blocks)
+
+
+def _docx_paragraph_text(paragraph) -> str:
+    """Keep Word list bullets visible; their glyph is numbering, not text.
+
+    Without the marker, project titles and their bullet points are
+    indistinguishable and the builder merges them into one paragraph.
+    """
+    text = paragraph.text
+    if not text.strip() or re.match(r"^\s*[•▪●\uf0b7*\-–]", text):
+        return text
+    style_name = (getattr(paragraph.style, "name", "") or "").casefold()
+    if style_name.startswith(("heading", "title")):
+        return text
+    properties = paragraph._p.pPr
+    numbered = properties is not None and properties.numPr is not None
+    if numbered or "list bullet" in style_name or style_name.startswith("list paragraph") and numbered:
+        return f"• {text.strip()}"
+    return text
