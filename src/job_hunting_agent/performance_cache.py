@@ -11,8 +11,8 @@ from typing import Callable
 from .models import AtsReport, CandidateProfile, JobLead, Resume
 
 
-ATS_CACHE_VERSION = "ats-role-calibration-v4"
-RESUME_BUILDER_VERSION = "semantic-render-v5"
+ATS_CACHE_VERSION = "ats-role-calibration-v6"
+RESUME_BUILDER_VERSION = "semantic-render-v7"
 _lock = threading.RLock()
 
 

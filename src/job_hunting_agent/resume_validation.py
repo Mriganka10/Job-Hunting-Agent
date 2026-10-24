@@ -148,7 +148,7 @@ def tailoring_analysis(resume: Resume, profile: CandidateProfile, job: JobLead) 
         "matched_evidence_terms": supported[:20],
         "unsupported_jd_terms_not_inserted": unsupported[:20],
         "weak_evidence_examples": weak_bullets[:5],
-        "strategy": "Reordered only source-supported skills, experience bullets, and projects; no metrics or qualifications were invented.",
+        "strategy": "Reordered source-supported skills, experience bullets, and projects; surfaced job-relevant skills already evidenced by the candidate; no metrics or qualifications were invented.",
     }
 
 

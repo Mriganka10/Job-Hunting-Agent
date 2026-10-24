@@ -7,13 +7,22 @@ from pathlib import Path
 from .models import CandidateProfile
 
 
+# Direct sources first so that when the same job appears on an aggregator the
+# original posting wins de-duplication. Keyed partner sources (adzuna,
+# careerjet, jooble) are skipped automatically when no key is configured.
+DEFAULT_PORTALS: tuple[str, ...] = (
+    "himalayas", "remotive", "arbeitnow", "linkedin", "naukri",
+    "jobicy", "remoteok", "adzuna", "careerjet", "jooble",
+)
+
+
 @dataclass(frozen=True)
 class SearchConfig:
     max_jobs_per_portal: int = 10
-    freshness_days: int = 7
+    freshness_days: int = 14
     include_remote: bool = True
     validate_job_links: bool = True
-    portals: tuple[str, ...] = ("remotive", "arbeitnow", "linkedin", "naukri")
+    portals: tuple[str, ...] = DEFAULT_PORTALS
 
 
 @dataclass(frozen=True)
@@ -64,10 +73,10 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         search=SearchConfig(
             max_jobs_per_portal=int(search_data.get("max_jobs_per_portal", 10)),
-            freshness_days=int(search_data.get("freshness_days", 7)),
+            freshness_days=int(search_data.get("freshness_days", 14)),
             include_remote=bool(search_data.get("include_remote", True)),
             validate_job_links=bool(search_data.get("validate_job_links", True)),
-            portals=tuple(search_data.get("portals", ("remotive", "arbeitnow", "linkedin", "naukri"))),
+            portals=tuple(search_data.get("portals", DEFAULT_PORTALS)),
         ),
         application=ApplicationConfig(
             mode=application_data.get("mode", "draft"),

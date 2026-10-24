@@ -2,7 +2,19 @@
 
 ## Source Strategy
 
-The default search order is Remotive, Arbeitnow, LinkedIn, and Naukri.
+The default search order (`DEFAULT_PORTALS` in `config.py`) is Himalayas, Remotive, Arbeitnow, LinkedIn, Naukri, Jobicy, Remote OK, Adzuna, Careerjet and Jooble. Direct sources come first so that when the same job also appears on an aggregator, the original posting wins de-duplication.
+
+| Source | Access | Coverage | Key |
+| --- | --- | --- | --- |
+| Himalayas, Remotive, Arbeitnow | Official JSON feeds | Remote jobs (filtered to India-eligible) | none |
+| LinkedIn, Naukri | Best-effort public pages | Indian city jobs | none |
+| Jobicy | Official API, fetched at most hourly | Remote jobs; kept only when open to India | none |
+| Remote OK | Official API, fetched at most hourly; links back to Remote OK | Remote jobs; kept only when open to India | none |
+| Adzuna (`in`) | Official API | Indian city and remote jobs aggregated from many boards | `JOB_AGENT_ADZUNA_APP_ID`, `JOB_AGENT_ADZUNA_APP_KEY` |
+| Careerjet (`en_IN`) | Official v4 API (basic auth); needs the searching user's IP and browser | Indian city jobs | `JOB_AGENT_CAREERJET_API_KEY` |
+| Jooble | Official API | Indian city jobs aggregated from many boards | `JOB_AGENT_JOOBLE_API_KEY` |
+
+Keyed sources switch on only when their key is set. All partner adapters (`partner_sources.py`) honour the run's search budget, stop after two failed requests, cache responses, never log URLs (which may contain keys), and keep the provider's attribution and canonical link. Adzuna, Careerjet and Jooble links are click-tracking redirects, so link validation skips them. Aggregator descriptions are short snippets, so those leads more often show "Experience requirement unverified".
 
 - Remotive uses its documented remote-jobs JSON feed. Results retain the feed ID, publication date, salary text, job type, category, attribution, and the feed's documented delay metadata.
 - Arbeitnow uses its documented paginated job-board JSON feed. Results retain the slug, creation date, remote flag, tags, and an expiry inferred from the board's 30-day removal policy.
@@ -49,3 +61,19 @@ portals = ["remotive", "arbeitnow", "linkedin", "naukri"]
 ```
 
 Disable link checks only in constrained development environments. Public feeds and HTML portals can change, rate-limit, or become unavailable, so adapters fail independently and the remaining sources continue to run.
+
+## Recommendation Quality
+
+`relevance_corpus.py` holds six labelled candidate profiles (fresher ML engineer, data analyst, Java backend, senior data engineer, fresher frontend, DevOps) and realistic postings, including traps: similar titles (Data Entry Operator), wrong city, wrong seniority, foreign-only remote, technology-named titles (React JS Developer, Power BI Developer). Run:
+
+```bash
+python scripts/evaluate_job_relevance.py
+```
+
+It reports precision, recall, nDCG@10 and leaks (postings that must never be recommended) and exits non-zero when a gate fails (precision ≥ 0.95, recall ≥ 0.9, nDCG@10 ≥ 0.9, zero leaks). `tests/test_relevance.py` enforces the same gates, repeats them with every LinkedIn description blocked, and runs the corpus through the real `JobHuntingAgent.search` pipeline. Add new labelled cases whenever a bad or missing recommendation is reported.
+
+Role matching understands role families: a title naming a technology counts for the candidate's target role only when that technology is one of the candidate's own skills (a Frontend Developer with React matches "React JS Developer"; a Java backend candidate is not matched to "Python Developer").
+
+## Additional Skills
+
+Every lead gets an `additional_skills_status` in `source_metadata`: `added`, `already_listed`, `no_evidence`, `no_requirements` or `description_unavailable`, and the dashboard shows the matching explanation instead of a blank cell. An addition is a skill the posting asks for, that the candidate's own resume text supports, and that the base ATS resume's skills section does not already show. Resumes without a Skills heading are compared against the skills section the builder generates for them.

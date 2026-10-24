@@ -74,13 +74,34 @@ def write_pdf_resume(
                 story.append(Paragraph(_escape(item.removeprefix("ROLE::")), role_style))
             elif item.startswith("META::"):
                 story.append(Paragraph(_escape(item.removeprefix("META::")), meta_style))
-            elif heading in {"PROFESSIONAL SUMMARY", "TEACHING VISION", "TECHNICAL SKILLS", "CORE COMPETENCIES", "SOFT SKILLS"}:
-                story.append(Paragraph(_escape(item), body_style))
+            elif heading in {"PROFESSIONAL SUMMARY", "TEACHING VISION", "CORE COMPETENCIES"} or heading.endswith("SKILLS"):
+                story.append(Paragraph(_styled_resume_text(heading, item), body_style))
             else:
-                story.append(Paragraph(_escape(item.removeprefix("BULLET::")), bullet_style, bulletText="•"))
+                story.append(Paragraph(_styled_resume_text(heading, item.removeprefix("BULLET::")), bullet_style, bulletText="•"))
         story.append(Spacer(1, max(0, 1.5 - compact * 0.4)))
     document.build(story)
     _remove_blank_trailing_pages(path)
+
+
+def highlighted_resume_parts(heading: str, value: str) -> tuple[str, str]:
+    """Return the scannable label/title and the remaining ATS-readable text."""
+    if heading.endswith("SKILLS") and ":" in value:
+        prefix, suffix = value.split(":", 1)
+        if prefix.strip() and len(prefix.split()) <= 6:
+            return prefix + ":", suffix
+    if heading in {"EDUCATION", "PROJECTS", "PUBLICATIONS & RESEARCH"}:
+        start = 0
+        if heading == "EDUCATION" and re.match(r"^(?:19|20)\d{2}(?:\s*[-–]\s*(?:19|20)\d{2})?:", value):
+            start = value.find(":") + 1
+        separator = value.find(" - ", start)
+        if separator > 0:
+            return value[:separator], value[separator:]
+    return "", value
+
+
+def _styled_resume_text(heading: str, value: str) -> str:
+    prefix, suffix = highlighted_resume_parts(heading, value)
+    return f"<b>{_escape(prefix)}</b>{_escape(suffix)}" if prefix else _escape(value)
 
 
 def _remove_blank_trailing_pages(path: Path) -> None:

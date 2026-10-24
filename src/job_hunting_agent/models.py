@@ -81,6 +81,7 @@ class JobLead:
     source_validated: bool = False
     source_metadata: dict[str, object] = field(default_factory=dict)
     tailored_resume_id: str = ""
+    additional_skills: tuple[str, ...] = ()
 
     @property
     def stable_id(self) -> str:

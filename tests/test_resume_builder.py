@@ -5,7 +5,7 @@ from docx import Document
 from pypdf import PdfReader
 
 from job_hunting_agent.models import AtsReport, CandidateProfile, JobLead, Resume
-from job_hunting_agent.resume_builder import _contact_line, _resume_sections, write_improved_resume
+from job_hunting_agent.resume_builder import _contact_line, _resume_sections, write_improved_resume, write_tailored_resume
 from job_hunting_agent.resume_validation import validate_factual_consistency, validate_section_semantics
 
 
@@ -538,6 +538,85 @@ def test_builder_creates_evidence_preserving_resume_for_each_job(tmp_path: Path)
     assert Path(tailored["pdf_path"]).exists()
 
 
+def test_interleaved_education_rows_keep_their_own_grades_and_parentheses() -> None:
+    from job_hunting_agent.resume_builder import _education_section_items
+
+    rows = _education_section_items(
+        "2022 - 2026\nCGPA - 9.38 (till 7\nSemester)\nth\n"
+        "B.Tech in CSE\nExample University\n"
+        "2022\nMarks (in percentage)-\n94.4%\nHigher Secondary (XII)\n"
+        "Example High School\n"
+        "2020\nMarks (in percentage)-\n93.4%\nSecondary (X)\n"
+        "Example High School"
+    )
+    assert len(rows) == 3
+    assert "CGPA 9.38 (till 7th Semester)" in rows[0]
+    assert "94.4%" in rows[1] and "94.4%" not in rows[0]
+    assert "93.4%" in rows[2] and "93.4%" not in rows[1]
+    assert rows[1].count("Example High School") == rows[2].count("Example High School") == 1
+
+
+def test_wrapped_parenthetical_role_and_company_keep_balanced_punctuation() -> None:
+    from job_hunting_agent.resume_builder import _structured_experience_entries
+
+    entries = _structured_experience_entries(
+        "EXPERIENCE\n"
+        "Digital Clinical Data Management Intern\n"
+        "(Research Project) | Example Health (Nov\n2025 - Jan 2026)\n"
+        "Built a clinical data workflow."
+    )
+    assert len(entries) == 1
+    assert entries[0]["title"] == "Digital Clinical Data Management Intern (Research Project)"
+    assert entries[0]["company"] == "Example Health"
+    assert entries[0]["dates"] == "Nov 2025 - Jan 2026"
+
+
+def test_job_skills_are_evidenced_categorized_and_disclosed(tmp_path: Path) -> None:
+    from job_hunting_agent.resume_builder import job_skill_additions
+
+    resume = Resume(
+        path="resume.txt",
+        text=(
+            "PROJECTS\nBuilt FinBERT sentiment models with DSPy optimization.\n"
+            "EXPERIENCE\nPerformed EDA on production data.\n"
+            "SKILLS\nAI/ML: Machine Learning\nAnalytics: Pandas\n"
+            "NLP: NLTK\nEDUCATION\nB.Tech in Computer Science"
+        ),
+        inferred_skills=("Machine Learning", "Pandas", "NLTK", "FinBERT", "DSPy", "EDA"),
+        inferred_roles=("AI Engineer",),
+        sections={
+            "projects": "Built FinBERT sentiment models with DSPy optimization.",
+            "experience": "Performed EDA on production data.",
+            "skills": "AI/ML: Machine Learning\nAnalytics: Pandas\nNLP: NLTK",
+            "education": "B.Tech in Computer Science",
+        },
+    )
+    profile = CandidateProfile(name="Jane Doe", target_roles=("AI Engineer",))
+    job = JobLead(
+        "api", "AI Engineer", "Example", "Remote", "https://example.com/job",
+        "Use FinBERT, DSPy, and EDA. Kubernetes experience preferred.",
+    )
+    additions = job_skill_additions(resume, profile, job)
+    assert set(additions) == {"FinBERT", "DSPy", "EDA"}
+    artifact = write_tailored_resume(resume, AtsReport(80, (), (), ()), profile, tmp_path, job)
+    text = "\n".join(paragraph.text for paragraph in Document(artifact["docx_path"]).paragraphs)
+    assert "AI/ML: DSPy, Machine Learning" in text
+    assert "Analytics: EDA, Pandas" in text
+    assert "NLP: FinBERT, NLTK" in text
+    assert "Additional Skills:" not in text
+    assert "Kubernetes" not in text
+    assert set(artifact["tailoring"]["additional_skills_added"]) == set(additions)
+
+
+def test_skill_merging_does_not_confuse_sql_with_mysql_or_restore_extra_heading() -> None:
+    from job_hunting_agent.resume_builder import _skill_section_lines
+
+    lines = _skill_section_lines("Databases: MySQL\nAdditional Skills: Git", ["SQL", "Git"])
+    assert "Databases: MySQL, SQL" in lines
+    assert "Git" in lines
+    assert all("Additional Skills:" not in line for line in lines)
+
+
 def test_factual_and_section_validators_block_unsupported_output() -> None:
     resume = Resume("resume.txt", "Built Python pipelines for reporting.", ("Python",), ("Data Engineer",))
     profile = CandidateProfile(target_roles=("Data Engineer",), skills=("Python",))
@@ -724,3 +803,98 @@ def test_builder_preserves_projects_skills_languages_and_achievements_after_colu
     assert sections["LANGUAGES"] == ["English", "Hindi", "Bengali"]
     assert sections["ACHIEVEMENTS"] == ["GATE Qualified (2025)", "200+ Leetcode problems solved."]
     assert any("Programming: C, Java, Python" in item for item in sections["TECHNICAL SKILLS"])
+
+
+def test_job_only_promotes_new_skill_when_resume_evidence_supports_it() -> None:
+    from job_hunting_agent.resume_builder import job_skill_additions, _resume_sections
+
+    resume = Resume(
+        "resume.txt", "SKILLS\nPython\nPROJECTS\nBuilt a RAG search prototype with Python.",
+        ("Python",), ("AI Developer",),
+        {"skills": "Python", "projects": "Built a RAG search prototype with Python."},
+    )
+    profile = CandidateProfile(target_roles=("AI Developer",), skills=("Python",))
+    supported = JobLead("test", "AI Developer", "A", "Kolkata", "https://example/a",
+                        "Required Skills: Python, RAG.")
+    unsupported = JobLead("test", "AI Developer", "B", "Kolkata", "https://example/b",
+                          "Required Skills: Python, AWS Bedrock.")
+    assert job_skill_additions(resume, profile, supported) == ("RAG",)
+    assert job_skill_additions(resume, profile, unsupported) == ()
+    sections = dict(_resume_sections(resume, AtsReport(80, (), (), ()), profile, job=supported))
+    assert any("RAG" in line for line in sections["TECHNICAL SKILLS"])
+
+
+def test_job_expanded_eda_phrase_promotes_resume_backed_eda() -> None:
+    from job_hunting_agent.resume_builder import job_skill_additions
+
+    resume = Resume(
+        "resume.txt", "SKILLS\nPython\nEXPERIENCE\nPerformed EDA on customer data.",
+        ("Python", "EDA"), ("Data Scientist",),
+        {"skills": "Python", "experience": "Performed EDA on customer data."},
+    )
+    profile = CandidateProfile(skills=("Python",))
+    job = JobLead("api", "Data Scientist Intern", "Example", "Remote worldwide", "https://example/job",
+                  "Required Skills: Python. Perform exploratory data analysis on datasets.")
+    assert job_skill_additions(resume, profile, job) == ("EDA",)
+
+
+def test_multiple_dated_roles_keep_their_own_dates_and_bullets_when_tailored(tmp_path: Path) -> None:
+    experience = (
+        "Senior Data Engineer, FinEdge Analytics Pvt Ltd, Pune | Apr 2022 - Present\n"
+        "• Designed Kafka streaming pipelines processing 2 TB/day.\n"
+        "• Migrated 120 Airflow DAGs to Databricks, lowering cost by 35%.\n"
+        "Data Engineer, RetailCo India, Bengaluru | Jul 2020 - Mar 2022\n"
+        "• Developed PySpark ETL jobs on AWS EMR and S3 for 30M daily transactions.\n"
+    )
+    resume = Resume(
+        path="resume.txt",
+        text="ROHIT VERMA\nrohit@example.com | +91 91234 56789\nSKILLS\nPython, Spark\nEXPERIENCE\n" + experience,
+        inferred_skills=("Python", "Spark", "Kafka", "Airflow", "PySpark", "AWS", "S3", "ETL"),
+        inferred_roles=("Data Engineer",),
+        sections={"contact": "ROHIT VERMA\nrohit@example.com | +91 91234 56789", "skills": "Python, Spark", "experience": experience},
+    )
+    job = JobLead("api", "Data Engineer", "Example", "Pune", "https://example.com/job", "PySpark ETL on AWS S3 with Kafka.")
+    artifact = write_tailored_resume(resume, AtsReport(80, (), (), ()), CandidateProfile(experience_years=5), tmp_path, job)
+    lines = [p.text for p in Document(artifact["docx_path"]).paragraphs if p.text.strip()]
+    text = "\n".join(lines)
+    assert "Apr 2022 - Present" in text and "Jul 2020 - Mar 2022" in text
+    retail = lines.index(next(line for line in lines if line.startswith("RetailCo India")))
+    assert any("PySpark ETL" in line for line in lines[retail:])
+    assert not any("PySpark ETL" in line for line in lines[:retail])
+    assert all("Migrated 120 Airflow" not in line for line in lines[retail:])
+
+
+def test_programming_languages_label_is_not_rendered_as_spoken_languages(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text="JANE DOE\njane@example.com | +91 98765 43210\nSKILLS\nLanguages: Python, C++, SQL\nLANGUAGES\nEnglish, Hindi",
+        inferred_skills=("Python", "C++", "SQL"),
+        inferred_roles=("Software Engineer",),
+        sections={
+            "contact": "JANE DOE\njane@example.com | +91 98765 43210",
+            "skills": "Languages: Python, C++, SQL",
+            "languages": "English, Hindi",
+        },
+    )
+    artifact = write_improved_resume(resume, AtsReport(80, (), (), ()), CandidateProfile(), tmp_path)
+    lines = [p.text for p in Document(artifact["docx_path"]).paragraphs if p.text.strip()]
+    spoken = lines[lines.index("LANGUAGES") + 1:]
+    assert "Python" not in " ".join(spoken)
+    assert "English" in " ".join(spoken)
+
+
+def test_uncategorised_job_additions_get_a_labelled_line_and_are_reported(tmp_path: Path) -> None:
+    resume = Resume(
+        path="resume.txt",
+        text="JANE DOE\njane@example.com\nSKILLS\nLanguages: Python\nPROJECTS\nValidated data with Great Expectations.",
+        inferred_skills=("Python", "Great Expectations"),
+        inferred_roles=("Data Engineer",),
+        sections={"contact": "JANE DOE\njane@example.com", "skills": "Languages: Python", "projects": "Validated data with Great Expectations."},
+    )
+    job = JobLead("api", "Data Engineer", "Example", "Remote", "https://example.com/job", "Required: Python, Great Expectations.",
+                  additional_skills=("Great Expectations",))
+    artifact = write_tailored_resume(resume, AtsReport(80, (), (), ()), CandidateProfile(), tmp_path, job)
+    text = "\n".join(p.text for p in Document(artifact["docx_path"]).paragraphs)
+    assert "Additional Skills: Great Expectations" in text
+    assert artifact["tailoring"]["additional_skills_added"] == ["Great Expectations"]
+    assert artifact["tailoring"]["additional_skills_missing_from_output"] == []

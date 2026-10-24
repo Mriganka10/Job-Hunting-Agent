@@ -41,6 +41,17 @@ def test_interview_modes_use_distinct_category_strategies_without_duplicates() -
         assert len(prompts) == len(set(prompts))
 
 
+def test_job_skill_additions_survive_client_pagination() -> None:
+    payload = {
+        "jobs": [{"portal": "test", "title": "AI Engineer", "company": "Example", "location": "Remote", "url": "https://example.com/job", "additional_skills": ["FinBERT", "EDA"]}],
+        "applications": [],
+        "improved_resume": {},
+    }
+    client = web._client_run_payload(payload, run_id=7)
+    assert client["jobs"][0]["additional_skills"] == ["FinBERT", "EDA"]
+    assert web._job_from_payload(client["jobs"][0]).additional_skills == ("FinBERT", "EDA")
+
+
 def test_question_selection_prefers_unseen_prompts_and_preserves_topic_diversity() -> None:
     groups = web._mock_interview_questions_for(("Data Engineer",), ("Python", "SQL", "AWS"))
     first = _interview_question_sequence(groups, 10, "deep", seed="session-one")
@@ -308,6 +319,8 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "Role &amp; Location" in response.text or "Role & Location" in response.text
     assert "job.match_score" in response.text
     assert "job.match_reasons" in response.text
+    assert "<th>Additional Skills</th>" in response.text
+    assert "job.additional_skills" in response.text
     assert "show-more-jobs" in response.text
     assert "/jobs?${query.toString()}" in response.text
     assert "activePayload.job_page.next_cursor" in response.text

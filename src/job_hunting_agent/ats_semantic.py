@@ -50,10 +50,23 @@ def semantic_similarity(left: str, right: str) -> SemanticMatch:
 
 
 def semantic_similarities(left: str, rights: list[str]) -> list[float]:
-    """Batch local embeddings while retaining the normal provider fallback chain."""
+    """Score one text against many, batching every provider.
+
+    Ranking used to call the embedding API once per job lead (re-sending the
+    resume each time, 30 s timeout each), so a slow or failing endpoint could
+    stall a run for minutes. Now: one batched API request; if it fails, fall
+    back to local scoring for the whole batch without retrying per job.
+    """
+    if not rights:
+        return []
+    if not left.strip():
+        return [0.0 for _ in rights]
+    remote = _remote_embedding_batch(left, rights)
+    if remote is not None:
+        return remote
     model = _sentence_transformer_model()
-    if model is None or not left.strip():
-        return [semantic_similarity(left, right).similarity for right in rights]
+    if model is None:
+        return [round(_tfidf_similarity(left, right), 4) if right.strip() else 0.0 for right in rights]
     texts = [left[:24000], *(right[:24000] for right in rights)]
     keys = [(id(model), text) for text in texts]
     try:
@@ -66,7 +79,37 @@ def semantic_similarities(left: str, rights: list[str]) -> list[float]:
             vectors = [_embedding_cache[key] for key in keys]
         return [round(_cosine(list(vectors[0]), list(vector)), 4) for vector in vectors[1:]]
     except (RuntimeError, TypeError, ValueError):
-        return [semantic_similarity(left, right).similarity for right in rights]
+        return [round(_tfidf_similarity(left, right), 4) if right.strip() else 0.0 for right in rights]
+
+
+def _remote_embedding_batch(left: str, rights: list[str], chunk_size: int = 64) -> list[float] | None:
+    """Embed the resume once and the job texts in a few batched requests."""
+    api_key = os.getenv("JOB_AGENT_EMBEDDING_API_KEY", "").strip()
+    endpoint = os.getenv("JOB_AGENT_EMBEDDING_ENDPOINT", "").strip()
+    if not api_key or not endpoint:
+        return None
+    model = os.getenv("JOB_AGENT_EMBEDDING_MODEL", "text-embedding-3-small").strip()
+    texts = [left[:24000], *(right[:8000] or " " for right in rights)]
+    vectors: list[list[float]] = []
+    try:
+        for start in range(0, len(texts), chunk_size):
+            chunk = texts[start:start + chunk_size]
+            response = http_client.post(
+                endpoint,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": model, "input": chunk},
+                timeout=(5, 20),
+            )
+            response.raise_for_status()
+            data = sorted(response.json().get("data", []), key=lambda item: item.get("index", 0))
+            if len(data) != len(chunk):
+                return None
+            vectors.extend(item.get("embedding", []) for item in data)
+    except (requests.RequestException, KeyError, TypeError, ValueError, AttributeError):
+        return None
+    if len(vectors) != len(texts) or not all(vectors):
+        return None
+    return [round(_cosine(vectors[0], vector), 4) for vector in vectors[1:]]
 
 
 def _remote_embedding_similarity(left: str, right: str) -> SemanticMatch | None:
@@ -80,7 +123,7 @@ def _remote_embedding_similarity(left: str, right: str) -> SemanticMatch | None:
             endpoint,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={"model": model, "input": [left[:24000], right[:24000]]},
-            timeout=30,
+            timeout=(5, 20),
         )
         response.raise_for_status()
         data = response.json().get("data", [])

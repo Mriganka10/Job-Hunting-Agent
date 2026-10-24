@@ -12,6 +12,7 @@ import smtplib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
 from xml.sax.saxutils import escape as xml_escape
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
@@ -21,14 +22,21 @@ from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
-from fastapi import BackgroundTasks, Body, Cookie, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Body, Cookie, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from .agent import JobHuntingAgent
-from .config import AppConfig, ApplicationConfig, EmailConfig, SearchConfig
+from .config import DEFAULT_PORTALS, AppConfig, ApplicationConfig, EmailConfig, SearchConfig
 from .db import (
     active_schedules,
+    best_mock_test_percent,
+    complete_mock_test,
+    create_mock_test,
+    latest_mock_tests,
+    mock_test_question_history,
+    mock_test_record,
     complete_mock_interview_session,
     consume_valid_otp,
     create_mock_interview_session,
@@ -56,6 +64,9 @@ from .models import AtsReport, CandidateProfile, JobLead, Resume
 from .job_pagination import DEFAULT_JOB_PAGE_SIZE, paginate_jobs
 from .interview_evaluator import evaluate_interview
 from .interview_questions import build_question_groups, select_question_sequence
+from .interview_job_context import build_job_fit_group, job_interview_focus, select_job_interview_sequence
+from .partner_sources import REQUEST_CONTEXT, RequestContext, active_job_sources, partner_status
+from .mock_test import DIFFICULTIES as MOCK_TEST_DIFFICULTIES, LENGTHS as MOCK_TEST_LENGTHS, build_mock_test, grade_mock_test, profile_terms, public_questions
 from .interview_evaluator import evaluate_interview
 from .performance_cache import cached_document, document_cache_key
 from .resume_builder import write_base_resume, write_tailored_resume
@@ -92,6 +103,7 @@ DOCUMENT_EXECUTOR = ThreadPoolExecutor(max_workers=DOCUMENT_WORKERS, thread_name
 _document_tasks: set[str] = set()
 _document_tasks_lock = threading.Lock()
 _interview_start_lock = threading.Lock()
+_mock_test_start_lock = threading.Lock()
 
 
 class DailyScheduler:
@@ -478,6 +490,14 @@ def mock_interview_page(job_agent_session: str | None = Cookie(default=None, ali
     return HTMLResponse(_mock_interview_page(user_email))
 
 
+@app.get("/mock-test", response_class=HTMLResponse)
+def mock_test_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
+    user_email = current_user_email(job_agent_session)
+    if not user_email:
+        return RedirectResponse("/login", status_code=303)
+    return HTMLResponse(_mock_test_page(user_email))
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
     if current_user_email(job_agent_session):
@@ -612,12 +632,24 @@ def paginated_run_jobs(
 
 
 @app.get("/api/mock-interview/questions")
-def mock_interview_questions(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+def mock_interview_questions(
+    job_id: str = Query(default=""),
+    run_id: int = Query(default=0),
+    job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict:
     user_email = require_user(job_agent_session)
     profile = _profile_for_user(user_email)
     latest = next(iter(latest_runs(user_email, limit=1)), None)
     payload = (latest or {}).get("payload") or {}
-    return _mock_interview_payload(profile, payload)
+    interview = _mock_interview_payload(profile, payload)
+    job = _mock_test_job(user_email, job_id.strip(), run_id or None) if job_id.strip() else None
+    if job_id.strip() and job is None:
+        raise HTTPException(status_code=404, detail="Job lead not found in your recent runs.")
+    if job is not None:
+        interview = _job_interview_payload(job, interview)
+    # The same job leads the Mock Test offers, so both features stay in step.
+    interview["jobs"] = [_mock_test_job_summary(item, item_run_id) for item_run_id, item in _mock_test_candidate_jobs(user_email)]
+    return interview
 
 
 @app.post("/api/mock-interview/start")
@@ -630,6 +662,12 @@ def start_mock_interview(
     latest = next(iter(latest_runs(user_email, limit=1)), None)
     latest_payload = (latest or {}).get("payload") or {}
     interview = _mock_interview_payload(profile, latest_payload)
+    job_id = str(payload.get("job_id") or "").strip()
+    job = _mock_test_job(user_email, job_id, int(payload.get("run_id") or 0) or None) if job_id else None
+    if job_id and job is None:
+        raise HTTPException(status_code=404, detail="Job lead not found in your recent runs.")
+    if job is not None:
+        interview = _job_interview_payload(job, interview)
     region = str(payload.get("region") or "India")
     voice = _accent_for_region(region)
     accent = voice["label"]
@@ -643,12 +681,17 @@ def start_mock_interview(
     # this process cannot receive the same unseen set.
     with _interview_start_lock:
         history = mock_interview_question_history(user_email)
-        questions = _interview_question_sequence(
-            interview["groups"],
-            question_limit,
-            interview_mode,
-            previous_questions=history,
-        )
+        if interview.get("job_fit_group"):
+            questions = select_job_interview_sequence(
+                interview["job_fit_group"], interview["groups"], question_limit, interview_mode, previous_questions=history,
+            )
+        else:
+            questions = _interview_question_sequence(
+                interview["groups"],
+                question_limit,
+                interview_mode,
+                previous_questions=history,
+            )
         session_id = create_mock_interview_session(
             user_email,
             region=region,
@@ -656,6 +699,9 @@ def start_mock_interview(
             roles=tuple(interview["roles"]),
             skills=tuple(interview["skills"]),
             questions=questions,
+            job_id=job_id if job else "",
+            job_title=str((job or {}).get("title") or ""),
+            company=str((job or {}).get("company") or ""),
         )
     return {
         "session_id": session_id,
@@ -666,6 +712,7 @@ def start_mock_interview(
         "interview_mode": interview_mode,
         "roles": interview["roles"],
         "skills": interview["skills"],
+        "job": interview.get("job"),
         "questions": questions,
         "selection": {
             "new_questions": sum(not question["previously_asked"] for question in questions),
@@ -714,9 +761,121 @@ def mock_interview_history(job_agent_session: str | None = Cookie(default=None, 
     return {"sessions": latest_mock_interviews(user_email, limit=3)}
 
 
+@app.get("/api/mock-test/options")
+def mock_test_options(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    """Job leads the user can take a test for, newest run first."""
+    user_email = require_user(job_agent_session)
+    profile = _profile_for_user(user_email)
+    return {
+        "jobs": [_mock_test_job_summary(job, run_id) for run_id, job in _mock_test_candidate_jobs(user_email)],
+        "profile": {"target_roles": profile_terms(profile.get("target_roles")), "skills": profile_terms(profile.get("skills"))},
+        "lengths": {name: count for name, count in MOCK_TEST_LENGTHS.items()},
+        "difficulties": list(MOCK_TEST_DIFFICULTIES),
+    }
+
+
+@app.post("/api/mock-test/start")
+def start_mock_test(
+    payload: Annotated[dict, Body()],
+    job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict:
+    user_email = require_user(job_agent_session)
+    length = str(payload.get("length") or "standard").strip().lower()
+    difficulty = str(payload.get("difficulty") or "mixed").strip().lower()
+    if length not in MOCK_TEST_LENGTHS:
+        raise HTTPException(status_code=400, detail="Test length must be quick, standard, or full.")
+    if difficulty not in MOCK_TEST_DIFFICULTIES:
+        raise HTTPException(status_code=400, detail="Difficulty must be mixed, easy, medium, or hard.")
+    job_id = str(payload.get("job_id") or "").strip()
+    run_id = int(payload.get("run_id") or 0) or None
+    job: dict | None = None
+    if job_id:
+        job = _mock_test_job(user_email, job_id, run_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job lead not found in your recent runs.")
+    profile = _profile_for_user(user_email)
+    with _mock_test_start_lock:
+        test = build_mock_test(
+            job,
+            profile,
+            length=length,
+            difficulty=difficulty,
+            seen_question_ids=mock_test_question_history(user_email),
+            seed=secrets.token_hex(8),
+        )
+        test_id = create_mock_test(
+            user_email,
+            run_id=run_id if job else None,
+            job_id=job_id,
+            job_title=str((job or {}).get("title") or "General practice"),
+            company=str((job or {}).get("company") or ""),
+            length=length,
+            difficulty=difficulty,
+            topics=test["topics"],
+            questions=test["questions"],
+            time_limit_seconds=test["time_limit_seconds"],
+        )
+    record = mock_test_record(user_email, test_id) or {}
+    return _mock_test_client_payload(record)
+
+
+@app.post("/api/mock-test/submit")
+def submit_mock_test(
+    payload: Annotated[dict, Body()],
+    job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict:
+    user_email = require_user(job_agent_session)
+    test_id = int(payload.get("test_id") or 0)
+    if not test_id:
+        raise HTTPException(status_code=400, detail="Test id is required.")
+    record = mock_test_record(user_email, test_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Mock test not found.")
+    if record.get("status") == "completed":
+        # A test is graded once; resubmitting returns the original scorecard.
+        return {**_mock_test_client_payload(record), "already_submitted": True}
+    answers = payload.get("answers") or {}
+    if not isinstance(answers, (dict, list)):
+        raise HTTPException(status_code=400, detail="Answers must be an object of question id to option index.")
+    # Elapsed time is measured on the server from the stored start time, so a
+    # paused or edited browser clock cannot hide an over-time submission.
+    started = _parse_iso_time(record.get("started_at"))
+    elapsed = (datetime.now(timezone.utc) - started).total_seconds() if started else float(payload.get("elapsed_seconds") or 0)
+    job = _mock_test_job(user_email, str(record.get("job_id") or ""), record.get("run_id")) if record.get("job_id") else None
+    previous_best = best_mock_test_percent(user_email, str(record.get("job_id") or ""), exclude_id=test_id) if record.get("job_id") else None
+    scorecard = grade_mock_test(
+        record.get("questions") or [],
+        answers,
+        elapsed_seconds=elapsed,
+        time_limit_seconds=int(record.get("time_limit_seconds") or 0),
+        question_seconds=payload.get("question_seconds") if isinstance(payload.get("question_seconds"), dict) else None,
+        job=job or {"title": record.get("job_title")},
+        previous_best=previous_best,
+    )
+    stored_answers = {item["id"]: item["selected_index"] for item in scorecard["review"]}
+    saved = complete_mock_test(user_email, test_id, answers=stored_answers, scorecard=scorecard) or record
+    return _mock_test_client_payload(saved)
+
+
+@app.get("/api/mock-test/history")
+def mock_test_history(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    return {"tests": [_mock_test_history_item(record) for record in latest_mock_tests(user_email, limit=10)]}
+
+
+@app.get("/api/mock-test/{test_id}")
+def mock_test_detail(test_id: int, job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    record = mock_test_record(user_email, test_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Mock test not found.")
+    return _mock_test_client_payload(record)
+
+
 @app.post("/api/run")
 async def run_now(
     background_tasks: BackgroundTasks,
+    request: Request,
     resume: Annotated[UploadFile | None, File()] = None,
     job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     name: Annotated[str, Form()] = "",
@@ -753,7 +912,13 @@ async def run_now(
     ))
     _save_profile(user_email, config, stored_resume)
     try:
-        result = run_agent(str(stored_resume.local_path), config, trigger="manual", user_email=user_email)
+        # The agent does blocking network and CPU work. Running it in the thread
+        # pool keeps this async endpoint from freezing every other request
+        # (login, dashboards, other users) on the same worker while it runs.
+        # Some partner APIs (Careerjet) require the searching user's IP and
+        # browser. The context variable is copied into the worker threads.
+        REQUEST_CONTEXT.set(_request_context(request))
+        result = await run_in_threadpool(run_agent, str(stored_resume.local_path), config, trigger="manual", user_email=user_email)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if stored_resume.uri:
@@ -835,7 +1000,8 @@ def stop_scheduler(job_agent_session: Annotated[str | None, Cookie(alias=SESSION
 
 
 def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user_email: str = "") -> dict:
-    report, jobs, results, improved_resume = JobHuntingAgent(config).run(resume_path, build_documents=not bool(user_email))
+    agent = JobHuntingAgent(config)
+    report, jobs, results, improved_resume = agent.run(resume_path, build_documents=not bool(user_email))
     application_summary = _application_summary(results)
     generated_at = datetime.now().isoformat(timespec="seconds")
     improved_resume = _publish_improved_resume(improved_resume, user_email or config.profile.email or "anonymous", generated_at)
@@ -847,6 +1013,7 @@ def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user
         "output_dir": str(Path(config.application.data_dir).resolve()),
         "generated_at": generated_at,
         "trigger": trigger,
+        "timings": dict(agent.timings),
         "improved_resume": improved_resume,
         "_config_snapshot": {
             "profile": asdict(config.profile),
@@ -1161,13 +1328,14 @@ def _config_from_snapshot(source: dict) -> AppConfig:
     email = dict(source.get("email") or {})
     for field in ("target_roles", "locations", "skills"):
         profile[field] = tuple(profile.get(field, ()))
-    search["portals"] = tuple(search.get("portals", ("remotive", "arbeitnow", "linkedin", "naukri")))
+    search["portals"] = tuple(search.get("portals", DEFAULT_PORTALS))
     return AppConfig(CandidateProfile(**profile), SearchConfig(**search), ApplicationConfig(**application), EmailConfig(**email))
 
 
 def _job_from_payload(source: dict) -> JobLead:
     values = dict(source)
     values["match_reasons"] = tuple(values.get("match_reasons", ()))
+    values["additional_skills"] = tuple(values.get("additional_skills", ()))
     return JobLead(**values)
 
 
@@ -1413,6 +1581,121 @@ def _client_run_payload(payload: dict, run_id: int) -> dict:
     return client_payload
 
 
+def _mock_test_candidate_jobs(user_email: str, run_limit: int = 3) -> list[tuple[int, dict]]:
+    """Jobs from the user's recent runs, newest first and de-duplicated."""
+    seen: set[str] = set()
+    jobs: list[tuple[int, dict]] = []
+    for run in latest_runs(user_email, limit=run_limit):
+        run_id = int(run.get("payload_run_id") or run.get("id") or 0)
+        for job in (run.get("payload") or {}).get("jobs") or []:
+            if not isinstance(job, dict) or not job.get("title"):
+                continue
+            stable_id = _mock_test_job_id(job)
+            if stable_id in seen:
+                continue
+            seen.add(stable_id)
+            jobs.append((run_id, job))
+            if len(jobs) >= 60:
+                return jobs
+    return jobs
+
+
+def _mock_test_job_id(job: dict) -> str:
+    return f"{job.get('portal') or ''}:{job.get('source_id') or job.get('url') or ''}".lower()
+
+
+def _mock_test_job(user_email: str, job_id: str, run_id: int | None) -> dict | None:
+    if not job_id:
+        return None
+    if run_id:
+        run = run_for_user(user_email, int(run_id))
+        for job in ((run or {}).get("payload") or {}).get("jobs") or []:
+            if isinstance(job, dict) and _mock_test_job_id(job) == job_id:
+                return job
+    return next((job for _, job in _mock_test_candidate_jobs(user_email) if _mock_test_job_id(job) == job_id), None)
+
+
+def _mock_test_job_summary(job: dict, run_id: int) -> dict:
+    metadata = job.get("source_metadata") or {}
+    return {
+        "job_id": _mock_test_job_id(job),
+        "run_id": run_id,
+        "title": job.get("title") or "",
+        "company": job.get("company") or "",
+        "location": job.get("location") or "",
+        "portal": job.get("portal") or "",
+        "match_score": job.get("match_score") or 0,
+        "skills": list(dict.fromkeys([
+            *list(metadata.get("matched_skills") or ()),
+            *list(job.get("additional_skills") or ()),
+            *list(metadata.get("missing_required_skills") or ()),
+        ]))[:10],
+    }
+
+
+def _mock_test_client_payload(record: dict) -> dict:
+    """Shape a stored test for the browser; the key is included only after grading."""
+    completed = record.get("status") == "completed"
+    payload = {
+        "test_id": record.get("id"),
+        "status": record.get("status"),
+        "job_id": record.get("job_id") or "",
+        "run_id": record.get("run_id"),
+        "job_title": record.get("job_title") or "General practice",
+        "company": record.get("company") or "",
+        "length": record.get("length"),
+        "difficulty": record.get("difficulty"),
+        "topics": record.get("topics") or [],
+        "time_limit_seconds": int(record.get("time_limit_seconds") or 0),
+        "started_at": record.get("started_at"),
+        "completed_at": record.get("completed_at"),
+        "questions": public_questions(record.get("questions") or []),
+    }
+    if completed:
+        payload["scorecard"] = record.get("scorecard") or {}
+    else:
+        started = _parse_iso_time(record.get("started_at"))
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds() if started else 0
+        payload["remaining_seconds"] = max(0, int(payload["time_limit_seconds"] - elapsed))
+    return payload
+
+
+def _mock_test_history_item(record: dict) -> dict:
+    scorecard = record.get("scorecard") or {}
+    return {
+        "test_id": record.get("id"),
+        "job_title": record.get("job_title") or "General practice",
+        "company": record.get("company") or "",
+        "length": record.get("length"),
+        "difficulty": record.get("difficulty"),
+        "score": record.get("score"),
+        "total": record.get("total"),
+        "percent": record.get("percent"),
+        "grade": scorecard.get("grade", ""),
+        "readiness": (scorecard.get("readiness") or {}).get("label", ""),
+        "completed_at": record.get("completed_at"),
+    }
+
+
+def _request_context(request: Request) -> RequestContext:
+    """End-user IP/User-Agent; behind CloudFront/ALB the first forwarded hop."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    user_ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "")
+    return RequestContext(user_ip=user_ip[:64], user_agent=request.headers.get("user-agent", "")[:300])
+
+
+def _parse_iso_time(value: object) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _mock_interview_payload(profile: dict, latest_payload: dict | None = None) -> dict:
     latest_payload = latest_payload or {}
     roles = _split_csv(profile.get("target_roles", ""))
@@ -1427,6 +1710,32 @@ def _mock_interview_payload(profile: dict, latest_payload: dict | None = None) -
         "skills": skills,
         "question_count": sum(len(group["questions"]) for group in questions),
         "groups": questions,
+    }
+
+
+def _job_interview_payload(job: dict, base: dict) -> dict:
+    """Point the interview at one job lead: its title, skills and posting."""
+    focus = job_interview_focus(job)
+    roles = (focus["title"],)
+    skills = tuple(_ordered_unique((*focus["skills"], *focus["gaps"]))) or tuple(base.get("skills") or ())
+    groups = _mock_interview_questions_for(roles, skills)
+    job_fit_group = build_job_fit_group(focus)
+    return {
+        "roles": roles,
+        "skills": skills,
+        "question_count": sum(len(group["questions"]) for group in groups) + len(job_fit_group["questions"]),
+        "groups": groups,
+        "job_fit_group": job_fit_group,
+        "job": {
+            "job_id": _mock_test_job_id(job),
+            "title": focus["title"],
+            "company": focus["company"],
+            "location": focus["location"],
+            "skills": list(focus["skills"]),
+            "gaps": list(focus["gaps"]),
+            "responsibilities": list(focus["responsibilities"]),
+            "has_description": focus["has_description"],
+        },
     }
 
 
@@ -1604,8 +1913,8 @@ def build_config_from_form(
             name=name.strip(),
             email=email.strip(),
             phone=phone.strip(),
-            linkedin_profile_url=linkedin_profile_url.strip(),
-            naukri_profile_url=naukri_profile_url.strip(),
+            linkedin_profile_url=_profile_link(linkedin_profile_url, "linkedin.com", "LinkedIn"),
+            naukri_profile_url=_profile_link(naukri_profile_url, "naukri.com", "Naukri"),
             target_roles=_split_csv(target_roles),
             locations=_split_csv(locations),
             skills=_split_csv(skills),
@@ -1622,6 +1931,27 @@ def build_config_from_form(
             from_email=os.getenv("JOB_AGENT_SMTP_FROM", email.strip()),
         ),
     )
+
+
+def _profile_link(value: str, domain: str, label: str) -> str:
+    """Normalise an optional profile link; reject anything off the portal's domain.
+
+    These links are written into recruiter emails, so a typo or an unrelated
+    URL would go out with every application.
+    """
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    if not re.match(r"^https?://", cleaned, re.I):
+        cleaned = "https://" + cleaned.lstrip("/")
+    try:
+        parts = urlsplit(cleaned)
+    except ValueError:
+        parts = None
+    host = (parts.hostname or "").casefold() if parts else ""
+    if not parts or parts.scheme.casefold() not in {"http", "https"} or not (host == domain or host.endswith("." + domain)):
+        raise HTTPException(status_code=400, detail=f"{label} profile URL must be a {domain} link, for example https://www.{domain}/...")
+    return cleaned
 
 
 def _split_csv(value: str) -> tuple[str, ...]:
@@ -1689,10 +2019,10 @@ def _config_from_payload(payload: dict) -> AppConfig:
         ),
         search=SearchConfig(
             max_jobs_per_portal=int(search.get("max_jobs_per_portal", 10)),
-            freshness_days=int(search.get("freshness_days", 7)),
+            freshness_days=int(search.get("freshness_days", 14)),
             include_remote=bool(search.get("include_remote", True)),
             validate_job_links=bool(search.get("validate_job_links", True)),
-            portals=tuple(search.get("portals", ("remotive", "arbeitnow", "linkedin", "naukri"))),
+            portals=tuple(search.get("portals", DEFAULT_PORTALS)),
         ),
         application=ApplicationConfig(
             mode=application.get("mode", "draft"),
@@ -2034,6 +2364,7 @@ def _mock_interview_page(user_email: str) -> str:
     <span class="user-chip">Signed in as {_escape_html(user_email)}</span>
     <div>
       <a href="/">Back to Dashboard</a>
+      <a href="/mock-test">Mock Test</a>
       <form style="display:inline" method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
     </div>
   </div>
@@ -2046,7 +2377,9 @@ def _mock_interview_page(user_email: str) -> str:
       <section class="setup-panel">
         <div>
           <h2>Interview Setup</h2>
-          <p>Choose region, interview length, and enable camera for a realistic practice room.</p>
+          <p>Pick a job lead to practise for that exact role, then choose accent, length, and camera.</p>
+          <label for="job-select">Job lead</label>
+          <select id="job-select"><option value="">General practice (profile roles)</option></select>
         </div>
         <div>
           <label for="region">Interviewer accent</label>
@@ -2182,6 +2515,7 @@ def _mock_interview_page(user_email: str) -> str:
     const transcript = document.getElementById('transcript');
     const scorecard = document.getElementById('scorecard');
     const historyPanel = document.getElementById('history');
+    const jobSelect = document.getElementById('job-select');
     const questionCountPill = document.getElementById('question-count-pill');
     const recordingState = document.getElementById('recording-state');
     const cameraPreview = document.getElementById('camera-preview');
@@ -2341,6 +2675,7 @@ def _mock_interview_page(user_email: str) -> str:
     function setInterviewActive(active) {{
       startBtn.disabled = active;
       region.disabled = active;
+      jobSelect.disabled = active;
       previewAccent.disabled = active || !accentCatalog;
       stopBtn.classList.toggle('hidden', !active);
       speakBtn.disabled = !active || (session?.tts_provider !== 'azure' && !preferredVoice(session?.voice || {{}}));
@@ -2348,19 +2683,49 @@ def _mock_interview_page(user_email: str) -> str:
       saveBtn.disabled = !active;
       if (!active) updateAccentAvailability();
     }}
+    let interviewJobs = [];
+    let jobsLoaded = false;
+    function selectedInterviewJob() {{
+      return jobSelect.value === '' ? null : interviewJobs[Number(jobSelect.value)];
+    }}
     async function loadQuestions() {{
-      const response = await fetch('/api/mock-interview/questions');
+      const job = selectedInterviewJob();
+      const query = job ? `?job_id=${{encodeURIComponent(job.job_id)}}&run_id=${{encodeURIComponent(job.run_id || 0)}}` : '';
+      const response = await fetch('/api/mock-interview/questions' + query);
       const payload = await response.json();
       if (!response.ok) {{
-        statusText.textContent = 'Unable to load interview context.';
+        statusText.textContent = payload.detail || 'Unable to load interview context.';
+        return;
+      }}
+      if (!jobsLoaded) {{
+        jobsLoaded = true;
+        interviewJobs = payload.jobs || [];
+        jobSelect.innerHTML = '<option value="">General practice (profile roles)</option>' + interviewJobs.map((item, index) =>
+          `<option value="${{index}}">${{escapeHtml(item.title)}}${{item.company ? ' · ' + escapeHtml(item.company) : ''}}${{item.match_score ? ' · ' + item.match_score + '% match' : ''}}</option>`).join('');
+        const wanted = new URLSearchParams(window.location.search).get('job');
+        const index = wanted ? interviewJobs.findIndex((item) => item.job_id === wanted) : -1;
+        if (index >= 0) {{
+          jobSelect.value = String(index);
+          return loadQuestions();
+        }}
+      }}
+      const nl = String.fromCharCode(10);
+      if (payload.job) {{
+        const lines = [`Job-specific interview: ${{payload.job.title}}${{payload.job.company ? ' at ' + payload.job.company : ''}}`];
+        if (payload.job.skills.length) lines.push('', 'Skills the role needs that you can show:', ...payload.job.skills.slice(0, 8).map((item) => `- ${{item}}`));
+        if (payload.job.gaps.length) lines.push('', 'Gaps to prepare for:', ...payload.job.gaps.map((item) => `- ${{item}}`));
+        if (payload.job.responsibilities.length) lines.push('', 'From the posting:', ...payload.job.responsibilities.map((item) => `- ${{item}}`));
+        if (!payload.job.has_description) lines.push('', 'The portal did not share a full description, so questions use the job title and skills.');
+        codeBox.textContent = lines.join(nl);
         return;
       }}
       const focusAreas = [...(payload.roles || []), ...(payload.skills || []).slice(0, 7)];
       const focusLines = focusAreas.length
         ? focusAreas.map((item) => `- ${{item}}`)
         : ['- Add target roles and skills on the dashboard.'];
-      codeBox.textContent = ['Detected focus areas:', ...focusLines].join(String.fromCharCode(10));
+      codeBox.textContent = ['Detected focus areas:', ...focusLines].join(nl);
     }}
+    jobSelect.addEventListener('change', loadQuestions);
     async function loadHistory() {{
       const response = await fetch('/api/mock-interview/history');
       if (!response.ok) return;
@@ -2368,7 +2733,8 @@ def _mock_interview_page(user_email: str) -> str:
       const sessions = payload.sessions || [];
       historyPanel.innerHTML = `<h3>Recent Interviews</h3>` + (sessions.length ? sessions.map((item) => `
         <div class="turn" style="margin-top:10px">
-          <strong>${{escapeHtml(item.accent)}} · ${{item.score || 0}}/100</strong>
+          <strong>${{escapeHtml(item.job_title || 'General practice')}} · ${{item.score || 0}}/100</strong>
+          <span class="muted">${{escapeHtml(item.company ? item.company + ' · ' : '')}}${{escapeHtml(item.accent)}}</span>
           <span class="muted">${{escapeHtml(item.completed_at || item.started_at || '')}}</span>
         </div>
       `).join('') : '<p class="muted">No completed interviews yet.</p>');
@@ -2376,13 +2742,14 @@ def _mock_interview_page(user_email: str) -> str:
     async function startInterview() {{
       stopAccentPreview();
       region.disabled = true;
+      jobSelect.disabled = true;
       previewAccent.disabled = true;
       startBtn.disabled = true;
       try {{
       const response = await fetch('/api/mock-interview/start', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{region: region.value, interview_mode: questionLimit.value}})
+        body: JSON.stringify({{region: region.value, interview_mode: questionLimit.value, job_id: selectedInterviewJob()?.job_id || '', run_id: selectedInterviewJob()?.run_id || 0}})
       }});
       const payload = await response.json();
       if (!response.ok) {{
@@ -2663,7 +3030,589 @@ def _mock_interview_page(user_email: str) -> str:
 </body>
 </html>"""
 
+def _mock_test_page(user_email: str) -> str:
+    return _MOCK_TEST_PAGE.replace("__USER_EMAIL__", _escape_html(user_email))
+
+
+_MOCK_TEST_PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mock Test - Job Hunting Agent</title>
+  <style>
+    :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --blue:#2563eb; --green:#22c55e; --red:#ef4444; --amber:#f59e0b; --line:rgba(148,163,184,.3); --panel:rgba(13,25,43,.92); --muted:#9fb1cc; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; color:#eef6ff; background: radial-gradient(circle at 50% 15%, rgba(37,99,235,.32), transparent 36%), linear-gradient(120deg, rgba(5,14,29,.96), rgba(9,22,41,.9)), url('/static/job-search-hero.png'); background-size:cover; background-attachment:fixed; }
+    .topbar { width:min(1240px, calc(100% - 32px)); margin:0 auto; padding:14px 0; display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap:wrap; }
+    .topbar nav { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .topbar a, .topbar button { min-height:36px; border:0; border-radius:7px; padding:8px 13px; font-weight:850; text-decoration:none; cursor:pointer; font-size:14px; }
+    .topbar a { background:rgba(255,255,255,.94); color:#152238; }
+    .topbar form { margin:0; }
+    .topbar button { background:#175cd3; color:#fff; }
+    .user-chip { padding:8px 12px; border:1px solid rgba(255,255,255,.28); border-radius:999px; background:rgba(255,255,255,.11); font-size:13px; font-weight:800; }
+    main { width:min(1240px, calc(100% - 32px)); margin:4px auto 40px; }
+    .shell { border:1px solid var(--line); border-radius:10px; background:rgba(6,16,31,.86); box-shadow:0 30px 90px rgba(0,0,0,.45); overflow:hidden; }
+    .shell-top { display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap:wrap; min-height:52px; padding:10px 16px; background:#0b1424; border-bottom:1px solid var(--line); }
+    .brand { display:flex; align-items:center; gap:10px; font-weight:950; }
+    .brand-mark { width:30px; height:30px; border-radius:50%; display:grid; place-items:center; background:#1d4ed8; color:#fff; font-size:13px; }
+    .top-stats { display:flex; flex-wrap:wrap; gap:16px; color:#cbd5e1; font-size:13px; font-weight:800; }
+    .top-stats strong { color:#fff; font-variant-numeric:tabular-nums; }
+    .top-stats .low { color:#fca5a5; }
+    .view { padding:18px; }
+    .hidden { display:none !important; }
+    h1, h2, h3 { margin:0; }
+    h2 { font-size:20px; }
+    h3 { font-size:15px; color:#dbeafe; }
+    p { line-height:1.5; }
+    .muted { color:var(--muted); }
+    .card { border:1px solid var(--line); border-radius:9px; background:var(--panel); padding:16px; }
+    .setup-grid { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(0,1fr); gap:16px; }
+    label.field { display:block; font-weight:850; color:#dbeafe; margin:14px 0 6px; font-size:14px; }
+    select { width:100%; min-height:42px; border:1px solid rgba(148,163,184,.45); border-radius:7px; padding:9px 11px; font:inherit; color:#eef6ff; background:rgba(15,23,42,.9); }
+    .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; min-height:26px; }
+    .chip { display:inline-flex; align-items:center; min-height:24px; padding:3px 9px; border-radius:999px; background:rgba(37,99,235,.18); border:1px solid rgba(96,165,250,.35); color:#bfdbfe; font-size:12px; font-weight:850; }
+    .segmented { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+    .segmented button { min-height:58px; border-radius:8px; border:1px solid rgba(148,163,184,.4); background:rgba(15,23,42,.85); color:#e2e8f0; font:inherit; font-weight:850; cursor:pointer; padding:8px; }
+    .segmented button small { display:block; color:var(--muted); font-weight:700; font-size:12px; margin-top:2px; }
+    .segmented button[aria-pressed="true"] { border-color:#60a5fa; background:rgba(37,99,235,.28); box-shadow:inset 0 0 0 1px #60a5fa; }
+    .btn { border:0; border-radius:7px; min-height:42px; padding:10px 15px; font:inherit; font-weight:900; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; gap:6px; }
+    .btn.primary { background:var(--blue); color:#fff; }
+    .btn.ghost { background:rgba(255,255,255,.08); color:#e2e8f0; border:1px solid var(--line); }
+    .btn.success { background:#16a34a; color:#fff; }
+    .btn.warn { background:var(--amber); color:#111827; }
+    .btn:disabled { opacity:.55; cursor:not-allowed; }
+    .actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:18px; align-items:center; }
+    .rules { margin:10px 0 0; padding-left:18px; color:#cbd5e1; font-size:14px; line-height:1.6; }
+    .notice { margin-top:12px; padding:10px 12px; border-radius:8px; background:rgba(245,158,11,.12); border:1px solid rgba(245,158,11,.4); color:#fde68a; font-size:14px; }
+    .error { background:rgba(239,68,68,.12); border-color:rgba(239,68,68,.45); color:#fecaca; }
+    table { width:100%; border-collapse:collapse; font-size:14px; }
+    th, td { text-align:left; padding:9px 8px; border-bottom:1px solid rgba(148,163,184,.18); vertical-align:top; }
+    th { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+    td button { background:none; border:0; color:#93c5fd; font:inherit; font-weight:850; cursor:pointer; padding:0; }
+    .test-grid { display:grid; grid-template-columns:minmax(0,1fr) 290px; gap:16px; }
+    .q-meta { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+    .pill { display:inline-flex; min-height:24px; align-items:center; padding:3px 9px; border-radius:999px; font-size:12px; font-weight:900; border:1px solid rgba(96,165,250,.35); background:rgba(37,99,235,.18); color:#bfdbfe; }
+    .pill.easy { background:rgba(34,197,94,.15); border-color:rgba(34,197,94,.4); color:#bbf7d0; }
+    .pill.medium { background:rgba(245,158,11,.14); border-color:rgba(245,158,11,.4); color:#fde68a; }
+    .pill.hard { background:rgba(239,68,68,.14); border-color:rgba(239,68,68,.4); color:#fecaca; }
+    .pill.ai { background:rgba(168,85,247,.16); border-color:rgba(168,85,247,.45); color:#e9d5ff; }
+    .q-text { margin:14px 0 16px; font-size:18px; line-height:1.5; font-weight:800; white-space:pre-wrap; }
+    .q-text code, .q-code { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .options { display:grid; gap:10px; }
+    .option { display:grid; grid-template-columns:34px minmax(0,1fr); gap:10px; align-items:center; width:100%; text-align:left; min-height:52px; padding:10px 12px; border-radius:8px; border:1px solid rgba(148,163,184,.4); background:rgba(15,23,42,.85); color:#e2e8f0; font:inherit; font-size:15px; cursor:pointer; white-space:pre-wrap; }
+    .option:hover { border-color:#60a5fa; }
+    .option .letter { width:30px; height:30px; border-radius:50%; display:grid; place-items:center; background:rgba(148,163,184,.18); font-weight:900; }
+    .option[aria-checked="true"] { border-color:#60a5fa; background:rgba(37,99,235,.28); box-shadow:inset 0 0 0 1px #60a5fa; }
+    .option[aria-checked="true"] .letter { background:var(--blue); color:#fff; }
+    .q-nav { display:flex; flex-wrap:wrap; justify-content:space-between; gap:10px; margin-top:18px; }
+    .palette { display:grid; grid-template-columns:repeat(5,1fr); gap:7px; margin-top:12px; }
+    .palette button { min-height:38px; border-radius:7px; border:1px solid rgba(148,163,184,.4); background:rgba(15,23,42,.85); color:#e2e8f0; font:inherit; font-weight:900; cursor:pointer; position:relative; }
+    .palette button.answered { background:rgba(34,197,94,.22); border-color:rgba(34,197,94,.6); }
+    .palette button.marked::after { content:""; position:absolute; top:4px; right:4px; width:7px; height:7px; border-radius:50%; background:var(--amber); }
+    .palette button.current { box-shadow:0 0 0 2px #60a5fa; }
+    .legend { display:grid; gap:6px; margin-top:14px; font-size:13px; color:#cbd5e1; }
+    .legend span::before { content:""; display:inline-block; width:11px; height:11px; border-radius:3px; margin-right:7px; vertical-align:-1px; background:rgba(15,23,42,.85); border:1px solid rgba(148,163,184,.4); }
+    .legend .l-answered::before { background:rgba(34,197,94,.4); border-color:rgba(34,197,94,.7); }
+    .legend .l-marked::before { background:var(--amber); border-color:var(--amber); border-radius:50%; }
+    .kbd { font-size:12px; color:var(--muted); margin-top:12px; line-height:1.5; }
+    .result-head { display:grid; grid-template-columns:200px minmax(0,1fr); gap:20px; align-items:center; }
+    .ring { width:180px; height:180px; border-radius:50%; display:grid; place-items:center; background:conic-gradient(var(--ring-color, var(--blue)) calc(var(--pct) * 1%), rgba(148,163,184,.18) 0); }
+    .ring-inner { width:142px; height:142px; border-radius:50%; background:#0b1424; display:grid; place-items:center; text-align:center; }
+    .ring-inner strong { display:block; font-size:34px; font-variant-numeric:tabular-nums; }
+    .ring-inner span { color:var(--muted); font-size:13px; font-weight:800; }
+    .verdict { margin-top:10px; padding:12px 14px; border-radius:9px; border:1px solid; font-weight:800; }
+    .verdict.ready { background:rgba(34,197,94,.12); border-color:rgba(34,197,94,.45); color:#bbf7d0; }
+    .verdict.almost { background:rgba(245,158,11,.12); border-color:rgba(245,158,11,.45); color:#fde68a; }
+    .verdict.prepare { background:rgba(239,68,68,.12); border-color:rgba(239,68,68,.45); color:#fecaca; }
+    .verdict small { display:block; margin-top:4px; font-weight:650; color:#e2e8f0; }
+    .stats { display:grid; grid-template-columns:repeat(5, minmax(0,1fr)); gap:10px; margin-top:16px; }
+    .stat { border:1px solid var(--line); border-radius:8px; padding:12px; background:rgba(15,23,42,.7); }
+    .stat span { display:block; color:var(--muted); font-size:12px; font-weight:850; text-transform:uppercase; letter-spacing:.04em; }
+    .stat strong { display:block; margin-top:4px; font-size:22px; font-variant-numeric:tabular-nums; }
+    .result-grid { display:grid; grid-template-columns:minmax(0,1.3fr) minmax(0,1fr); gap:16px; margin-top:16px; }
+    .bar-row { margin-top:12px; }
+    .bar-row .bar-label { display:flex; justify-content:space-between; gap:8px; font-size:14px; font-weight:800; }
+    .bar { height:9px; margin-top:6px; border-radius:999px; background:rgba(148,163,184,.18); overflow:hidden; }
+    .bar i { display:block; height:100%; border-radius:inherit; background:var(--blue); }
+    .bar i.strong { background:var(--green); }
+    .bar i.developing { background:var(--amber); }
+    .bar i.weak { background:var(--red); }
+    .tip { margin:6px 0 0; color:#cbd5e1; font-size:13px; line-height:1.45; }
+    ul.plain { margin:8px 0 0; padding-left:18px; line-height:1.6; color:#e2e8f0; font-size:14px; }
+    .filters { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+    .filters button { min-height:32px; padding:6px 11px; border-radius:999px; border:1px solid var(--line); background:rgba(15,23,42,.85); color:#e2e8f0; font:inherit; font-size:13px; font-weight:850; cursor:pointer; }
+    .filters button[aria-pressed="true"] { background:rgba(37,99,235,.3); border-color:#60a5fa; }
+    .review-item { margin-top:12px; padding:14px; border-radius:9px; border:1px solid var(--line); background:rgba(15,23,42,.7); }
+    .review-item.correct { border-left:4px solid var(--green); }
+    .review-item.incorrect { border-left:4px solid var(--red); }
+    .review-item.unanswered { border-left:4px solid var(--amber); }
+    .review-q { margin:10px 0; font-weight:800; white-space:pre-wrap; line-height:1.5; }
+    .review-opt { padding:7px 10px; margin-top:6px; border-radius:7px; border:1px solid rgba(148,163,184,.25); font-size:14px; white-space:pre-wrap; }
+    .review-opt.right { border-color:rgba(34,197,94,.6); background:rgba(34,197,94,.14); }
+    .review-opt.wrong { border-color:rgba(239,68,68,.6); background:rgba(239,68,68,.14); }
+    .review-opt b { margin-right:6px; }
+    .explain { margin:10px 0 0; color:#cbd5e1; font-size:14px; line-height:1.5; }
+    @media (max-width: 900px) { .setup-grid, .test-grid, .result-grid, .result-head { grid-template-columns:1fr; } .stats { grid-template-columns:repeat(2, minmax(0,1fr)); } .ring { margin:0 auto; } }
+    @media (max-width: 520px) { .segmented { grid-template-columns:1fr; } .palette { grid-template-columns:repeat(6,1fr); } .q-text { font-size:16px; } }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="user-chip">Signed in as __USER_EMAIL__</span>
+    <nav>
+      <a href="/">Back to Dashboard</a>
+      <a href="/mock-interview">Mock Interview</a>
+      <form method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
+    </nav>
+  </div>
+  <main>
+    <section class="shell">
+      <header class="shell-top">
+        <div class="brand"><span class="brand-mark">MT</span><span>Mock Test · Job-Specific Assessment</span></div>
+        <div class="top-stats" id="top-stats"><span>Multiple-choice questions tailored to your job leads</span></div>
+      </header>
+
+      <section id="setup-view" class="view">
+        <div class="setup-grid">
+          <div class="card">
+            <h2>Set up your test</h2>
+            <p class="muted">Pick a job lead and the test is built from its required skills, the skills you matched, and its Additional Skills, plus aptitude and reasoning questions used in screening rounds.</p>
+            <label class="field" for="job-select">Job lead</label>
+            <select id="job-select"><option value="">Loading your job leads…</option></select>
+            <div class="chips" id="job-skills" aria-live="polite"></div>
+            <label class="field">Test length</label>
+            <div class="segmented" id="length-group" role="group" aria-label="Test length">
+              <button type="button" data-length="quick" aria-pressed="false">Quick<small>10 questions · ~13 min</small></button>
+              <button type="button" data-length="standard" aria-pressed="true">Standard<small>20 questions · ~25 min</small></button>
+              <button type="button" data-length="full" aria-pressed="false">Full<small>30 questions · ~38 min</small></button>
+            </div>
+            <label class="field" for="difficulty-select">Difficulty</label>
+            <select id="difficulty-select">
+              <option value="mixed">Mixed (recommended)</option>
+              <option value="easy">Mostly easy</option>
+              <option value="medium">Mostly medium</option>
+              <option value="hard">Mostly hard</option>
+            </select>
+            <div class="actions">
+              <button type="button" class="btn primary" id="start-button">Start Mock Test</button>
+              <span class="muted" id="setup-status"></span>
+            </div>
+            <div id="setup-error" class="notice error hidden" role="alert"></div>
+          </div>
+          <div class="card">
+            <h3>How it works</h3>
+            <ul class="rules">
+              <li>One correct answer per question; no negative marking.</li>
+              <li>The timer runs on the server. The test auto-submits when time is up.</li>
+              <li>Move between questions freely and mark any for review.</li>
+              <li>Your answers are saved in this browser if the page reloads.</li>
+              <li>Answers and explanations are shown only after you submit.</li>
+              <li>Each retake prefers questions you have not seen before.</li>
+            </ul>
+            <h3 style="margin-top:18px">Recent tests</h3>
+            <div id="history" class="muted" style="margin-top:8px">No completed tests yet.</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="test-view" class="view hidden">
+        <div class="test-grid">
+          <div class="card">
+            <div class="q-meta" id="q-meta"></div>
+            <div class="q-text" id="q-text"></div>
+            <div class="options" id="q-options" role="radiogroup" aria-labelledby="q-text"></div>
+            <div class="q-nav">
+              <div class="actions" style="margin:0">
+                <button type="button" class="btn ghost" id="prev-button">← Previous</button>
+                <button type="button" class="btn ghost" id="mark-button">Mark for review</button>
+                <button type="button" class="btn ghost" id="clear-button">Clear answer</button>
+              </div>
+              <button type="button" class="btn primary" id="next-button">Next →</button>
+            </div>
+          </div>
+          <aside class="card">
+            <h3 id="test-title">Questions</h3>
+            <p class="muted" id="test-subtitle" style="margin:4px 0 0; font-size:13px"></p>
+            <div class="palette" id="palette"></div>
+            <div class="legend"><span class="l-answered">Answered</span><span>Not answered</span><span class="l-marked">Marked for review</span></div>
+            <div class="actions"><button type="button" class="btn success" id="submit-button" style="width:100%">Submit Test</button></div>
+            <p class="kbd">Shortcuts: 1–4 or A–D to answer · ← → to move · M to mark</p>
+          </aside>
+        </div>
+      </section>
+
+      <section id="result-view" class="view hidden">
+        <div class="card">
+          <div class="result-head">
+            <div class="ring" id="score-ring" style="--pct:0"><div class="ring-inner"><div><strong id="score-percent">0%</strong><span id="score-fraction">0/0 correct</span></div></div></div>
+            <div>
+              <h2 id="result-title">Scorecard</h2>
+              <p class="muted" id="result-subtitle" style="margin:6px 0 0"></p>
+              <div class="verdict" id="verdict"></div>
+            </div>
+          </div>
+          <div class="stats" id="stats"></div>
+        </div>
+        <div class="result-grid">
+          <div class="card">
+            <h3>Topic breakdown</h3>
+            <div id="topic-breakdown"></div>
+          </div>
+          <div class="card">
+            <h3>Difficulty breakdown</h3>
+            <div id="difficulty-breakdown"></div>
+            <h3 style="margin-top:18px">Strengths</h3>
+            <ul class="plain" id="strengths"></ul>
+            <h3 style="margin-top:18px">Focus next</h3>
+            <ul class="plain" id="weak-areas"></ul>
+          </div>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <h3>Answer review</h3>
+          <div class="filters" id="review-filters">
+            <button type="button" data-filter="all" aria-pressed="true">All</button>
+            <button type="button" data-filter="incorrect" aria-pressed="false">Incorrect</button>
+            <button type="button" data-filter="unanswered" aria-pressed="false">Unanswered</button>
+            <button type="button" data-filter="correct" aria-pressed="false">Correct</button>
+          </div>
+          <div id="review-list"></div>
+        </div>
+        <div class="actions">
+          <button type="button" class="btn primary" id="retake-button">Retake with new questions</button>
+          <button type="button" class="btn ghost" id="new-test-button">Choose another job</button>
+          <a class="btn ghost" href="/mock-interview">Practise the interview</a>
+          <a class="btn ghost" href="/">Back to Dashboard</a>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script>
+    const LETTERS = ['A', 'B', 'C', 'D'];
+    const state = { options: null, length: 'standard', test: null, current: 0, answers: {}, marked: {}, seconds: {}, enteredAt: 0, deadline: 0, timerId: 0, submitting: false, filter: 'all', lastSetup: null };
+    const $ = (id) => document.getElementById(id);
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[ch]));
+    }
+    function formatTime(total) {
+      const value = Math.max(0, Math.round(total));
+      const minutes = Math.floor(value / 60);
+      const seconds = String(value % 60).padStart(2, '0');
+      return `${minutes}:${seconds}`;
+    }
+    function storageKey(id) { return `mock-test-${id}`; }
+    function saveProgress() {
+      if (!state.test) return;
+      try { localStorage.setItem(storageKey(state.test.test_id), JSON.stringify({ answers: state.answers, marked: state.marked, seconds: state.seconds, current: state.current })); } catch (error) { /* storage unavailable */ }
+    }
+    function loadProgress(id) {
+      try { return JSON.parse(localStorage.getItem(storageKey(id)) || 'null'); } catch (error) { return null; }
+    }
+    function clearProgress(id) { try { localStorage.removeItem(storageKey(id)); } catch (error) { /* ignore */ } }
+    async function api(url, options = {}) {
+      const response = await fetch(url, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...options });
+      if (response.status === 401) { window.location.href = '/login'; throw new Error('Please sign in again.'); }
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
+      return data;
+    }
+    function show(view) {
+      for (const id of ['setup-view', 'test-view', 'result-view']) $(id).classList.toggle('hidden', id !== view);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    function setError(message) {
+      $('setup-error').textContent = message || '';
+      $('setup-error').classList.toggle('hidden', !message);
+    }
+
+    // ---------- setup ----------
+    async function loadOptions() {
+      const params = new URLSearchParams(window.location.search);
+      try {
+        state.options = await api('/api/mock-test/options');
+      } catch (error) {
+        setError(error.message);
+        return;
+      }
+      const select = $('job-select');
+      const jobs = state.options.jobs || [];
+      const general = state.options.profile.target_roles.length ? `General practice: ${state.options.profile.target_roles.slice(0, 2).join(', ')}` : 'General practice (from your profile)';
+      select.innerHTML = `<option value="">${escapeHtml(general)}</option>` + jobs.map((job, index) => {
+        const label = `${job.title}${job.company ? ' · ' + job.company : ''}${job.match_score ? ' · ' + job.match_score + '% match' : ''}`;
+        return `<option value="${index}">${escapeHtml(label)}</option>`;
+      }).join('');
+      if (!jobs.length) $('setup-status').textContent = 'Run the agent from the dashboard to get job-specific tests.';
+      const wanted = params.get('job');
+      if (wanted) {
+        const index = jobs.findIndex((job) => job.job_id === wanted);
+        if (index >= 0) select.value = String(index);
+      }
+      renderJobSkills();
+      loadHistory();
+      const testId = params.get('test');
+      if (testId) openTest(Number(testId));
+    }
+    function selectedJob() {
+      const value = $('job-select').value;
+      return value === '' ? null : (state.options.jobs || [])[Number(value)];
+    }
+    function renderJobSkills() {
+      const job = selectedJob();
+      const skills = job ? job.skills : (state.options?.profile.skills || []);
+      $('job-skills').innerHTML = skills.length
+        ? skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')
+        : '<span class="muted" style="font-size:13px">Topics are chosen from the job title and description.</span>';
+    }
+    async function loadHistory() {
+      try {
+        const data = await api('/api/mock-test/history');
+        const tests = data.tests || [];
+        $('history').innerHTML = tests.length ? `<table><thead><tr><th>Job</th><th>Score</th><th>Result</th></tr></thead><tbody>${tests.map((test) => `
+          <tr><td><button type="button" data-test="${test.test_id}">${escapeHtml(test.job_title)}</button><br><span class="muted" style="font-size:12px">${escapeHtml(test.company || '')} ${escapeHtml((test.completed_at || '').slice(0, 10))}</span></td>
+          <td><strong>${escapeHtml(Math.round(test.percent || 0))}%</strong><br><span class="muted" style="font-size:12px">${escapeHtml(test.score)}/${escapeHtml(test.total)}</span></td>
+          <td>${escapeHtml(test.grade)}<br><span class="muted" style="font-size:12px">${escapeHtml(test.readiness)}</span></td></tr>`).join('')}</tbody></table>` : 'No completed tests yet.';
+        $('history').querySelectorAll('button[data-test]').forEach((button) => button.addEventListener('click', () => openTest(Number(button.dataset.test))));
+      } catch (error) {
+        $('history').textContent = 'History is unavailable right now.';
+      }
+    }
+    async function startTest(setup) {
+      setError('');
+      $('start-button').disabled = true;
+      $('setup-status').textContent = 'Building your test…';
+      try {
+        const test = await api('/api/mock-test/start', { method: 'POST', body: JSON.stringify(setup) });
+        state.lastSetup = setup;
+        beginTest(test);
+      } catch (error) {
+        setError(error.message);
+      } finally {
+        $('start-button').disabled = false;
+        $('setup-status').textContent = '';
+      }
+    }
+    async function openTest(testId) {
+      try {
+        const test = await api(`/api/mock-test/${encodeURIComponent(testId)}`);
+        if (test.status === 'completed') renderResult(test);
+        else beginTest(test);
+      } catch (error) {
+        setError(error.message);
+      }
+    }
+
+    // ---------- test runner ----------
+    function beginTest(test) {
+      state.test = test;
+      state.submitting = false;
+      const saved = loadProgress(test.test_id) || {};
+      state.answers = saved.answers || {};
+      state.marked = saved.marked || {};
+      state.seconds = saved.seconds || {};
+      state.current = Math.min(saved.current || 0, test.questions.length - 1);
+      const remaining = typeof test.remaining_seconds === 'number' ? test.remaining_seconds : test.time_limit_seconds;
+      state.deadline = Date.now() + remaining * 1000;
+      $('test-title').textContent = test.job_title;
+      $('test-subtitle').textContent = `${test.company ? test.company + ' · ' : ''}${test.questions.length} questions · ${test.topics.slice(0, 4).join(', ')}`;
+      history.replaceState(null, '', `/mock-test?test=${encodeURIComponent(test.test_id)}`);
+      show('test-view');
+      renderQuestion();
+      clearInterval(state.timerId);
+      state.timerId = setInterval(tick, 1000);
+      tick();
+    }
+    function updateStats() {
+      if (!state.test) return;
+      const left = (state.deadline - Date.now()) / 1000;
+      const answered = Object.values(state.answers).filter((value) => value !== null && value !== undefined).length;
+      $('top-stats').innerHTML = `<span>Time left <strong class="${left < 60 ? 'low' : ''}">${formatTime(left)}</strong></span><span>Answered <strong>${answered}/${state.test.questions.length}</strong></span><span>Marked <strong>${Object.values(state.marked).filter(Boolean).length}</strong></span>`;
+      return left;
+    }
+    function tick() {
+      const left = updateStats();
+      if (left !== undefined && left <= 0 && !state.submitting) submitTest(true);
+    }
+    function recordTime() {
+      if (!state.test || !state.enteredAt) return;
+      const id = state.test.questions[state.current].id;
+      state.seconds[id] = (state.seconds[id] || 0) + (Date.now() - state.enteredAt) / 1000;
+      state.enteredAt = Date.now();
+    }
+    function goTo(index) {
+      recordTime();
+      state.current = Math.max(0, Math.min(index, state.test.questions.length - 1));
+      saveProgress();
+      renderQuestion();
+    }
+    function renderQuestion() {
+      const question = state.test.questions[state.current];
+      state.enteredAt = Date.now();
+      $('q-meta').innerHTML = `<span class="pill">Question ${question.number} of ${state.test.questions.length}</span><span class="pill">${escapeHtml(question.topic_label)}</span><span class="pill ${escapeHtml(question.difficulty)}">${escapeHtml(question.difficulty)}</span>${question.source === 'ai_generated' ? '<span class="pill ai">AI-generated</span>' : ''}`;
+      $('q-text').textContent = question.question;
+      const chosen = state.answers[question.id];
+      $('q-options').innerHTML = question.options.map((option, index) => `
+        <button type="button" class="option" role="radio" aria-checked="${chosen === index}" data-index="${index}"><span class="letter">${LETTERS[index]}</span><span>${escapeHtml(option)}</span></button>`).join('');
+      $('q-options').querySelectorAll('.option').forEach((button) => button.addEventListener('click', () => choose(Number(button.dataset.index))));
+      $('prev-button').disabled = state.current === 0;
+      $('next-button').textContent = state.current === state.test.questions.length - 1 ? 'Review & submit' : 'Next →';
+      $('mark-button').textContent = state.marked[question.id] ? 'Unmark review' : 'Mark for review';
+      renderPalette();
+    }
+    function renderPalette() {
+      $('palette').innerHTML = state.test.questions.map((question, index) => {
+        const classes = [
+          state.answers[question.id] !== undefined && state.answers[question.id] !== null ? 'answered' : '',
+          state.marked[question.id] ? 'marked' : '',
+          index === state.current ? 'current' : '',
+        ].filter(Boolean).join(' ');
+        return `<button type="button" class="${classes}" data-index="${index}" aria-label="Question ${index + 1}">${index + 1}</button>`;
+      }).join('');
+      $('palette').querySelectorAll('button').forEach((button) => button.addEventListener('click', () => goTo(Number(button.dataset.index))));
+      updateStats();
+    }
+    function choose(index) {
+      const question = state.test.questions[state.current];
+      state.answers[question.id] = index;
+      saveProgress();
+      renderQuestion();
+    }
+    async function submitTest(auto = false) {
+      if (state.submitting || !state.test) return;
+      const unanswered = state.test.questions.filter((question) => state.answers[question.id] === undefined || state.answers[question.id] === null).length;
+      if (!auto && unanswered && !window.confirm(`You have ${unanswered} unanswered question${unanswered === 1 ? '' : 's'}. Submit anyway?`)) return;
+      state.submitting = true;
+      recordTime();
+      clearInterval(state.timerId);
+      $('submit-button').disabled = true;
+      $('submit-button').textContent = auto ? 'Time is up — submitting…' : 'Submitting…';
+      try {
+        const result = await api('/api/mock-test/submit', { method: 'POST', body: JSON.stringify({ test_id: state.test.test_id, answers: state.answers, question_seconds: state.seconds }) });
+        clearProgress(state.test.test_id);
+        renderResult(result);
+        loadHistory();
+      } catch (error) {
+        state.submitting = false;
+        $('submit-button').disabled = false;
+        $('submit-button').textContent = 'Submit Test';
+        window.alert(`Could not submit: ${error.message}. Your answers are saved; please try again.`);
+        state.timerId = setInterval(tick, 1000);
+      }
+    }
+
+    // ---------- scorecard ----------
+    function renderResult(test) {
+      state.test = null;
+      clearInterval(state.timerId);
+      $('submit-button').disabled = false;
+      $('submit-button').textContent = 'Submit Test';
+      const card = test.scorecard || {};
+      $('top-stats').innerHTML = `<span>Completed <strong>${escapeHtml((test.completed_at || '').slice(0, 10))}</strong></span><span>Score <strong>${escapeHtml(card.correct || 0)}/${escapeHtml(card.total || 0)}</strong></span>`;
+      state.lastSetup = { job_id: test.job_id || '', run_id: test.run_id || 0, length: test.length || 'standard', difficulty: test.difficulty || 'mixed' };
+      history.replaceState(null, '', `/mock-test?test=${encodeURIComponent(test.test_id)}`);
+      const percent = Number(card.percent || 0);
+      const ringColor = percent >= 70 ? 'var(--green)' : percent >= 50 ? 'var(--amber)' : 'var(--red)';
+      $('score-ring').style.setProperty('--pct', String(percent));
+      $('score-ring').style.setProperty('--ring-color', ringColor);
+      $('score-percent').textContent = `${Math.round(percent)}%`;
+      $('score-fraction').textContent = `${card.correct || 0}/${card.total || 0} correct`;
+      $('result-title').textContent = `${card.grade || 'Scorecard'} · ${test.job_title}`;
+      const improvement = card.improvement === null || card.improvement === undefined ? '' : ` · ${card.improvement >= 0 ? '+' : ''}${card.improvement} pts vs your best for this job`;
+      $('result-subtitle').textContent = `${test.company ? test.company + ' · ' : ''}${(test.length || '').replace(/^./, (c) => c.toUpperCase())} test · ${test.difficulty} difficulty${improvement}`;
+      const readiness = card.readiness || {};
+      $('verdict').className = `verdict ${readiness.level || 'almost'}`;
+      $('verdict').innerHTML = `${escapeHtml(readiness.label || '')}<small>${escapeHtml(readiness.detail || '')}</small>`;
+      const time = card.time || {};
+      $('stats').innerHTML = [
+        ['Correct', card.correct], ['Incorrect', card.incorrect], ['Unanswered', card.unanswered],
+        ['Accuracy', `${Math.round(card.accuracy || 0)}%`],
+        ['Time used', `${formatTime(time.elapsed_seconds || 0)} / ${formatTime(time.limit_seconds || 0)}`],
+      ].map(([label, value]) => `<div class="stat"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? 0)}</strong></div>`).join('');
+      $('topic-breakdown').innerHTML = (card.topic_breakdown || []).map((row) => `
+        <div class="bar-row"><div class="bar-label"><span>${escapeHtml(row.label)}</span><span>${escapeHtml(row.correct)}/${escapeHtml(row.total)} · ${escapeHtml(Math.round(row.percent))}%</span></div>
+        <div class="bar"><i class="${escapeHtml(row.status)}" style="width:${Number(row.percent) || 0}%"></i></div>
+        ${row.status !== 'strong' && row.tip ? `<p class="tip">${escapeHtml(row.tip)}</p>` : ''}</div>`).join('');
+      $('difficulty-breakdown').innerHTML = (card.difficulty_breakdown || []).map((row) => `
+        <div class="bar-row"><div class="bar-label"><span style="text-transform:capitalize">${escapeHtml(row.difficulty)}</span><span>${escapeHtml(row.correct)}/${escapeHtml(row.total)}</span></div>
+        <div class="bar"><i style="width:${Number(row.percent) || 0}%"></i></div></div>`).join('');
+      $('strengths').innerHTML = (card.strengths || []).length ? card.strengths.map((item) => `<li>${escapeHtml(item)}</li>`).join('') : '<li class="muted">Score 80% or more in a topic to list it here.</li>';
+      $('weak-areas').innerHTML = (card.weak_areas || []).length
+        ? card.weak_areas.map((item) => `<li><strong>${escapeHtml(item.label)}</strong> (${escapeHtml(Math.round(item.percent))}%): ${escapeHtml(item.tip)}</li>`).join('')
+        : '<li class="muted">No topic below 50%. Keep practising the lowest bars above.</li>';
+      if (time.submitted_after_time_limit) $('weak-areas').insertAdjacentHTML('beforeend', '<li>This attempt was submitted after the time limit. Practise pacing: about one minute per question.</li>');
+      state.review = card.review || [];
+      state.filter = 'all';
+      document.querySelectorAll('#review-filters button').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.filter === 'all')));
+      renderReview();
+      show('result-view');
+    }
+    function renderReview() {
+      const items = state.review.filter((item) => state.filter === 'all' || item.status === state.filter);
+      $('review-list').innerHTML = items.length ? items.map((item) => `
+        <div class="review-item ${escapeHtml(item.status)}">
+          <div class="q-meta"><span class="pill">Q${escapeHtml(item.number)}</span><span class="pill">${escapeHtml(item.topic_label)}</span><span class="pill ${escapeHtml(item.difficulty)}">${escapeHtml(item.difficulty)}</span>${item.source === 'ai_generated' ? '<span class="pill ai">AI-generated</span>' : ''}<span class="pill">${item.status === 'correct' ? 'Correct' : item.status === 'incorrect' ? 'Incorrect' : 'Not answered'}</span></div>
+          <div class="review-q">${escapeHtml(item.question)}</div>
+          ${item.options.map((option, index) => {
+            const cls = index === item.correct_index ? 'right' : index === item.selected_index ? 'wrong' : '';
+            const tag = index === item.correct_index ? ' ✓ Correct answer' : index === item.selected_index ? ' ✗ Your answer' : '';
+            return `<div class="review-opt ${cls}"><b>${LETTERS[index]}.</b>${escapeHtml(option)}<strong>${tag}</strong></div>`;
+          }).join('')}
+          ${item.explanation ? `<p class="explain">${escapeHtml(item.explanation)}</p>` : ''}
+        </div>`).join('') : '<p class="muted">Nothing to show for this filter.</p>';
+    }
+
+    // ---------- events ----------
+    $('job-select').addEventListener('change', renderJobSkills);
+    document.querySelectorAll('#length-group button').forEach((button) => button.addEventListener('click', () => {
+      state.length = button.dataset.length;
+      document.querySelectorAll('#length-group button').forEach((other) => other.setAttribute('aria-pressed', String(other === button)));
+    }));
+    $('start-button').addEventListener('click', () => {
+      const job = selectedJob();
+      startTest({ job_id: job ? job.job_id : '', run_id: job ? job.run_id : 0, length: state.length, difficulty: $('difficulty-select').value });
+    });
+    $('prev-button').addEventListener('click', () => goTo(state.current - 1));
+    $('next-button').addEventListener('click', () => {
+      if (state.current === state.test.questions.length - 1) submitTest(false); else goTo(state.current + 1);
+    });
+    $('mark-button').addEventListener('click', () => {
+      const id = state.test.questions[state.current].id;
+      state.marked[id] = !state.marked[id];
+      saveProgress();
+      renderQuestion();
+    });
+    $('clear-button').addEventListener('click', () => {
+      delete state.answers[state.test.questions[state.current].id];
+      saveProgress();
+      renderQuestion();
+    });
+    $('submit-button').addEventListener('click', () => submitTest(false));
+    $('retake-button').addEventListener('click', () => startTest(state.lastSetup || { job_id: '', run_id: 0, length: 'standard', difficulty: 'mixed' }));
+    $('new-test-button').addEventListener('click', () => { history.replaceState(null, '', '/mock-test'); show('setup-view'); });
+    document.querySelectorAll('#review-filters button').forEach((button) => button.addEventListener('click', () => {
+      state.filter = button.dataset.filter;
+      document.querySelectorAll('#review-filters button').forEach((other) => other.setAttribute('aria-pressed', String(other === button)));
+      renderReview();
+    }));
+    document.addEventListener('keydown', (event) => {
+      if (!state.test || $('test-view').classList.contains('hidden') || event.target.tagName === 'SELECT' || event.ctrlKey || event.metaKey || event.altKey) return;
+      const key = event.key.toLowerCase();
+      const index = ['1', '2', '3', '4'].indexOf(key) >= 0 ? ['1', '2', '3', '4'].indexOf(key) : ['a', 'b', 'c', 'd'].indexOf(key);
+      if (index >= 0 && index < state.test.questions[state.current].options.length) { choose(index); event.preventDefault(); }
+      else if (event.key === 'ArrowRight') { goTo(state.current + 1); event.preventDefault(); }
+      else if (event.key === 'ArrowLeft') { goTo(state.current - 1); event.preventDefault(); }
+      else if (key === 'm') { $('mark-button').click(); event.preventDefault(); }
+    });
+    window.addEventListener('beforeunload', () => { recordTime(); saveProgress(); });
+    loadOptions();
+  </script>
+</body>
+</html>
+"""
+
+
 def _page(user_email: str, profile: dict) -> str:
+    sources = active_job_sources()
+    other_sources = [name for name in sources if name not in {"LinkedIn", "Naukri"}]
     page = """<!doctype html>
 <html lang="en">
 <head>
@@ -2770,7 +3719,8 @@ def _page(user_email: str, profile: dict) -> str:
     .workflow-card:nth-child(2) .workflow-icon { background: var(--green); }
     .workflow-card:nth-child(3) .workflow-icon { background: var(--gold); }
     .workspace-header { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(280px, 340px); gap: 16px; align-items: start; margin-bottom: 20px; }
-    .results-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+    .results-header { display: block; }
+    .results-header .practice-links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .results-header h2 { margin: 0; font-size: 26px; letter-spacing: 0; }
     .panel-link { display: inline-flex; align-items: center; min-height: 34px; padding: 7px 10px; border-radius: 7px; background: #edf4ff; color: var(--blue); text-decoration: none; font-size: 13px; font-weight: 900; white-space: nowrap; }
     .status-pill { display: inline-flex; align-items: center; min-height: 30px; padding: 6px 10px; border-radius: 999px; background: #ecfdf3; color: var(--green); font-size: 12px; font-weight: 850; white-space: nowrap; }
@@ -2826,7 +3776,9 @@ def _page(user_email: str, profile: dict) -> str:
       h1 { font-size: 38px; }
     }
     @media (max-width: 560px) {
-      .hero-content { width: calc(100% - 28px); }
+      /* The top bar overlays the hero on wide screens; on phones give it its own row. */
+      .topbar { width: calc(100% - 28px); margin: 0 auto; padding-top: 10px; justify-content: space-between; }
+      .hero-content { width: calc(100% - 28px); padding-top: 12px; }
       main { width: calc(100% - 28px); }
       .hero-stats { grid-template-columns: 1fr; }
       .results-header { display: block; }
@@ -2846,16 +3798,16 @@ def _page(user_email: str, profile: dict) -> str:
       <div>
         <div class="eyebrow">Resume-first daily automation</div>
         <h1>Job Hunting Agent</h1>
-        <p>Upload your resume, connect your LinkedIn and Naukri profiles, score ATS readiness, find fresh roles, and prepare recruiter-ready applications from one workspace.</p>
-        <div class="platform-strip" aria-label="Supported job workflow channels">
+        <p>Upload your resume to score ATS readiness, find fresh roles across __SOURCE_COUNT__ job sources, get a tailored resume for every lead, practise with job-specific mock tests and interviews, and prepare recruiter-ready emails.</p>
+        <div class="platform-strip" aria-label="Job sources and channels">
           <span class="platform-chip"><span class="platform-mark linkedin">in</span> LinkedIn jobs</span>
-          <span class="platform-chip"><span class="platform-mark naukri">N</span> Naukri search</span>
-          <span class="platform-chip"><span class="platform-mark mail">@</span> Recruiter email</span>
+          <span class="platform-chip"><span class="platform-mark naukri">N</span> Naukri jobs</span>
+          <span class="platform-chip" title="__OTHER_SOURCE_NAMES__"><span class="platform-mark mail">+</span> __OTHER_SOURCE_COUNT__ more job boards</span>
         </div>
       </div>
       <div class="hero-stats" aria-label="Workflow highlights">
         <div class="stat-card"><strong>ATS</strong><span>Resume scoring and suggestions</span></div>
-        <div class="stat-card"><strong>2</strong><span>Portal adapters configured</span></div>
+        <div class="stat-card" title="__SOURCE_NAMES__"><strong>__SOURCE_COUNT__</strong><span>Job sources active</span></div>
         <div class="stat-card"><strong>Daily</strong><span>Scheduled search and draft run</span></div>
       </div>
     </div>
@@ -2867,10 +3819,11 @@ def _page(user_email: str, profile: dict) -> str:
         <label for="resume">Resume</label>
         <input id="resume" name="resume" type="file" accept=".pdf,.docx,.txt,.md">
         <p class="muted" id="saved-resume">__RESUME_STATUS__</p>
-        <label for="linkedin_profile_url">LinkedIn Profile URL</label>
-        <input id="linkedin_profile_url" name="linkedin_profile_url" type="url" value="__LINKEDIN_PROFILE_URL__">
-        <label for="naukri_profile_url">Naukri Profile URL</label>
-        <input id="naukri_profile_url" name="naukri_profile_url" type="url" value="__NAUKRI_PROFILE_URL__">
+        <label for="linkedin_profile_url">LinkedIn Profile URL (optional)</label>
+        <input id="linkedin_profile_url" name="linkedin_profile_url" type="text" inputmode="url" autocomplete="url" placeholder="https://www.linkedin.com/in/your-name" value="__LINKEDIN_PROFILE_URL__">
+        <label for="naukri_profile_url">Naukri Profile URL (optional)</label>
+        <input id="naukri_profile_url" name="naukri_profile_url" type="text" inputmode="url" autocomplete="url" placeholder="https://www.naukri.com/mnjuser/profile" value="__NAUKRI_PROFILE_URL__">
+        <p class="muted">These links are added to your recruiter email drafts so recruiters can view your profiles. Your LinkedIn link is also used on the ATS resume if your uploaded resume has no contact details. They are not used to sign in to or search LinkedIn or Naukri; jobs are found from your target roles, skills, locations and experience.</p>
       </fieldset>
       <fieldset>
         <legend><span class="section-badge">2</span>Candidate</legend>
@@ -2926,7 +3879,7 @@ def _page(user_email: str, profile: dict) -> str:
             <h2>Run Results</h2>
             <p class="muted">ATS score, role matches, missing keywords, and draft actions appear here.</p>
           </div>
-          <a class="panel-link" href="/mock-interview">Mock Interview</a>
+          <div class="practice-links"><a class="panel-link" href="/mock-interview">Mock Interview</a><a class="panel-link" href="/mock-test">Mock Test</a></div>
         </div>
         <aside class="scheduler-panel" aria-label="Daily scheduler status">
           <div class="scheduler-panel-head"><h3>Daily Automation</h3><span class="status-pill">Ready</span></div>
@@ -2971,12 +3924,22 @@ def _page(user_email: str, profile: dict) -> str:
     }
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
-      summary.textContent = 'Running ATS scoring, portal search, and application drafting...';
       summary.className = 'muted';
       details.innerHTML = '';
+      const runStarted = Date.now();
+      const runStage = (seconds) => seconds < 8 ? 'Scoring your resume and searching job portals'
+        : seconds < 40 ? 'Searching LinkedIn, Naukri and job boards'
+        : 'Ranking jobs and preparing application drafts';
+      const updateRunStatus = () => {
+        const seconds = Math.round((Date.now() - runStarted) / 1000);
+        summary.textContent = `${runStage(seconds)}... ${seconds}s (usually under a minute)`;
+      };
+      updateRunStatus();
+      const runTimer = setInterval(updateRunStatus, 1000);
       try {
         const data = enrichFormData();
         const response = await fetch('/api/run', { method: 'POST', body: data });
+        clearInterval(runTimer);
         const payload = await responsePayload(response);
         if (!response.ok) {
           showRequestError(new Error(payload.detail || 'Run failed.'), 'Run failed.');
@@ -2985,6 +3948,7 @@ def _page(user_email: str, profile: dict) -> str:
         render(payload, 'manual');
         refreshDashboard();
       } catch (error) {
+        clearInterval(runTimer);
         showRequestError(error, 'Run failed. Check the server terminal and try again.');
       }
     });
@@ -3093,15 +4057,34 @@ def _page(user_email: str, profile: dict) -> str:
       const jobs = payload.jobs.map((job) => {
         const reasons = (job.match_reasons || []).map((reason) => `<span class="status-pill">${escapeHtml(reason)}</span>`).join(' ');
         const jobDetails = [job.workplace_mode, job.employment_type, job.salary_text, job.posted_at ? `Posted ${job.posted_at.slice(0, 10)}` : '', job.freshness_verified ? 'date verified' : 'date unverified'].filter((item) => item && item !== 'unknown').map(escapeHtml).join(' · ');
-        const sourceState = job.source_validated ? 'Validated API' : 'Public discovery';
+        const portalLabels = { linkedin: 'LinkedIn', naukri: 'Naukri', himalayas: 'Himalayas', remotive: 'Remotive', arbeitnow: 'Arbeitnow', jobicy: 'Jobicy', remoteok: 'Remote OK', adzuna: 'Adzuna', careerjet: 'Careerjet', jooble: 'Jooble' };
+        const attribution = job.source_metadata?.source_type === 'partner_api' ? job.source_metadata?.source_attribution : '';
+        const sourceState = attribution || (job.source_validated ? 'Validated API' : 'Public discovery');
         const normalizedCompany = job.normalized_company && job.normalized_company !== job.company ? `<br><span class="muted">${escapeHtml(job.normalized_company)}</span>` : '';
+        const additionsStatus = job.source_metadata?.additional_skills_status || '';
+        const additionsLabels = {
+          already_listed: 'All supported job skills are already listed',
+          no_evidence: 'No resume evidence for the remaining job skills',
+          no_requirements: 'No specific skills found in this posting',
+          description_unavailable: 'Description unavailable - check the posting',
+        };
+        const additionsHint = escapeHtml(job.source_metadata?.additional_skills_message || '');
+        const addedSkills = (job.additional_skills || []).length
+          ? `<span title="${additionsHint}">${job.additional_skills.map(escapeHtml).join(', ')}</span>`
+          : `<span class="muted" title="${additionsHint}">${escapeHtml(additionsLabels[additionsStatus] || 'No source-backed additions')}</span>`;
+        const matchedSkills = (job.source_metadata?.matched_skills || []).length
+          ? `<br><span class="muted">Matched skills: ${job.source_metadata.matched_skills.map(escapeHtml).join(', ')}</span>`
+          : '';
+        const missingRequirements = (job.source_metadata?.missing_required_skills || []).length
+          ? `<br><span class="muted">Missing required skills: ${job.source_metadata.missing_required_skills.map(escapeHtml).join(', ')}</span>`
+          : '';
         const tailoredState = payload.improved_resume?.tailored_statuses?.[job.tailored_resume_id]?.status || 'idle';
         const tailored = job.tailored_resume_id && tailoredState === 'ready'
           ? `<br><a href="/api/runs/${encodeURIComponent(payload.run_id)}/tailored-resumes/${encodeURIComponent(job.tailored_resume_id)}/docx">DOCX</a> · <a href="/api/runs/${encodeURIComponent(payload.run_id)}/tailored-resumes/${encodeURIComponent(job.tailored_resume_id)}/pdf">PDF</a>`
           : job.tailored_resume_id
             ? `<br><button type="button" class="prepare-tailored" data-artifact-id="${escapeHtml(job.tailored_resume_id)}" ${tailoredState === 'preparing' ? 'disabled' : ''}>${tailoredState === 'preparing' ? 'Preparing resume...' : tailoredState === 'failed' ? 'Retry resume' : 'Prepare resume'}</button>`
             : '';
-        return `<tr><td>${escapeHtml(job.portal)}<br><span class="muted">${escapeHtml(sourceState)}</span></td><td><strong>${escapeHtml(job.title)}</strong><br><span class="muted">${escapeHtml(job.location || '')}</span><br><span class="muted">${jobDetails}</span></td><td>${escapeHtml(job.company)}${normalizedCompany}</td><td><strong>${escapeHtml(job.match_score || 0)}%</strong><br>${reasons}</td><td><a href="${escapeHtml(job.url)}" target="_blank" rel="noreferrer">Open job</a>${tailored}<br><span class="muted">${escapeHtml(job.link_status || 'unchecked')}</span></td></tr>`;
+        return `<tr><td>${escapeHtml(portalLabels[job.portal] || job.portal)}<br><span class="muted">${escapeHtml(sourceState)}</span></td><td><strong>${escapeHtml(job.title)}</strong><br><span class="muted">${escapeHtml(job.location || '')}</span><br><span class="muted">${jobDetails}</span></td><td>${escapeHtml(job.company)}${normalizedCompany}</td><td><strong>${escapeHtml(job.match_score || 0)}%</strong><br>${reasons}${matchedSkills}${missingRequirements}</td><td>${addedSkills}</td><td><a href="${escapeHtml(job.url)}" target="_blank" rel="noreferrer">Open job</a>${tailored}<br><a href="/mock-test?job=${encodeURIComponent(`${job.portal || ''}:${job.source_id || job.url || ''}`.toLowerCase())}">Mock test</a> · <a href="/mock-interview?job=${encodeURIComponent(`${job.portal || ''}:${job.source_id || job.url || ''}`.toLowerCase())}">Mock interview</a><br><span class="muted">${escapeHtml(job.link_status || 'unchecked')}</span></td></tr>`;
       }).join('');
       const remainingJobs = Math.max(0, (jobPage.total || totalJobs) - payload.jobs.length);
       const showMoreJobs = jobPage.has_more
@@ -3120,8 +4103,8 @@ def _page(user_email: str, profile: dict) -> str:
         </section>
         <section class="result-section">
           <h3>Job Leads</h3>
-          <p class="muted">Ranked using target roles, combined profile/resume skills, location, experience, resume summary, and the optional job description.</p>
-          <div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role & Location</th><th>Company</th><th>Match</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>
+          <p class="muted">Individual postings are matched by role, skills, and location. Experience is checked when stated; otherwise the requirement is marked unverified for your review.</p>
+          ${jobs ? `<div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role & Location</th><th>Company</th><th>Match</th><th>Additional Skills</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>` : '<p class="muted">No matching individual postings were found in this run. Try a broader role or location, or search again later.</p>'}
           ${showMoreJobs}
         </section>
         <section class="result-section">
@@ -3149,6 +4132,7 @@ def _page(user_email: str, profile: dict) -> str:
           <a class="download-button" href="/api/runs/${encodeURIComponent(payload.run_id)}/improved-resume">Download ATS Resume DOCX</a>
           <a class="download-button" href="/api/runs/${encodeURIComponent(payload.run_id)}/improved-resume.pdf">Download ATS Resume PDF</a>
           <a class="download-button secondary-link" href="/mock-interview">Mock Interview Questions</a>
+          <a class="download-button secondary-link" href="/mock-test">Mock Test</a>
           <span class="muted">${escapeHtml(validationLabel)}. Each job row includes its separately tailored resume.</span>
         </div>
       `;
@@ -3272,6 +4256,10 @@ def _page(user_email: str, profile: dict) -> str:
         "__PROFILE_EMAIL__": profile.get("email") or user_email,
         "__NAME__": profile.get("name", ""),
         "__PHONE__": profile.get("phone", ""),
+        "__SOURCE_COUNT__": str(len(sources)),
+        "__SOURCE_NAMES__": "Searching: " + ", ".join(sources),
+        "__OTHER_SOURCE_COUNT__": str(len(other_sources)),
+        "__OTHER_SOURCE_NAMES__": ", ".join(other_sources),
         "__LINKEDIN_PROFILE_URL__": profile.get("linkedin_profile_url", ""),
         "__NAUKRI_PROFILE_URL__": profile.get("naukri_profile_url", ""),
         "__TARGET_ROLES__": profile.get("target_roles", ""),
