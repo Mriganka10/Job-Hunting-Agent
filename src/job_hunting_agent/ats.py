@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import json
-import os
+import hashlib
 import re
 import unicodedata
 
-import requests
-
 from .ats_layout import analyze_resume_layout
 from .ats_profiles import AtsRoleProfile, select_role_profile
+from .ats_requirements import RequirementReport, analyze_requirements, calibrated_similarity
 from .ats_semantic import SemanticMatch, semantic_similarity
 from .models import AtsReport, CandidateProfile, Resume
 from .resume import KNOWN_SKILLS, canonicalize_skill, detect_sections, extract_sections
 
+ATS_SCORER_VERSION = "ats-2026.10"
 CATEGORY_WEIGHTS = {"Structure": 20, "Skills & Keywords": 30, "Experience & Projects": 35, "Writing Quality": 15}
 SECTION_POINTS = {"contact": 2, "summary": 3, "education": 3, "experience": 3, "projects": 2, "skills": 3, "certifications": 1.5, "achievements": 1.5}
 ACTION_VERBS = {
@@ -68,13 +67,25 @@ def score_resume(resume: Resume, profile: CandidateProfile) -> AtsReport:
     layout = analyze_resume_layout(resume.path, resume.text)
     desired = _target_keywords(jd, profile.skills, resume.inferred_skills, role_profile.priority_keywords)
     weights = role_profile.category_weights
+    requirements = analyze_requirements(
+        resume_text=resume.text,
+        sections=sections,
+        jd=jd,
+        target_title=profile.target_roles[0] if profile.target_roles else "",
+        candidate_years=float(profile.experience_years or 0),
+        extract_keywords=_extract_jd_keywords,
+        contains=_contains_keyword,
+    )
     structure, structure_detail = _score_structure(resume.text, sections, profile, layout, weights[0], role_profile)
+    if requirements.education_status == "missing":
+        structure = max(0, structure - 1)
     keywords, matched, missing, similarity, keyword_detail = _score_keywords(
         resume.text,
         desired,
         jd,
         weights[1],
         role_profile.priority_keywords,
+        requirements,
     )
     evidence, evidence_detail = _score_experience_projects(
         sections,
@@ -83,6 +94,7 @@ def score_resume(resume: Resume, profile: CandidateProfile) -> AtsReport:
         jd,
         role_profile,
         weights[2],
+        requirements,
     )
     writing, writing_detail = _score_writing_quality(
         sections,
@@ -105,6 +117,8 @@ def score_resume(resume: Resume, profile: CandidateProfile) -> AtsReport:
     else: improvements.extend(writing_detail.get("recommendations", []))
     layout_issues = [str(item) for item in layout.get("issues", [])]
     improvements.extend(layout_issues)
+    # Recruiter screening risks first: they decide whether a human reads the resume.
+    improvements = [*requirements.screening_risks, *improvements]
     extraction_confidence = _extraction_confidence(resume.text, sections, layout)
     semantic_confidence = float(keyword_detail.get("semantic_confidence", 0.7 if not jd else 0.5))
     evidence_confidence = min(1.0, 0.45 + min(0.35, float(evidence_detail.get("bullet_count", 0)) * 0.04) + (0.15 if evidence_detail.get("date_ranges_present") else 0))
@@ -143,6 +157,8 @@ def score_resume(resume: Resume, profile: CandidateProfile) -> AtsReport:
             "skills_keywords": keyword_detail,
             "experience_projects": evidence_detail,
             "writing_quality": writing_detail,
+            "job_requirements": requirements.as_dict(),
+            "scorer_version": ATS_SCORER_VERSION,
             "confidence": {
                 "score": score_confidence,
                 "range": list(score_range),
@@ -291,20 +307,39 @@ def _score_keywords(
     jd: str,
     maximum: int = 30,
     role_keywords: tuple[str, ...] = (),
+    requirements: RequirementReport | None = None,
 ) -> tuple[int, list[str], list[str], float, dict[str, object]]:
     matched = sorted([term for term in desired if _contains_keyword(text, term)], key=str.casefold)
     missing = sorted([term for term in desired if not _contains_keyword(text, term)], key=str.casefold)
     exact_ratio = len(matched) / len(desired) if desired else 0.5
     semantic_match = semantic_similarity(text, jd) if jd else SemanticMatch(exact_ratio, "profile_keyword_overlap", 0.76)
     similarity = semantic_match.similarity
+    # Raw cosine differs a lot between TF-IDF, local embeddings and an
+    # embedding API; score on a calibrated scale so the provider cannot move
+    # the ATS score.
+    relevance = calibrated_similarity(similarity, semantic_match.provider)
     density = _keyword_density(text, matched)
     role_keyword_hits = [term for term in role_keywords if _contains_keyword(text, term)]
     role_keyword_ratio = len(role_keyword_hits) / len(role_keywords) if role_keywords else 0.5
-    base_score = min(30, round(16 * exact_ratio + 7 * similarity + 4 * density + 3 * role_keyword_ratio))
+    coverage = exact_ratio
+    context = density
+    title_adjustment = 0.0
+    if requirements is not None:
+        if requirements.weighted_coverage is not None:
+            # Missing "must have" skills weigh twice as much as "nice to have".
+            coverage = 0.5 * exact_ratio + 0.5 * requirements.weighted_coverage
+        if requirements.context_ratio is not None:
+            context = 0.5 * density + 0.5 * requirements.context_ratio
+        title_adjustment = {"exact": 0.5, "partial": 0.0, "missing": -1.5}.get(requirements.title_match, 0.0)
+    base_score = min(30, max(0, round(16 * coverage + 7 * relevance + 4 * context + 3 * role_keyword_ratio + title_adjustment)))
     score = min(maximum, round(base_score * maximum / 30))
     return score, matched, missing, similarity, {
         "exact_match_ratio": round(exact_ratio, 3),
+        "weighted_requirement_coverage": round(coverage, 3),
+        "skills_in_context_ratio": round(context, 3),
+        "title_adjustment": title_adjustment,
         "embedding_similarity": round(similarity, 3),
+        "calibrated_similarity": round(relevance, 3),
         "semantic_provider": semantic_match.provider,
         "semantic_model": semantic_match.model,
         "semantic_confidence": semantic_match.confidence,
@@ -325,6 +360,7 @@ def _score_experience_projects(
     jd: str,
     role_profile: AtsRoleProfile | None = None,
     maximum: int = 35,
+    requirements: RequirementReport | None = None,
 ) -> tuple[int, dict[str, object]]:
     supporting_sections = role_profile.supporting_sections if role_profile else ("projects",)
     evidence = "\n".join(
@@ -334,7 +370,11 @@ def _score_experience_projects(
     bullets = _bullet_lines(evidence)
     metrics = len(MEASURABLE_RE.findall(evidence))
     actions = sum(1 for line in bullets if _action_word(line) in ACTION_VERBS)
-    relevance = _embedding_similarity(evidence, jd) if jd and evidence else (0.7 if evidence else 0.0)
+    if jd and evidence:
+        evidence_match = semantic_similarity(evidence, jd)
+        relevance = calibrated_similarity(evidence_match.similarity, evidence_match.provider)
+    else:
+        relevance = 0.7 if evidence else 0.0
     dates = bool(DATE_RANGE_RE.search(evidence))
     weak_bullets = _weak_bullets(bullets)
     duplicate_bullets = len(bullets) - len({" ".join(_match_tokens(line)) for line in bullets})
@@ -355,6 +395,7 @@ def _score_experience_projects(
             + 5 * relevance
             + role_evidence_points
             - min(4, len(weak_bullets) * 0.6 + duplicate_bullets)
+            - _experience_requirement_penalty(requirements)
         ),
     )
     score = min(maximum, max(0, round(base_score * maximum / 35)))
@@ -376,6 +417,7 @@ def _score_experience_projects(
         "weak_bullets": weak_bullets[:6],
         "duplicate_bullets": duplicate_bullets,
         "relevance": round(relevance, 3),
+        "experience_requirement": requirements.experience_status if requirements else "unknown",
         "supporting_sections": supporting_present,
         "role_evidence_terms": list(evidence_terms),
         "role_evidence_hits": evidence_term_hits,
@@ -383,6 +425,12 @@ def _score_experience_projects(
         "expected_action_ratio": expected_action_ratio,
         "recommendations": recommendations,
     }
+
+
+def _experience_requirement_penalty(requirements: RequirementReport | None) -> float:
+    if requirements is None:
+        return 0.0
+    return {"below": 3.0, "close": 1.0}.get(requirements.experience_status, 0.0)
 
 
 def _score_writing_quality(
@@ -393,9 +441,6 @@ def _score_writing_quality(
     maximum: int = 15,
 ) -> tuple[int, dict[str, object]]:
     llm = _llm_quality_evaluation(sections, jd)
-    if llm:
-        llm["provider"] = "llm"
-        return min(maximum, max(0, round(float(llm.get("score", 0)) * maximum / 100))), llm
     bullets = _bullet_lines("\n".join((sections.get("experience", ""), sections.get("projects", "")))) or [line for line in text.splitlines() if len(line.split()) >= 6]
     denominator = max(1, len(bullets))
     concise = sum(1 for line in bullets if 8 <= len(line.split()) <= 32)
@@ -420,6 +465,23 @@ def _score_writing_quality(
     recommendations.extend(summary_quality["recommendations"])
     if style_issues: recommendations.append("Normalize keyword formatting: " + ", ".join(style_issues[:6]) + ".")
     if noisy_sections: recommendations.append("Trim vague optional sections and keep only evidence-backed terms: " + ", ".join(noisy_sections) + ".")
+    deterministic = max(0.0, quality)
+    if llm:
+        # The LLM review refines, never replaces, the deterministic checks, so
+        # one model response cannot swing the ATS score by itself.
+        llm_score = max(0.0, min(100.0, float(llm.get("score", 0))))
+        blended = 0.6 * deterministic + 0.4 * llm_score
+        return min(maximum, max(0, round(blended * maximum / 100))), {
+            **llm,
+            "provider": "llm_blended",
+            "score": round(blended),
+            "deterministic_score": round(deterministic),
+            "llm_score": round(llm_score),
+            "summary": summary_quality,
+            "style_issues": style_issues,
+            "noisy_optional_sections": noisy_sections,
+            "recommendations": list(dict.fromkeys([*recommendations, *[str(item) for item in llm.get("recommendations") or []][:4]])),
+        }
     return min(maximum, max(0, round(quality * maximum / 100))), {
         "provider": "deterministic_fallback",
         "score": max(0, round(quality)),
@@ -611,38 +673,57 @@ def _clean_line(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip(" -•\t")
 
 
+_LLM_QUALITY_CACHE: dict[str, dict[str, object]] = {}
+
+
 def _llm_quality_evaluation(sections: dict[str, str], jd: str) -> dict[str, object] | None:
-    api_key = os.getenv("JOB_AGENT_LLM_API_KEY", "").strip()
-    if not api_key: return None
-    endpoint = os.getenv("JOB_AGENT_LLM_ENDPOINT", "https://api.openai.com/v1/responses").strip()
-    model = os.getenv("JOB_AGENT_LLM_MODEL", "gpt-4o-mini").strip()
-    evidence = "\n".join((sections.get("summary", ""), sections.get("experience", ""), sections.get("projects", "")))[:12000]
+    """Optional LLM review of writing quality, guarded by ``llm_client``.
+
+    Results are cached by content hash: the same resume and job description
+    must always get the same ATS score, and repeat runs cost nothing.
+    """
+    from .guardrails import redact_protected
+    from .llm_client import call_json, enabled
+
+    if not enabled():
+        return None
+    evidence = redact_protected("\n".join((sections.get("summary", ""), sections.get("experience", ""), sections.get("projects", "")))).text[:12000]
     if len(evidence.split()) < 30:
         return None
-    prompt = "Evaluate only the supplied resume evidence. Return strict JSON with score (0-100), strengths (array), recommendations (array), and rationale (string). Assess bullet strength, measurable impact, relevance, clarity, grammar, and concision. Do not invent facts.\nJOB DESCRIPTION:\n" + (jd[:6000] or "Not supplied") + "\nRESUME EVIDENCE:\n" + evidence
-    try:
-        schema = {
-            "type": "object",
-            "properties": {
-                "score": {"type": "number", "minimum": 0, "maximum": 100},
-                "strengths": {"type": "array", "items": {"type": "string"}},
-                "recommendations": {"type": "array", "items": {"type": "string"}},
-                "rationale": {"type": "string"},
-            },
-            "required": ["score", "strengths", "recommendations", "rationale"],
-            "additionalProperties": False,
-        }
-        response = requests.post(endpoint, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json={"model": model, "store": False, "input": prompt, "text": {"format": {"type": "json_schema", "name": "resume_quality", "strict": True, "schema": schema}}}, timeout=(5, 25))
-        response.raise_for_status()
-        payload = response.json()
-        output_text = payload.get("output_text") or next(
-            (content.get("text", "") for item in payload.get("output", []) for content in item.get("content", []) if content.get("type") == "output_text"),
-            "",
-        )
-        parsed = json.loads(output_text)
-        return parsed if isinstance(parsed, dict) and isinstance(parsed.get("score"), (int, float)) else None
-    except (requests.RequestException, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    cache_key = hashlib.sha256(f"{ATS_SCORER_VERSION}\n{jd[:6000]}\n{evidence}".encode("utf-8")).hexdigest()
+    if cache_key in _LLM_QUALITY_CACHE:
+        return dict(_LLM_QUALITY_CACHE[cache_key])
+    schema = {
+        "type": "object",
+        "properties": {
+            "score": {"type": "number", "minimum": 0, "maximum": 100},
+            "strengths": {"type": "array", "items": {"type": "string"}},
+            "recommendations": {"type": "array", "items": {"type": "string"}},
+            "rationale": {"type": "string"},
+        },
+        "required": ["score", "strengths", "recommendations", "rationale"],
+        "additionalProperties": False,
+    }
+    parsed = call_json(
+        "ats_writing_quality",
+        instructions=(
+            "You review resume writing quality for an ATS readiness report. Evaluate only the resume evidence block. "
+            "Score 0-100 for bullet strength, measurable impact, relevance to the job description, clarity, grammar and "
+            "concision. Do not invent facts, do not consider age, gender, religion, caste, nationality or other personal "
+            "attributes, and keep recommendations specific and truthful. Return JSON only."
+        ),
+        data={"job description": jd[:6000] or "Not supplied", "resume evidence": evidence},
+        schema=schema,
+        schema_name="resume_quality",
+        max_output_tokens=700,
+        timeout=(5, 25),
+    )
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("score"), (int, float)):
         return None
+    if len(_LLM_QUALITY_CACHE) > 512:
+        _LLM_QUALITY_CACHE.clear()
+    _LLM_QUALITY_CACHE[cache_key] = dict(parsed)
+    return parsed
 
 
 def _target_keywords(

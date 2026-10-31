@@ -711,6 +711,7 @@ ROLE_TOPICS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (r"java\b|spring", ("java", "oop", "dsa")),
     (r"python developer", ("python", "web_api", "dsa")),
     (r"devops|sre|site reliability|cloud|platform engineer", ("docker_kubernetes", "cloud_aws", "networking_os")),
+    (r"c\+\+|\bcpp\b|embedded|firmware", ("cpp", "dsa", "oop")),
     (r"test|qa|quality|sdet", ("testing", "dsa")),
     (r"software|developer|engineer|sde|programmer", ("dsa", "oop", "git")),
 )

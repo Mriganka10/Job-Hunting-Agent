@@ -38,7 +38,6 @@ from .db import (
     mock_test_question_history,
     mock_test_record,
     complete_mock_interview_session,
-    consume_valid_otp,
     create_mock_interview_session,
     disable_schedule,
     email_verification,
@@ -63,17 +62,87 @@ from .db import (
 from .models import AtsReport, CandidateProfile, JobLead, Resume
 from .job_pagination import DEFAULT_JOB_PAGE_SIZE, paginate_jobs
 from .interview_evaluator import evaluate_interview
-from .interview_questions import build_question_groups, select_question_sequence
+from .interview_questions import build_question_groups, interview_level, select_question_sequence
+from .interview_coding import CODING_SLOTS, add_coding_questions, is_technical_interview
 from .interview_job_context import build_job_fit_group, job_interview_focus, select_job_interview_sequence
 from .partner_sources import REQUEST_CONTEXT, RequestContext, active_job_sources, partner_status
+from .portals import portal_search_links
 from .mock_test import DIFFICULTIES as MOCK_TEST_DIFFICULTIES, LENGTHS as MOCK_TEST_LENGTHS, build_mock_test, grade_mock_test, profile_terms, public_questions
 from .interview_evaluator import evaluate_interview
 from .performance_cache import cached_document, document_cache_key
 from .resume_builder import write_base_resume, write_tailored_resume
+from .resume_validation import change_summary
 from .scheduler_backend import delete_user_schedule, upsert_user_schedule, uses_eventbridge_scheduler
 from .storage import StoredObject, download_file, mirror_artifacts, presigned_download_url, upload_file
+from . import approvals, metrics, ops_db, privacy
+from .guardrails import RateLimited, enforce as enforce_limit
+from .llm_client import start_run_budget
+from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Job Hunting Agent")
+ADMIN_EMAILS = {item.strip().lower() for item in os.getenv("JOB_AGENT_ADMIN_EMAILS", "").split(",") if item.strip()}
+REQUIRE_CONSENT = os.getenv("JOB_AGENT_REQUIRE_CONSENT", "true").strip().lower() not in {"false", "0", "off", "no"}
+
+
+@app.exception_handler(RateLimited)
+def _rate_limited(_: Request, exc: RateLimited) -> JSONResponse:
+    metrics.emit("rate_limited", persist=False, limit=exc.name)
+    minutes = max(1, round(exc.retry_after / 60))
+    return JSONResponse(
+        {"detail": f"Too many requests. Please try again in about {minutes} minute{'s' if minutes != 1 else ''}.", "retry_after": exc.retry_after},
+        status_code=429,
+        headers={"Retry-After": str(exc.retry_after)},
+    )
+
+
+@app.exception_handler(approvals.ApprovalError)
+def _approval_error(_: Request, exc: approvals.ApprovalError) -> JSONResponse:
+    return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
+
+
+@app.middleware("http")
+async def _observe_requests(request: Request, call_next):
+    started = time.monotonic()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+    finally:
+        route = request.scope.get("route")
+        metrics.observe_request(getattr(route, "path", "unmatched"), status, time.monotonic() - started)
+    # Baseline security headers for every page and API response.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "geolocation=(), payment=()")
+    if COOKIE_SECURE:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
+TRUSTED_PROXY_HOPS = max(1, int(os.getenv("JOB_AGENT_TRUSTED_PROXY_HOPS", "2")))  # CloudFront + ALB
+
+
+def _client_ip(request: Request | None) -> str:
+    """Client IP for rate limits, read from the right of X-Forwarded-For.
+
+    The leftmost entries can be forged by the caller; CloudFront appends the
+    real viewer IP and the ALB appends CloudFront's, so with the default two
+    trusted hops the viewer IP is second from the right.
+    """
+    if request is None:
+        return ""
+    parts = [part.strip() for part in request.headers.get("x-forwarded-for", "").split(",") if part.strip()]
+    if parts:
+        return parts[-TRUSTED_PROXY_HOPS if len(parts) >= TRUSTED_PROXY_HOPS else 0][:64]
+    return (request.client.host if request.client else "")[:64]
+
+
+def require_admin(session_cookie: str | None) -> str:
+    user_email = require_user(session_cookie)
+    if user_email not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return user_email
 
 DATA_DIR = Path("data")
 UPLOAD_DIR = DATA_DIR / "uploads"
@@ -282,8 +351,15 @@ class SchedulerRegistry:
 schedulers = SchedulerRegistry()
 
 
+def start_background_guards() -> None:
+    """Send approved emails after their undo window; purge expired accounts daily."""
+    approvals.SENDER.start()
+    threading.Thread(target=privacy.RETENTION.maybe_run, name="retention", daemon=True).start()
+
+
 @app.on_event("startup")
 def restore_active_schedule() -> None:
+    start_background_guards()
     for saved in active_schedules(limit=1000):
         try:
             scheduler = schedulers.get_or_create(saved["user_email"])
@@ -382,7 +458,9 @@ def _send_otp_email(email: str, otp: str) -> bool:
     smtp_password = os.getenv("JOB_AGENT_SMTP_PASSWORD", "")
     from_email = os.getenv("JOB_AGENT_SMTP_FROM", smtp_user)
     if not all((smtp_host, smtp_user, smtp_password, from_email)):
-        print(f"[job-agent] OTP for {email}: {otp}")
+        # Never write sign-in codes to production logs.
+        if DEV_RETURN_OTP:
+            print(f"[job-agent] OTP for {email}: {otp}")
         return False
     message = EmailMessage()
     message["Subject"] = "Your Job Hunting Agent sign-in code"
@@ -399,7 +477,7 @@ def _send_otp_email(email: str, otp: str) -> bool:
 def _send_otp_email_ses(email: str, otp: str) -> bool:
     from_email = os.getenv("JOB_AGENT_SES_FROM", os.getenv("JOB_AGENT_SMTP_FROM", "")).strip()
     if not from_email:
-        print(f"[job-agent] SES OTP delivery is not configured; OTP for {email}: {otp}")
+        print("[job-agent] SES OTP delivery is not configured." + (f" OTP for {email}: {otp}" if DEV_RETURN_OTP else ""))
         return False
 
     subject = "Your Job Hunting Agent sign-in code"
@@ -474,47 +552,59 @@ def _ses_client():
     return boto3.client("sesv2", region_name=SES_REGION)
 
 
+def _localized(html: str, lang: str | None) -> HTMLResponse:
+    """Render a page in the language chosen in the picker (cookie ``jha_lang``)."""
+    from .pages import localize_document
+
+    response = HTMLResponse(localize_document(html, lang or ""))
+    response.headers["Content-Language"] = (lang or "en") if (lang or "en") in {"en", "hi", "ar"} else "en"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
 @app.get("/", response_class=HTMLResponse)
-def index(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
+def index(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE), jha_lang: str | None = Cookie(default=None)) -> HTMLResponse:
     user_email = current_user_email(job_agent_session)
     if not user_email:
         return RedirectResponse("/login", status_code=303)
-    return HTMLResponse(_page(user_email, _profile_for_user(user_email)))
+    return _localized(_page(user_email, _profile_for_user(user_email)), jha_lang)
 
 
 @app.get("/mock-interview", response_class=HTMLResponse)
-def mock_interview_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
+def mock_interview_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE), jha_lang: str | None = Cookie(default=None)) -> HTMLResponse:
     user_email = current_user_email(job_agent_session)
     if not user_email:
         return RedirectResponse("/login", status_code=303)
-    return HTMLResponse(_mock_interview_page(user_email))
+    return _localized(_mock_interview_page(user_email), jha_lang)
 
 
 @app.get("/mock-test", response_class=HTMLResponse)
-def mock_test_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
+def mock_test_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE), jha_lang: str | None = Cookie(default=None)) -> HTMLResponse:
     user_email = current_user_email(job_agent_session)
     if not user_email:
         return RedirectResponse("/login", status_code=303)
-    return HTMLResponse(_mock_test_page(user_email))
+    return _localized(_mock_test_page(user_email), jha_lang)
 
 
 @app.get("/login", response_class=HTMLResponse)
-def login_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
+def login_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE), jha_lang: str | None = Cookie(default=None)) -> HTMLResponse:
     if current_user_email(job_agent_session):
         return RedirectResponse("/", status_code=303)
-    return HTMLResponse(_login_page())
+    return _localized(_login_page(), jha_lang)
 
 
 @app.get("/register", response_class=HTMLResponse)
-def register_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> HTMLResponse:
+def register_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE), jha_lang: str | None = Cookie(default=None)) -> HTMLResponse:
     if current_user_email(job_agent_session):
         return RedirectResponse("/", status_code=303)
-    return HTMLResponse(_register_page())
+    return _localized(_register_page(), jha_lang)
 
 
 @app.post("/api/auth/request-otp")
-def request_otp(email: Annotated[str, Form()] = "") -> dict:
+def request_otp(request: Request, email: Annotated[str, Form()] = "") -> dict:
     normalized = _validated_email(email)
+    enforce_limit("otp_request_ip", _client_ip(request))
+    enforce_limit("otp_request_email", normalized)
     if EMAIL_PROVIDER == "ses" and not DEV_RETURN_OTP:
         if not _ses_sender_configured():
             raise HTTPException(status_code=503, detail="OTP email delivery is not configured or failed. Please try again later.")
@@ -527,6 +617,7 @@ def request_otp(email: Annotated[str, Form()] = "") -> dict:
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_TTL_MINUTES)
     save_otp(normalized, _hash_otp(normalized, otp), expires_at)
     sent = _send_otp_email(normalized, otp)
+    metrics.emit("otp_requested", user_email=normalized, delivered=bool(sent))
     if not sent and not DEV_RETURN_OTP:
         raise HTTPException(status_code=503, detail="OTP email delivery is not configured or failed. Please try again later.")
     response = {
@@ -541,8 +632,9 @@ def request_otp(email: Annotated[str, Form()] = "") -> dict:
 
 
 @app.post("/api/auth/register-email")
-def register_email(email: Annotated[str, Form()] = "") -> dict:
+def register_email(request: Request, email: Annotated[str, Form()] = "") -> dict:
     normalized = _validated_email(email)
+    enforce_limit("register_ip", _client_ip(request))
     current = email_verification(normalized)
     status = (current or {}).get("status", "")
     if status.upper() == "SUCCESS" or (EMAIL_PROVIDER == "ses" and _ses_email_verified(normalized)):
@@ -557,10 +649,16 @@ def register_email(email: Annotated[str, Form()] = "") -> dict:
 
 
 @app.post("/api/auth/verify")
-def verify_otp(email: Annotated[str, Form()] = "", otp: Annotated[str, Form()] = "") -> HTMLResponse:
+def verify_otp(request: Request, email: Annotated[str, Form()] = "", otp: Annotated[str, Form()] = "") -> HTMLResponse:
     normalized = _validated_email(email)
-    if not consume_valid_otp(normalized, _hash_otp(normalized, otp.strip())):
+    enforce_limit("otp_verify_ip", _client_ip(request))
+    outcome = ops_db.verify_otp(normalized, _hash_otp(normalized, otp.strip()), compare=hmac.compare_digest)
+    if outcome != "ok":
+        metrics.emit("otp_locked" if outcome == "locked" else "login_failed", user_email=normalized, outcome=outcome)
+        if outcome == "locked":
+            raise HTTPException(status_code=429, detail="Too many wrong codes. This code is now blocked; request a new OTP.")
         raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
+    metrics.emit("login_ok", user_email=normalized)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
         SESSION_COOKIE,
@@ -585,6 +683,19 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/health/ready")
+def health_ready() -> JSONResponse:
+    """Readiness for the load balancer: the database must answer."""
+    from .db import connection
+
+    try:
+        with connection() as conn:
+            conn.execute("SELECT 1")
+    except Exception as exc:
+        return JSONResponse({"status": "unavailable", "database": type(exc).__name__}, status_code=503)
+    return JSONResponse({"status": "ok", "database": "ok", "outbox_sender": approvals.SENDER._thread is not None})
+
+
 @app.get("/api/dashboard")
 def dashboard(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
     user_email = require_user(job_agent_session)
@@ -593,10 +704,16 @@ def dashboard(job_agent_session: str | None = Cookie(default=None, alias=SESSION
     scheduler = schedulers.get(user_email)
     scheduler_snapshot = scheduler.snapshot() if scheduler else _persisted_scheduler_snapshot(user_email)
     scheduler_snapshot["history"] = [_run_history_item(latest_run)] if latest_run else []
+    profile = _profile_for_user(user_email)
     return {
-        "profile": _profile_for_user(user_email),
+        "profile": profile,
         "latest_run": latest_run,
         "scheduler": scheduler_snapshot,
+        "portal_search_links": portal_search_links(
+            _split_csv(profile.get("target_roles", "")), _split_csv(profile.get("locations", "")),
+            float(profile.get("experience_years") or 0),
+        ),
+        "has_consent": privacy.has_consent(user_email),
     }
 
 
@@ -658,6 +775,7 @@ def start_mock_interview(
     job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict:
     user_email = require_user(job_agent_session)
+    enforce_limit("mock_interview", user_email)
     profile = _profile_for_user(user_email)
     latest = next(iter(latest_runs(user_email, limit=1)), None)
     latest_payload = (latest or {}).get("payload") or {}
@@ -692,6 +810,12 @@ def start_mock_interview(
                 interview_mode,
                 previous_questions=history,
             )
+        # Technical roles: real coding problems at the candidate's level.
+        questions = add_coding_questions(
+            questions, roles=tuple(interview["roles"]), skills=tuple(interview["skills"]),
+            level=str(interview.get("level") or "mid"), mode=interview_mode, previous_questions=history,
+            seed=secrets.token_hex(8),
+        )
         session_id = create_mock_interview_session(
             user_email,
             region=region,
@@ -703,6 +827,8 @@ def start_mock_interview(
             job_title=str((job or {}).get("title") or ""),
             company=str((job or {}).get("company") or ""),
         )
+    metrics.emit("mock_interview_started", user_email=user_email, job_specific=bool(job), mode=interview_mode,
+                 coding_questions=sum(1 for item in questions if item.get("answer_mode") == "code"))
     return {
         "session_id": session_id,
         "region": region,
@@ -710,6 +836,7 @@ def start_mock_interview(
         "voice": _accent_for_region(region),
         "tts_provider": "azure" if AZURE_SPEECH_KEY and AZURE_SPEECH_REGION else "browser",
         "interview_mode": interview_mode,
+        "level": interview.get("level", "mid"),
         "roles": interview["roles"],
         "skills": interview["skills"],
         "job": interview.get("job"),
@@ -752,6 +879,12 @@ def complete_mock_interview(
         score=scorecard["score"],
         feedback=scorecard,
     )
+    metrics.emit(
+        "mock_interview_completed", user_email=user_email, value=float(scorecard.get("score") or 0),
+        job_specific=bool(session.get("job_id")), answered=int(scorecard.get("answered") or 0),
+        coding_questions=sum(1 for item in session_questions if item.get("answer_mode") == "code"),
+        llm_score=scorecard.get("llm_score"), local_score=scorecard.get("local_score"),
+    )
     return {"session": saved, "scorecard": scorecard}
 
 
@@ -780,6 +913,7 @@ def start_mock_test(
     job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict:
     user_email = require_user(job_agent_session)
+    enforce_limit("mock_test", user_email)
     length = str(payload.get("length") or "standard").strip().lower()
     difficulty = str(payload.get("difficulty") or "mixed").strip().lower()
     if length not in MOCK_TEST_LENGTHS:
@@ -816,6 +950,8 @@ def start_mock_test(
             time_limit_seconds=test["time_limit_seconds"],
         )
     record = mock_test_record(user_email, test_id) or {}
+    metrics.emit("mock_test_started", user_email=user_email, job_specific=bool(job), length=length, difficulty=difficulty,
+                 coding_questions=sum(1 for item in test["questions"] if item.get("kind") == "code"))
     return _mock_test_client_payload(record)
 
 
@@ -854,6 +990,9 @@ def submit_mock_test(
     )
     stored_answers = {item["id"]: item["selected_index"] for item in scorecard["review"]}
     saved = complete_mock_test(user_email, test_id, answers=stored_answers, scorecard=scorecard) or record
+    metrics.emit("mock_test_completed", user_email=user_email, value=float(scorecard.get("percent") or 0),
+                 job_specific=bool(record.get("job_id")), questions=int(scorecard.get("total") or 0),
+                 timed_out=bool((scorecard.get("time") or {}).get("submitted_after_time_limit")))
     return _mock_test_client_payload(saved)
 
 
@@ -872,6 +1011,228 @@ def mock_test_detail(test_id: int, job_agent_session: str | None = Cookie(defaul
     return _mock_test_client_payload(record)
 
 
+# ---------------------------------------------------------------------------
+# Human-in-the-loop approval queue for recruiter emails
+# ---------------------------------------------------------------------------
+@app.get("/api/approvals")
+def list_approvals(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    return approvals.overview(require_user(job_agent_session))
+
+
+@app.post("/api/approvals/{item_id}/approve")
+def approve_application(item_id: int, payload: Annotated[dict, Body()], job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    subject = payload.get("subject")
+    body = payload.get("body")
+    item = approvals.approve(
+        user_email, item_id,
+        subject=str(subject) if subject is not None else None,
+        body=str(body) if body is not None else None,
+        confirmed=payload.get("confirm") is True,
+    )
+    return {"item": item, **{key: value for key, value in approvals.overview(user_email).items() if key != "items"}}
+
+
+@app.post("/api/approvals/{item_id}/undo")
+def undo_application(item_id: int, job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    return {"item": approvals.undo(require_user(job_agent_session), item_id)}
+
+
+@app.post("/api/approvals/{item_id}/reject")
+def reject_application(item_id: int, payload: Annotated[dict | None, Body()] = None, job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    reason = str((payload or {}).get("reason") or "")
+    return {"item": approvals.reject(require_user(job_agent_session), item_id, reason)}
+
+
+# ---------------------------------------------------------------------------
+# Feedback that becomes live quality labels
+# ---------------------------------------------------------------------------
+LEAD_FEEDBACK_REASONS = {"role", "location", "seniority", "skills", "salary", "company", "duplicate", "expired", "other", ""}
+
+
+def _run_job(user_email: str, run_id: int, job_id: str) -> tuple[dict, int]:
+    run = run_for_user(user_email, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    for rank, job in enumerate((run.get("payload") or {}).get("jobs") or [], start=1):
+        if isinstance(job, dict) and _mock_test_job_id(job) == job_id:
+            return job, rank
+    raise HTTPException(status_code=404, detail="Job lead not found in this run.")
+
+
+@app.post("/api/runs/{run_id}/feedback")
+def lead_feedback(run_id: int, payload: Annotated[dict, Body()], job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    enforce_limit("feedback", user_email)
+    verdict = str(payload.get("verdict") or "").strip().lower()
+    reason = str(payload.get("reason") or "").strip().lower()
+    if verdict not in {"relevant", "not_relevant"}:
+        raise HTTPException(status_code=400, detail="Verdict must be relevant or not_relevant.")
+    if reason not in LEAD_FEEDBACK_REASONS:
+        raise HTTPException(status_code=400, detail="Unknown reason.")
+    job_id = str(payload.get("job_id") or "").strip().lower()
+    job, rank = _run_job(user_email, run_id, job_id)
+    ops_db.save_lead_feedback(
+        user_email, run_id=run_id, job_key=job_id, portal=str(job.get("portal") or ""), title=str(job.get("title") or ""),
+        verdict=verdict, reason=reason if verdict == "not_relevant" else "", note=str(payload.get("note") or "")[:300],
+        rank=rank, match_score=int(job.get("match_score") or 0),
+    )
+    metrics.emit("lead_feedback", user_email=user_email, run_id=run_id, verdict=verdict, reason=reason, rank=rank,
+                 portal=job.get("portal"), not_relevant=int(verdict == "not_relevant"))
+    return {"status": "saved", "job_id": job_id, "verdict": verdict, "reason": reason}
+
+
+@app.get("/api/runs/{run_id}/feedback")
+def run_feedback(run_id: int, job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    return {"feedback": ops_db.lead_feedback_for_run(user_email, run_id)}
+
+
+@app.post("/api/events/lead-click")
+def lead_click(payload: Annotated[dict, Body()], job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    enforce_limit("feedback", user_email)
+    metrics.emit(
+        "lead_click", user_email=user_email, run_id=int(payload.get("run_id") or 0),
+        rank=int(payload.get("rank") or 0), portal=str(payload.get("portal") or "")[:40],
+    )
+    return {"status": "ok"}
+
+
+@app.post("/api/mock-interview/{session_id}/rating")
+def rate_interview_feedback(session_id: int, payload: Annotated[dict, Body()], job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    enforce_limit("feedback", user_email)
+    if not mock_interview_session(user_email, session_id):
+        raise HTTPException(status_code=404, detail="Interview session not found.")
+    try:
+        rating = int(payload.get("rating"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Rating must be 1 to 5.") from None
+    if not 1 <= rating <= 5:
+        raise HTTPException(status_code=400, detail="Rating must be 1 to 5.")
+    unfair = payload.get("unfair") is True
+    comment = str(payload.get("comment") or "")[:500]
+    if unfair:
+        ops_db.save_content_report(user_email, kind="interview_feedback", item_id=str(session_id), reason="unfair", note=comment)
+    metrics.emit("interview_feedback_rating", user_email=user_email, rating=rating, unfair=unfair)
+    return {"status": "saved", "rating": rating, "unfair": unfair}
+
+
+@app.post("/api/mock-test/report-question")
+def report_mock_test_question(payload: Annotated[dict, Body()], job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    enforce_limit("feedback", user_email)
+    record = mock_test_record(user_email, int(payload.get("test_id") or 0))
+    question_id = str(payload.get("question_id") or "")
+    if not record or not any(str(item.get("id")) == question_id for item in record.get("questions") or []):
+        raise HTTPException(status_code=404, detail="Question not found in your test.")
+    reason = str(payload.get("reason") or "wrong_answer")[:40]
+    ops_db.save_content_report(user_email, kind="mock_test_question", item_id=question_id, reason=reason, note=str(payload.get("note") or "")[:500])
+    metrics.emit("question_reported", user_email=user_email, reason=reason)
+    return {"status": "reported"}
+
+
+# ---------------------------------------------------------------------------
+# Privacy (DPDP Act 2023): consent, export, deletion, audit trail
+# ---------------------------------------------------------------------------
+@app.get("/api/account/privacy")
+def account_privacy(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    return {
+        "consent": ops_db.consent_status(user_email), "current_version": privacy.CONSENT_VERSION,
+        "has_consent": privacy.has_consent(user_email), "purpose": privacy.PURPOSE, "retention_days": privacy.retention_days(),
+    }
+
+
+@app.post("/api/account/consent")
+def account_consent(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    return privacy.give_consent(require_user(job_agent_session))
+
+
+@app.get("/api/account/export")
+def account_export(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> Response:
+    user_email = require_user(job_agent_session)
+    ops_db.audit(user_email, "data_exported")
+    body = json.dumps(privacy.export_user_data(user_email), ensure_ascii=False, indent=2, default=str)
+    return Response(body, media_type="application/json", headers={"Content-Disposition": 'attachment; filename="job-hunting-agent-my-data.json"', "Cache-Control": "no-store"})
+
+
+@app.get("/api/account/audit")
+def account_audit(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    return {"entries": ops_db.audit_entries(require_user(job_agent_session), limit=100)}
+
+
+@app.post("/api/account/delete")
+def account_delete(payload: Annotated[dict, Body()], job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> JSONResponse:
+    user_email = require_user(job_agent_session)
+    enforce_limit("account_delete", user_email)
+    if normalize_email(str(payload.get("confirm_email") or "")) != user_email:
+        raise HTTPException(status_code=400, detail="Type your email address exactly to confirm deletion.")
+    scheduler = schedulers.get(user_email)
+    if scheduler:
+        scheduler.stop()
+    result = privacy.delete_user_data(user_email, data_root=DATA_DIR)
+    response = JSONResponse({"status": "deleted", "detail": result})
+    response.delete_cookie(SESSION_COOKIE)
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Admin: production metrics and alerts
+# ---------------------------------------------------------------------------
+@app.get("/api/admin/metrics")
+def admin_metrics(days: int = Query(default=7, ge=1, le=90), job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    require_admin(job_agent_session)
+    return metrics.summary(days)
+
+
+@app.get("/admin/metrics", response_class=HTMLResponse)
+def admin_metrics_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE), jha_lang: str | None = Cookie(default=None)) -> HTMLResponse:
+    user_email = current_user_email(job_agent_session)
+    if not user_email:
+        return RedirectResponse("/login", status_code=303)
+    if user_email not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    from .pages import admin_metrics_page as render
+
+    return _localized(render(user_email), jha_lang)
+
+
+@app.get("/progress", response_class=HTMLResponse)
+def progress_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE), jha_lang: str | None = Cookie(default=None)) -> HTMLResponse:
+    user_email = current_user_email(job_agent_session)
+    if not user_email:
+        return RedirectResponse("/login", status_code=303)
+    from .pages import progress_page as render
+
+    return _localized(render(user_email, is_admin=user_email in ADMIN_EMAILS), jha_lang)
+
+
+@app.get("/api/progress/report")
+def progress_report(
+    period: str = Query(default="weekly"),
+    job_id: str = Query(default=""),
+    tz: str = Query(default="Asia/Kolkata"),
+    job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict:
+    """Daily or weekly Mock Test and Mock Interview report, optionally for one job."""
+    from .progress_reports import PERIODS, build_report
+
+    user_email = require_user(job_agent_session)
+    if period not in PERIODS:
+        raise HTTPException(status_code=400, detail="Period must be daily or weekly.")
+    return build_report(user_email, period=period, job_id=job_id.strip().lower()[:300], tz=tz[:64])
+
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy_page(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE), jha_lang: str | None = Cookie(default=None)) -> HTMLResponse:
+    from .pages import privacy_page as render
+
+    user_email = current_user_email(job_agent_session) or ""
+    return _localized(render(user_email, privacy.PURPOSE, privacy.retention_days(), privacy.CONSENT_VERSION, is_admin=user_email in ADMIN_EMAILS), jha_lang)
+
+
 @app.post("/api/run")
 async def run_now(
     background_tasks: BackgroundTasks,
@@ -886,15 +1247,20 @@ async def run_now(
     target_roles: Annotated[str, Form()] = "",
     locations: Annotated[str, Form()] = "",
     skills: Annotated[str, Form()] = "",
-    experience_years: Annotated[float, Form()] = 0,
+    experience_years: Annotated[str, Form()] = "",
     job_description: Annotated[str, Form()] = "",
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
     daily_timezone: Annotated[str, Form()] = "UTC",
     start_daily: Annotated[bool, Form()] = False,
+    consent: Annotated[bool, Form()] = False,
 ) -> dict:
     user_email = require_user(job_agent_session)
+    _require_consent(user_email, consent)
+    years = _require_profile_fields(name=name, phone=phone, target_roles=target_roles, locations=locations,
+                                    skills=skills, experience_years=experience_years, max_jobs_per_portal=max_jobs_per_portal)
+    enforce_limit("run", user_email)
     stored_resume = await resolve_resume(resume, user_email)
     config = _config_for_user(user_email, build_config_from_form(
         name=name,
@@ -905,7 +1271,7 @@ async def run_now(
         target_roles=target_roles,
         locations=locations,
         skills=skills,
-        experience_years=experience_years,
+        experience_years=years,
         job_description=job_description,
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
@@ -952,16 +1318,21 @@ async def start_scheduler(
     target_roles: Annotated[str, Form()] = "",
     locations: Annotated[str, Form()] = "",
     skills: Annotated[str, Form()] = "",
-    experience_years: Annotated[float, Form()] = 0,
+    experience_years: Annotated[str, Form()] = "",
     job_description: Annotated[str, Form()] = "",
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
     daily_timezone: Annotated[str, Form()] = "UTC",
+    consent: Annotated[bool, Form()] = False,
 ) -> dict:
     user_email = require_user(job_agent_session)
     if not daily_at:
         raise HTTPException(status_code=400, detail="Daily time is required to schedule the agent.")
+    _require_consent(user_email, consent)
+    years = _require_profile_fields(name=name, phone=phone, target_roles=target_roles, locations=locations,
+                                    skills=skills, experience_years=experience_years, max_jobs_per_portal=max_jobs_per_portal)
+    enforce_limit("schedule", user_email)
     stored_resume = await resolve_resume(resume, user_email)
     config = _config_for_user(user_email, build_config_from_form(
         name=name,
@@ -972,7 +1343,7 @@ async def start_scheduler(
         target_roles=target_roles,
         locations=locations,
         skills=skills,
-        experience_years=experience_years,
+        experience_years=years,
         job_description=job_description,
         application_mode=application_mode,
         max_jobs_per_portal=max_jobs_per_portal,
@@ -999,9 +1370,58 @@ def stop_scheduler(job_agent_session: Annotated[str | None, Cookie(alias=SESSION
     return schedulers.stop(user_email)
 
 
+PHONE_PATTERN = re.compile(r"^\+?[0-9][0-9 ()\-]{5,20}$")
+
+
+def _require_profile_fields(
+    *, name: str, phone: str, target_roles: str, locations: str, skills: str, experience_years: str, max_jobs_per_portal: int,
+) -> float:
+    """Server-side twin of the form's required fields (marked * in the UI).
+
+    LinkedIn URL, Naukri URL and the job description stay optional. Returns
+    the experience in years. The browser checks first; this stops scripted
+    or stale clients from running with an incomplete profile.
+    """
+    missing = [label for label, value in (
+        ("Name", name), ("Phone", phone), ("Target roles", target_roles), ("Locations", locations),
+        ("Skills", skills), ("Experience (years)", experience_years),
+    ) if not str(value or "").strip()]
+    if missing:
+        raise HTTPException(status_code=422, detail="Please fill in the required fields: " + ", ".join(missing) + ".")
+    digits = re.sub(r"\D", "", phone)
+    if not PHONE_PATTERN.match(phone.strip()) or not 7 <= len(digits) <= 15:
+        raise HTTPException(status_code=422, detail="Enter a valid phone number (7 to 15 digits, for example +91 98765 43210).")
+    try:
+        years = float(experience_years)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Experience (years) must be a number from 0 to 50.") from None
+    if not 0 <= years <= 50:
+        raise HTTPException(status_code=422, detail="Experience (years) must be a number from 0 to 50.")
+    if not 1 <= max_jobs_per_portal <= 50:
+        raise HTTPException(status_code=422, detail="Max jobs per source must be from 1 to 50.")
+    return years
+
+
+def _require_consent(user_email: str, consent_given: bool) -> None:
+    """DPDP: process a resume only after the user accepted the current privacy notice."""
+    if not REQUIRE_CONSENT or privacy.has_consent(user_email):
+        return
+    if consent_given:
+        privacy.give_consent(user_email)
+        return
+    raise HTTPException(status_code=403, detail="Please accept the privacy notice before uploading or processing your resume.")
+
+
 def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user_email: str = "") -> dict:
+    started = time.monotonic()
+    start_run_budget(user_email)
     agent = JobHuntingAgent(config)
-    report, jobs, results, improved_resume = agent.run(resume_path, build_documents=not bool(user_email))
+    try:
+        report, jobs, results, improved_resume = agent.run(resume_path, build_documents=not bool(user_email))
+    except Exception as exc:
+        metrics.emit("run_failed", user_email=user_email, trigger=trigger, error=type(exc).__name__,
+                     duration_s=round(time.monotonic() - started, 2))
+        raise
     application_summary = _application_summary(results)
     generated_at = datetime.now().isoformat(timespec="seconds")
     improved_resume = _publish_improved_resume(improved_resume, user_email or config.profile.email or "anonymous", generated_at)
@@ -1031,7 +1451,14 @@ def run_agent(resume_path: str, config: AppConfig, trigger: str = "manual", user
     if user_email:
         run_id = record_run(user_email, result)
         result["run_id"] = run_id
+        saved_profile = user_profile(user_email) or {}
+        queued = approvals.queue_applications(
+            user_email, run_id, result["applications"],
+            resume_path=resume_path, resume_uri=str(saved_profile.get("resume_uri") or ""),
+        )
+        result["approvals_queued"] = queued
         _submit_document_task(f"base:{run_id}", _prepare_base_document, user_email, run_id)
+        metrics.run_completed(user_email, result, duration_s=time.monotonic() - started)
         return _client_run_payload(result, run_id)
     return result
 
@@ -1076,7 +1503,7 @@ def resume_status(
         raise HTTPException(status_code=404, detail="Run not found.")
     improved = (run.get("payload") or {}).get("improved_resume") or {}
     ready = {
-        str(item.get("artifact_id")): {"status": "ready", "validation": item.get("validation", {})}
+        str(item.get("artifact_id")): {"status": "ready", "validation": item.get("validation", {}), "change_summary": item.get("change_summary", {})}
         for item in improved.get("tailored_resumes", []) if isinstance(item, dict)
     }
     ready.update(improved.get("tailored_statuses") or {})
@@ -1087,6 +1514,9 @@ def resume_status(
             "error": improved.get("error", ""),
         },
         "tailored": ready,
+        "templates": _template_statuses(improved),
+        "template": _run_template(run.get("payload") or {}),
+        "preferred_template": _run_template(run.get("payload") or {}, for_tailored=True),
     }
 
 
@@ -1100,6 +1530,7 @@ def prepare_tailored_resume(
     run = run_for_user(user_email, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found.")
+    enforce_limit("tailored_resume", user_email)
     payload = run.get("payload") or {}
     job = next((item for item in payload.get("jobs", []) if item.get("tailored_resume_id") == artifact_id), None)
     if not job:
@@ -1119,6 +1550,144 @@ def prepare_tailored_resume(
     mutate_run_payload(user_email, run_id, mark_preparing)
     _submit_document_task(f"tailored:{run_id}:{artifact_id}", _prepare_tailored_document, user_email, run_id, artifact_id)
     return {"status": "preparing", "artifact_id": artifact_id}
+
+
+def _run_template(payload: dict, *, for_tailored: bool = False) -> str:
+    """The run's ATS template: the user's choice for tailored resumes, else the agent's pick."""
+    from .resume_templates import DEFAULT_TEMPLATE, is_template
+
+    improved = payload.get("improved_resume") or {}
+    candidates = (improved.get("preferred_template"), improved.get("template")) if for_tailored else (improved.get("template"),)
+    return next((str(value) for value in candidates if is_template(value)), DEFAULT_TEMPLATE)
+
+
+def _template_statuses(improved: dict) -> dict:
+    """Status of every template for this run; the base resume counts as its template."""
+    statuses: dict[str, dict] = {}
+    base_template = improved.get("template")
+    if base_template and improved.get("status") == "ready":
+        validation = improved.get("validation") or {}
+        statuses[str(base_template)] = {"status": "ready", "passed": bool(validation.get("passed")), "page_count": validation.get("page_count"), "base": True}
+    for key, artifact in (improved.get("template_resumes") or {}).items():
+        validation = (artifact or {}).get("validation") or {}
+        statuses[key] = {"status": "ready", "passed": bool(validation.get("passed")), "page_count": validation.get("page_count")}
+    for key, status in (improved.get("template_statuses") or {}).items():
+        if status.get("status") != "ready" and key not in statuses:
+            statuses[key] = status
+    return statuses
+
+
+def _template_artifact(improved: dict, template: str) -> dict | None:
+    if improved.get("template") == template and improved.get("status") == "ready":
+        return improved
+    artifact = (improved.get("template_resumes") or {}).get(template)
+    return artifact if isinstance(artifact, dict) else None
+
+
+@app.get("/api/resume-templates")
+def resume_templates(
+    run_id: Annotated[int, Query()] = 0,
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+) -> dict:
+    """The ATS templates, with the agent's recommendation for this run or profile."""
+    from .resume_templates import catalog, recommend_template
+
+    user_email = require_user(job_agent_session)
+    run = run_for_user(user_email, run_id) if run_id else None
+    improved = ((run or {}).get("payload") or {}).get("improved_resume") or {}
+    recommended, reason = improved.get("recommended_template"), improved.get("template_reason", "")
+    if not recommended:
+        profile = _profile_for_user(user_email)
+        recommended, reason = recommend_template(float(profile.get("experience_years") or 0))
+    return {
+        "templates": catalog(str(recommended), str(reason)),
+        "recommended": recommended,
+        "statuses": _template_statuses(improved) if run else {},
+        "preferred_template": _run_template((run or {}).get("payload") or {}, for_tailored=True) if run else recommended,
+    }
+
+
+@app.post("/api/runs/{run_id}/resume-templates/{template}/prepare")
+def prepare_template_resume(
+    run_id: int,
+    template: str,
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+) -> dict:
+    from .resume_templates import is_template
+
+    user_email = require_user(job_agent_session)
+    template = template.strip().lower()
+    if not is_template(template):
+        raise HTTPException(status_code=404, detail="Unknown resume template.")
+    run = run_for_user(user_email, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    improved = (run.get("payload") or {}).get("improved_resume") or {}
+    if _template_artifact(improved, template):
+        return {"status": "ready", "template": template}
+    enforce_limit("tailored_resume", user_email)
+
+    def mark_preparing(current: dict) -> dict:
+        current_improved = dict(current.get("improved_resume") or {})
+        statuses = dict(current_improved.get("template_statuses") or {})
+        statuses[template] = {"status": "preparing"}
+        current_improved["template_statuses"] = statuses
+        current["improved_resume"] = current_improved
+        return current
+
+    mutate_run_payload(user_email, run_id, mark_preparing)
+    _submit_document_task(f"template:{run_id}:{template}", _prepare_template_document, user_email, run_id, template)
+    return {"status": "preparing", "template": template}
+
+
+@app.post("/api/runs/{run_id}/resume-template")
+def choose_resume_template(
+    run_id: int,
+    payload: Annotated[dict, Body()],
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+) -> dict:
+    """Use this template for the tailored resumes prepared from now on."""
+    from .resume_templates import get_template, is_template
+
+    user_email = require_user(job_agent_session)
+    template = str(payload.get("template") or "").strip().lower()
+    if not is_template(template):
+        raise HTTPException(status_code=400, detail="Unknown resume template.")
+    if not run_for_user(user_email, run_id):
+        raise HTTPException(status_code=404, detail="Run not found.")
+
+    def choose(current: dict) -> dict:
+        improved = dict(current.get("improved_resume") or {})
+        improved["preferred_template"] = template
+        current["improved_resume"] = improved
+        return current
+
+    mutate_run_payload(user_email, run_id, choose)
+    metrics.emit("resume_template_chosen", user_email=user_email, template=template)
+    return {"preferred_template": template, "name": get_template(template).name}
+
+
+@app.get("/api/runs/{run_id}/resume-templates/{template}/{file_format}")
+def download_template_resume(
+    run_id: int,
+    template: str,
+    file_format: str,
+    job_agent_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+):
+    user_email = require_user(job_agent_session)
+    run = run_for_user(user_email, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    artifact = _template_artifact((run.get("payload") or {}).get("improved_resume") or {}, template.strip().lower())
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Prepare this template first.")
+    if file_format.casefold() == "preview":
+        pages = ((artifact.get("validation") or {}).get("rendered_pages") or [])
+        preview = Path(str(pages[0])) if pages else None
+        if preview and preview.is_file():
+            return FileResponse(preview, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
+        raise HTTPException(status_code=404, detail="Preview is not available.")
+    return _resume_file_response(artifact, file_format)
 
 
 @app.get("/api/runs/{run_id}/improved-resume")
@@ -1215,13 +1784,14 @@ def _prepare_base_document(user_email: str, run_id: int) -> None:
             return
         payload = run.get("payload") or {}
         resume, report, config, resume_hash = _document_inputs(payload)
-        key = document_cache_key(resume_hash, config.profile, config.application.resume_page_target)
+        template = _run_template(payload)
+        key = document_cache_key(resume_hash, config.profile, config.application.resume_page_target, template=template)
         artifact, _ = cached_document(
             config.application.data_dir,
             key,
             lambda output: write_base_resume(
                 resume, report, config.profile, output,
-                page_target=config.application.resume_page_target,
+                page_target=config.application.resume_page_target, template=template,
             ),
         )
         artifact = _publish_document_artifact(
@@ -1237,8 +1807,46 @@ def _prepare_base_document(user_email: str, run_id: int) -> None:
             return current
 
         mutate_run_payload(user_email, run_id, complete)
+        _emit_document_ready(user_email, "base", artifact)
     except Exception as exc:
         _mark_document_failure(user_email, run_id, "base", str(exc))
+
+
+def _prepare_template_document(user_email: str, run_id: int, template: str) -> None:
+    """The run's ATS resume in another template, with the same checks as the base resume."""
+    try:
+        run = run_for_user(user_email, run_id)
+        if not run:
+            return
+        payload = run.get("payload") or {}
+        resume, report, config, resume_hash = _document_inputs(payload)
+        key = document_cache_key(resume_hash, config.profile, config.application.resume_page_target, template=template)
+        artifact, _ = cached_document(
+            config.application.data_dir,
+            key,
+            lambda output: write_base_resume(
+                resume, report, config.profile, output,
+                page_target=config.application.resume_page_target, template=template,
+            ),
+        )
+        artifact = _publish_document_artifact(
+            artifact, user_email, str(payload.get("generated_at") or run_id), f"templates/{template}"
+        )
+
+        def complete(current: dict) -> dict:
+            improved = dict(current.get("improved_resume") or {})
+            artifacts = dict(improved.get("template_resumes") or {})
+            artifacts[template] = artifact
+            statuses = dict(improved.get("template_statuses") or {})
+            statuses[template] = {"status": "ready"}
+            improved.update({"template_resumes": artifacts, "template_statuses": statuses})
+            current["improved_resume"] = improved
+            return current
+
+        mutate_run_payload(user_email, run_id, complete)
+        _emit_document_ready(user_email, "template", artifact)
+    except Exception as exc:
+        _mark_document_failure(user_email, run_id, f"template:{template}", str(exc))
 
 
 def _prepare_tailored_document(user_email: str, run_id: int, artifact_id: str) -> None:
@@ -1250,40 +1858,60 @@ def _prepare_tailored_document(user_email: str, run_id: int, artifact_id: str) -
         resume, report, config, resume_hash = _document_inputs(payload)
         job_payload = next(item for item in payload.get("jobs", []) if item.get("tailored_resume_id") == artifact_id)
         job = _job_from_payload(job_payload)
-        key = document_cache_key(resume_hash, config.profile, config.application.resume_page_target, job)
+        template = _run_template(payload, for_tailored=True)
+        key = document_cache_key(resume_hash, config.profile, config.application.resume_page_target, job, template=template)
         artifact, _ = cached_document(
             config.application.data_dir,
             key,
             lambda output: write_tailored_resume(
                 resume, report, config.profile, output, job,
-                page_target=config.application.resume_page_target,
+                page_target=config.application.resume_page_target, template=template,
             ),
         )
         artifact = _publish_document_artifact(
             artifact, user_email, str(payload.get("generated_at") or run_id), f"tailored/{artifact_id}"
         )
+        # What changed, with the resume line that supports every added skill.
+        artifact["change_summary"] = change_summary(resume, job, artifact)
 
         def complete(current: dict) -> dict:
             improved = dict(current.get("improved_resume") or {})
             artifacts = [item for item in improved.get("tailored_resumes", []) if item.get("artifact_id") != artifact_id]
             artifacts.append(artifact)
             statuses = dict(improved.get("tailored_statuses") or {})
-            statuses[artifact_id] = {"status": "ready", "validation": artifact.get("validation", {})}
+            statuses[artifact_id] = {"status": "ready", "validation": artifact.get("validation", {}), "change_summary": artifact.get("change_summary", {})}
             improved.update({"tailored_resumes": artifacts, "tailored_statuses": statuses})
             current["improved_resume"] = improved
             return current
 
         mutate_run_payload(user_email, run_id, complete)
+        _emit_document_ready(user_email, "tailored", artifact)
     except Exception as exc:
         _mark_document_failure(user_email, run_id, artifact_id, str(exc))
 
 
+def _emit_document_ready(user_email: str, kind: str, artifact: dict) -> None:
+    validation = artifact.get("validation") or {}
+    facts = validation.get("factual_consistency") or {}
+    metrics.emit(
+        "resume_ready", user_email=user_email, kind=kind, passed=bool(validation.get("passed")),
+        page_count=validation.get("page_count"), page_target_met=bool(validation.get("page_target_met")),
+        factual_passed=bool(facts.get("passed", True)),
+    )
+
+
 def _mark_document_failure(user_email: str, run_id: int, artifact_id: str, detail: str) -> None:
+    kind = "base" if artifact_id == "base" else "template" if artifact_id.startswith("template:") else "tailored"
+    metrics.emit("resume_failed", user_email=user_email, kind=kind, factual="validation failed" in detail.casefold())
     def fail(current: dict) -> dict:
         improved = dict(current.get("improved_resume") or {})
         message = re.sub(r"\s+", " ", detail).strip()[:300]
         if artifact_id == "base":
             improved.update({"status": "failed", "error": message})
+        elif kind == "template":
+            statuses = dict(improved.get("template_statuses") or {})
+            statuses[artifact_id.removeprefix("template:")] = {"status": "failed", "error": message}
+            improved["template_statuses"] = statuses
         else:
             statuses = dict(improved.get("tailored_statuses") or {})
             statuses[artifact_id] = {"status": "failed", "error": message}
@@ -1388,7 +2016,7 @@ def _read_draft_message(path: Path) -> str:
 
 
 def _application_summary(results) -> dict[str, int]:
-    summary = {"drafted": 0, "emailed": 0, "email_failed": 0, "skipped": 0}
+    summary = {"drafted": 0, "pending_approval": 0, "emailed": 0, "email_failed": 0, "skipped": 0}
     for result in results:
         summary[result.status] = summary.get(result.status, 0) + 1
     return summary
@@ -1575,6 +2203,8 @@ def _client_run_payload(payload: dict, run_id: int) -> dict:
     client_payload["application_count"] = len(applications)
     improved = dict(client_payload.get("improved_resume") or {})
     improved.pop("tailored_resumes", None)
+    improved.pop("template_resumes", None)
+    improved["template_statuses"] = _template_statuses(dict(client_payload.get("improved_resume") or {}))
     improved.pop("_resume_snapshot", None)
     improved.pop("_resume_hash", None)
     client_payload["improved_resume"] = improved
@@ -1650,6 +2280,10 @@ def _mock_test_client_payload(record: dict) -> dict:
         "started_at": record.get("started_at"),
         "completed_at": record.get("completed_at"),
         "questions": public_questions(record.get("questions") or []),
+        "difficulty_mix": {
+            name: sum(1 for item in record.get("questions") or [] if item.get("difficulty") == name) for name in ("easy", "medium", "hard")
+        },
+        "coding_count": sum(1 for item in record.get("questions") or [] if item.get("kind") == "code"),
     }
     if completed:
         payload["scorecard"] = record.get("scorecard") or {}
@@ -1704,12 +2338,16 @@ def _mock_interview_payload(profile: dict, latest_payload: dict | None = None) -
         skills = _ordered_unique((*skills, *tuple(latest_payload.get("ats_report", {}).get("missing_keywords") or ())))
     roles = roles or tuple(latest_payload.get("ats_report", {}).get("target_roles") or ()) or ("Data Engineer",)
     skills = skills or ("Python", "SQL", "Spark", "AWS")
-    questions = _mock_interview_questions_for(roles, skills)
+    level = interview_level(float(profile.get("experience_years") or 0), roles[0] if roles else "")
+    questions = _mock_interview_questions_for(roles, skills, level)
     return {
         "roles": roles,
         "skills": skills,
+        "level": level,
+        "experience_years": float(profile.get("experience_years") or 0),
         "question_count": sum(len(group["questions"]) for group in questions),
         "groups": questions,
+        "coding_slots": CODING_SLOTS if is_technical_interview(roles, skills) else {mode: 0 for mode in CODING_SLOTS},
     }
 
 
@@ -1718,11 +2356,17 @@ def _job_interview_payload(job: dict, base: dict) -> dict:
     focus = job_interview_focus(job)
     roles = (focus["title"],)
     skills = tuple(_ordered_unique((*focus["skills"], *focus["gaps"]))) or tuple(base.get("skills") or ())
-    groups = _mock_interview_questions_for(roles, skills)
+    required = job.get("required_experience")
+    years = float(required) if isinstance(required, (int, float)) else float(base.get("experience_years") or 0)
+    level = interview_level(years, focus["title"])
+    groups = _mock_interview_questions_for(roles, skills, level)
     job_fit_group = build_job_fit_group(focus)
     return {
         "roles": roles,
         "skills": skills,
+        "level": level,
+        "experience_years": years,
+        "coding_slots": CODING_SLOTS if is_technical_interview(roles, skills) else {mode: 0 for mode in CODING_SLOTS},
         "question_count": sum(len(group["questions"]) for group in groups) + len(job_fit_group["questions"]),
         "groups": groups,
         "job_fit_group": job_fit_group,
@@ -1739,8 +2383,8 @@ def _job_interview_payload(job: dict, base: dict) -> dict:
     }
 
 
-def _mock_interview_questions_for(roles: tuple[str, ...], skills: tuple[str, ...]) -> list[dict]:
-    return build_question_groups(roles, skills)
+def _mock_interview_questions_for(roles: tuple[str, ...], skills: tuple[str, ...], level: str = "mid") -> list[dict]:
+    return build_question_groups(roles, skills, level)
 
 
 def _interview_mode_for_limit(limit: int) -> str:
@@ -1820,6 +2464,7 @@ def mock_interview_speech(
     job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> Response:
     user_email = require_user(job_agent_session)
+    enforce_limit("speech", user_email)
     if not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
         raise HTTPException(status_code=503, detail="Azure neural speech is not configured.")
     session_id = int(payload.get("session_id") or 0)
@@ -2022,7 +2667,8 @@ def _config_from_payload(payload: dict) -> AppConfig:
             freshness_days=int(search.get("freshness_days", 14)),
             include_remote=bool(search.get("include_remote", True)),
             validate_job_links=bool(search.get("validate_job_links", True)),
-            portals=tuple(search.get("portals", DEFAULT_PORTALS)),
+            # Saved schedules keep their portals, plus any source added since they were saved.
+            portals=tuple(dict.fromkeys((*tuple(search.get("portals") or ()), *DEFAULT_PORTALS))),
         ),
         application=ApplicationConfig(
             mode=application.get("mode", "draft"),
@@ -2052,207 +2698,173 @@ def _escape_html(value: str) -> str:
     )
 
 
+_AUTH_BRAND = r"""
+    <section class="auth-brand">
+      <a class="brand" href="/login"><span class="brand-mark" aria-hidden="true">J</span><span>Job Hunting Agent</span></a>
+      <div>
+        <h1>__HEADLINE__</h1>
+        <p>__LEDE__</p>
+      </div>
+      <ul class="auth-points">
+        <li><span class="mark" aria-hidden="true">A</span><span><b>ATS score you can act on</b>See exactly which fixes raise it, then download a validated ATS-ready resume.</span></li>
+        <li><span class="mark" aria-hidden="true">J</span><span><b>Fresh, matched job leads</b>LinkedIn, Naukri and partner job boards, ranked against your skills and experience.</span></li>
+        <li><span class="mark" aria-hidden="true">P</span><span><b>Practice for the real job</b>Job-specific mock tests, coding questions and interviews with daily and weekly reports.</span></li>
+      </ul>
+    </section>
+"""
+
+_EMAIL_CHECK_JS = r"""
+    function validEmail(value) {
+      const email = value.trim().toLowerCase();
+      const basicEmail = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+      return email.length <= 254
+        && basicEmail.test(email)
+        && !email.includes('..')
+        && !email.split('@')[0].startsWith('.')
+        && !email.split('@')[0].endsWith('.');
+    }
+    function validateEmailField(input) {
+      const email = input.value.trim().toLowerCase();
+      input.value = email;
+      input.setCustomValidity(validEmail(email) ? '' : 'Enter a valid email address like name@example.com.');
+      return input.reportValidity();
+    }
+    function setStatus(text, kind) {
+      status.textContent = text;
+      status.className = `auth-status ${kind || ''}`;
+    }
+"""
+
+
+def _auth_page(title: str, headline: str, lede: str, card: str, script: str) -> str:
+    from .pages import ASSET_VERSION, head
+
+    brand = _AUTH_BRAND.replace("__HEADLINE__", headline).replace("__LEDE__", lede)
+    from .pages import language_picker
+
+    return (
+        head(title) + "</head><body class=\"ux\">"
+        f'<main class="auth">{brand}<section class="auth-side"><div class="auth-lang">{language_picker()}</div><div class="auth-card">{card}</div></section></main>'
+        f'<script src="/static/ui/shell.js?v={ASSET_VERSION}"></script><script>{script}</script></body></html>'
+    )
+
+
 def _login_page() -> str:
-    return """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign In - Job Hunting Agent</title>
-  <style>
-    :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #142033; }
-    * { box-sizing: border-box; }
-    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: linear-gradient(90deg, rgba(9, 24, 47, 0.88), rgba(9, 24, 47, 0.58)), url('/static/job-search-hero.png'); background-size: cover; background-position: center; }
-    .shell { width: min(960px, calc(100% - 36px)); display: grid; grid-template-columns: minmax(260px, 1fr) 420px; gap: 28px; align-items: center; }
-    .copy { color: #ffffff; }
-    .eyebrow { display: inline-flex; padding: 7px 10px; border-radius: 999px; border: 1px solid rgba(255,255,255,.35); background: rgba(255,255,255,.14); font-size: 13px; font-weight: 800; }
-    h1 { margin: 18px 0 12px; font-size: clamp(34px, 6vw, 60px); line-height: 1; letter-spacing: 0; }
-    p { color: rgba(255,255,255,.82); line-height: 1.6; }
-    .card { border-radius: 8px; border: 1px solid rgba(255,255,255,.5); background: rgba(255,255,255,.94); padding: 24px; box-shadow: 0 24px 70px rgba(0,0,0,.28); backdrop-filter: blur(18px); }
-    .card h2 { margin: 0 0 8px; font-size: 24px; }
-    label { display: block; margin: 14px 0 6px; color: #344054; font-size: 13px; font-weight: 800; }
-    input { width: 100%; min-height: 44px; border: 1px solid #c9d4e5; border-radius: 7px; padding: 10px 12px; font: inherit; }
-    input:invalid:not(:placeholder-shown) { border-color: #d92d20; box-shadow: 0 0 0 3px rgba(217,45,32,.12); }
-    button { width: 100%; min-height: 44px; margin-top: 14px; border: 0; border-radius: 7px; color: #ffffff; background: #175cd3; font-weight: 900; cursor: pointer; }
-    .secondary-link { display: block; margin-top: 14px; text-align: center; color: #175cd3; font-size: 13px; font-weight: 850; text-decoration: none; }
-    .secondary-link:hover { text-decoration: underline; }
-    .muted { color: #667085; font-size: 13px; line-height: 1.5; }
-    .status { min-height: 20px; color: #087443; font-size: 13px; font-weight: 750; }
-    @media (max-width: 800px) { .shell { grid-template-columns: 1fr; padding: 28px 0; } }
-  </style>
-</head>
-<body>
-  <main class="shell">
-    <section class="copy">
-      <div class="eyebrow">Secure client workspace</div>
-      <h1>Job Hunting Agent</h1>
-      <p>Sign in with an email OTP to access resume scoring, job discovery, recruiter draft templates, and daily run history.</p>
-    </section>
-    <section class="card">
-      <h2>Email OTP Sign In</h2>
-      <p class="muted">Enter your email to receive a one-time sign-in code.</p>
-      <form id="request-form">
-        <label for="email">Email</label>
-        <input id="email" name="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" pattern="^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$" required>
-        <button type="submit">Send OTP</button>
-      </form>
-      <form id="verify-form" method="post" action="/api/auth/verify">
-        <input id="verify-email" name="email" type="hidden">
-        <label for="otp">OTP</label>
-        <input id="otp" name="otp" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" required>
-        <button type="submit">Verify and Continue</button>
-      </form>
-      <a class="secondary-link" href="/register">New user? Verify your email first</a>
-      <p id="status" class="status"></p>
-    </section>
-  </main>
-  <script>
+    card = r"""
+        <div class="btn-row" style="gap:18px"><span class="step on" id="step-1"><b>1</b>Email</span><span class="step" id="step-2"><b>2</b>Code</span></div>
+        <h2>Email OTP Sign In</h2>
+        <p class="muted">Enter your email and we will send a one-time sign-in code. No password needed.</p>
+        <form id="request-form" novalidate>
+          <label class="field" for="email">Email <span class="req" aria-hidden="true">*</span><input id="email" name="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" pattern="^[^\s@]+@[^\s@]+\.[^\s@]{2,}$" required autofocus></label>
+          <button class="btn btn-primary" id="send-otp" type="submit">Send OTP</button>
+        </form>
+        <form id="verify-form" class="hidden" method="post" action="/api/auth/verify">
+          <input id="verify-email" name="email" type="hidden">
+          <label class="field" for="otp">6-digit code<input id="otp" class="otp-input" name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••" required></label>
+          <button class="btn btn-primary" type="submit">Verify and Continue</button>
+          <button class="btn btn-quiet" id="change-email" type="button">Use a different email</button>
+        </form>
+        <p id="status" class="auth-status" role="status" aria-live="polite"></p>
+        <hr class="divider" style="margin:4px 0">
+        <a href="/register">New user? Verify your email first</a>
+        <a class="faint" href="/privacy">Privacy notice</a>
+"""
+    script = r"""
     const requestForm = document.getElementById('request-form');
+    const verifyForm = document.getElementById('verify-form');
     const emailInput = document.getElementById('email');
     const verifyEmail = document.getElementById('verify-email');
     const status = document.getElementById('status');
-    function validEmail(value) {
-      const email = value.trim().toLowerCase();
-      const basicEmail = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/;
-      return email.length <= 254
-        && basicEmail.test(email)
-        && !email.includes('..')
-        && !email.split('@')[0].startsWith('.')
-        && !email.split('@')[0].endsWith('.');
-    }
-    function validateEmailField(input) {
-      const email = input.value.trim().toLowerCase();
-      input.value = email;
-      input.setCustomValidity(validEmail(email) ? '' : 'Enter a valid email address like name@example.com.');
-      return input.reportValidity();
+    const sendButton = document.getElementById('send-otp');
+""" + _EMAIL_CHECK_JS + r"""
+    function showStep(two) {
+      verifyForm.classList.toggle('hidden', !two);
+      document.getElementById('step-1').classList.toggle('on', !two);
+      document.getElementById('step-2').classList.toggle('on', two);
+      sendButton.textContent = two ? 'Send a new code' : 'Send OTP';
+      sendButton.className = two ? 'btn' : 'btn btn-primary';
+      if (two) document.getElementById('otp').focus();
     }
     emailInput.addEventListener('input', () => emailInput.setCustomValidity(''));
+    document.getElementById('change-email').addEventListener('click', () => { showStep(false); setStatus(''); emailInput.focus(); });
     requestForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       if (!validateEmailField(emailInput)) {
-        status.style.color = '#b42318';
-        status.textContent = 'Enter a valid email address like name@example.com.';
+        setStatus('Enter a valid email address like name@example.com.', 'bad');
         return;
       }
-      const data = new FormData(requestForm);
-      const response = await fetch('/api/auth/request-otp', { method: 'POST', body: data });
-      const payload = await response.json();
-      if (!response.ok) {
-        status.textContent = payload.detail || 'Unable to send OTP.';
-        status.style.color = '#b42318';
-        return;
+      sendButton.disabled = true;
+      setStatus('Sending your code…');
+      try {
+        const response = await fetch('/api/auth/request-otp', { method: 'POST', body: new FormData(requestForm) });
+        const payload = await UI.payloadOf(response);
+        if (!response.ok) { setStatus(payload.detail || 'Unable to send OTP.', 'bad'); return; }
+        verifyEmail.value = payload.email;
+        showStep(true);
+        setStatus(payload.dev_otp ? `OTP generated for local testing: ${payload.dev_otp}` : `OTP sent to ${payload.email}. It expires in a few minutes.`, 'good');
+      } catch (_) {
+        setStatus('Unable to reach the server. Check your connection and try again.', 'bad');
+      } finally {
+        sendButton.disabled = false;
       }
-      verifyEmail.value = payload.email;
-      status.style.color = '#087443';
-      status.textContent = payload.dev_otp
-        ? `OTP generated for local testing: ${payload.dev_otp}`
-        : `OTP sent to ${payload.email}.`;
     });
-  </script>
-</body>
-</html>"""
+"""
+    return _auth_page(
+        "Sign in", "Your job search, run like a pipeline.",
+        "Sign in with an email OTP to access resume scoring, job discovery, recruiter draft templates, practice and daily run history.",
+        card, script,
+    )
 
 
 def _register_page() -> str:
-    return """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>New User Verification - Job Hunting Agent</title>
-  <style>
-    :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #142033; }
-    * { box-sizing: border-box; }
-    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: linear-gradient(90deg, rgba(9, 24, 47, 0.88), rgba(9, 24, 47, 0.58)), url('/static/job-search-hero.png'); background-size: cover; background-position: center; }
-    .shell { width: min(960px, calc(100% - 36px)); display: grid; grid-template-columns: minmax(260px, 1fr) 420px; gap: 28px; align-items: center; }
-    .copy { color: #ffffff; }
-    .eyebrow { display: inline-flex; padding: 7px 10px; border-radius: 999px; border: 1px solid rgba(255,255,255,.35); background: rgba(255,255,255,.14); font-size: 13px; font-weight: 800; }
-    h1 { margin: 18px 0 12px; font-size: clamp(34px, 6vw, 60px); line-height: 1; letter-spacing: 0; }
-    p { color: rgba(255,255,255,.82); line-height: 1.6; }
-    .card { border-radius: 8px; border: 1px solid rgba(255,255,255,.5); background: rgba(255,255,255,.94); padding: 24px; box-shadow: 0 24px 70px rgba(0,0,0,.28); backdrop-filter: blur(18px); }
-    .card h2 { margin: 0 0 8px; font-size: 24px; }
-    .card p { color: #667085; }
-    label { display: block; margin: 14px 0 6px; color: #344054; font-size: 13px; font-weight: 800; }
-    input { width: 100%; min-height: 44px; border: 1px solid #c9d4e5; border-radius: 7px; padding: 10px 12px; font: inherit; }
-    button { width: 100%; min-height: 44px; margin-top: 14px; border: 0; border-radius: 7px; color: #ffffff; background: #175cd3; font-weight: 900; cursor: pointer; }
-    .secondary-link { display: block; margin-top: 14px; text-align: center; color: #175cd3; font-size: 13px; font-weight: 850; text-decoration: none; }
-    .secondary-link:hover { text-decoration: underline; }
-    .status { min-height: 20px; color: #087443; font-size: 13px; font-weight: 750; line-height: 1.5; }
-    .note { margin-top: 14px; padding: 12px; border-radius: 7px; background: #fff8eb; border: 1px solid #fedf89; color: #7a4a08; font-size: 13px; line-height: 1.5; }
-    @media (max-width: 800px) { .shell { grid-template-columns: 1fr; padding: 28px 0; } }
-  </style>
-</head>
-<body>
-  <main class="shell">
-    <section class="copy">
-      <div class="eyebrow">First-time verification</div>
-      <h1>Verify Your Email</h1>
-      <p>New users must verify their email once through AWS SES. After verification, return to login and request your OTP normally.</p>
-    </section>
-    <section class="card">
-      <h2>New User Registration</h2>
-      <p>Enter your email address. AWS will send a verification email with a link to approve this address for OTP delivery.</p>
-      <form id="register-form">
-        <label for="email">Email</label>
-        <input id="email" name="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" pattern="^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$" required>
-        <button type="submit">Send Verification Link</button>
-      </form>
-      <p class="note">After clicking the AWS verification link, come back to the login page and click Send OTP.</p>
-      <a class="secondary-link" href="/login">Back to Login</a>
-      <p id="status" class="status"></p>
-    </section>
-  </main>
-  <script>
+    card = r"""
+        <h2>New User Registration</h2>
+        <p class="muted">Enter your email address. AWS will send a verification email with a link that approves this address for sign-in codes.</p>
+        <form id="register-form" novalidate>
+          <label class="field" for="email">Email <span class="req" aria-hidden="true">*</span><input id="email" name="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" pattern="^[^\s@]+@[^\s@]+\.[^\s@]{2,}$" required autofocus></label>
+          <button class="btn btn-primary" id="register-submit" type="submit">Send Verification Link</button>
+        </form>
+        <p id="status" class="auth-status" role="status" aria-live="polite"></p>
+        <div class="notice"><span>After clicking the AWS verification link, come back to the login page and click Send OTP.</span></div>
+        <a class="btn" href="/login">Back to Login</a>
+"""
+    script = r"""
     const form = document.getElementById('register-form');
     const emailInput = document.getElementById('email');
     const status = document.getElementById('status');
-    function validEmail(value) {
-      const email = value.trim().toLowerCase();
-      const basicEmail = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/;
-      return email.length <= 254
-        && basicEmail.test(email)
-        && !email.includes('..')
-        && !email.split('@')[0].startsWith('.')
-        && !email.split('@')[0].endsWith('.');
-    }
-    function validateEmailField(input) {
-      const email = input.value.trim().toLowerCase();
-      input.value = email;
-      input.setCustomValidity(validEmail(email) ? '' : 'Enter a valid email address like name@example.com.');
-      return input.reportValidity();
-    }
+""" + _EMAIL_CHECK_JS + r"""
     emailInput.addEventListener('input', () => emailInput.setCustomValidity(''));
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       if (!validateEmailField(emailInput)) {
-        status.style.color = '#b42318';
-        status.textContent = 'Enter a valid email address like name@example.com.';
+        setStatus('Enter a valid email address like name@example.com.', 'bad');
         return;
       }
-      status.style.color = '#344054';
-      status.textContent = 'Requesting AWS verification email...';
+      const button = document.getElementById('register-submit');
+      button.disabled = true;
+      setStatus('Requesting the AWS verification email…');
       try {
         const response = await fetch('/api/auth/register-email', { method: 'POST', body: new FormData(form) });
-        const contentType = response.headers.get('content-type') || '';
-        const payload = contentType.includes('application/json') ? await response.json() : { detail: await response.text() };
-        if (!response.ok) {
-          status.style.color = '#b42318';
-          status.textContent = payload.detail || 'Unable to request verification right now.';
-          return;
-        }
-        status.style.color = '#087443';
-        status.textContent = payload.message || 'Verification email requested. Check your inbox.';
-      } catch (error) {
-        status.style.color = '#b42318';
-        status.textContent = 'Unable to reach the server. Please try again.';
+        const payload = await UI.payloadOf(response);
+        if (!response.ok) { setStatus(payload.detail || 'Unable to request verification right now.', 'bad'); return; }
+        setStatus(payload.message || 'Verification email requested. Check your inbox.', 'good');
+      } catch (_) {
+        setStatus('Unable to reach the server. Please try again.', 'bad');
+      } finally {
+        button.disabled = false;
       }
     });
-  </script>
-</body>
-</html>"""
+"""
+    return _auth_page(
+        "Verify your email", "Verify once, sign in with a code after.",
+        "New users verify their email once through AWS SES. After verification, return to login and request your OTP normally.",
+        card, script,
+    )
 
 
 def _mock_interview_page(user_email: str) -> str:
+    from .pages import practice_nav
+
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -2360,14 +2972,7 @@ def _mock_interview_page(user_email: str) -> str:
   </style>
 </head>
 <body>
-  <div class="topbar">
-    <span class="user-chip">Signed in as {_escape_html(user_email)}</span>
-    <div>
-      <a href="/">Back to Dashboard</a>
-      <a href="/mock-test">Mock Test</a>
-      <form style="display:inline" method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
-    </div>
-  </div>
+  {practice_nav("mock-interview", user_email)}
   <main>
     <section class="studio-shell">
       <header class="studio-top">
@@ -2447,7 +3052,7 @@ def _mock_interview_page(user_email: str) -> str:
               <div class="editor-toolbar">
                 <div>
                   <label for="code-editor">Code response</label>
-                  <p class="editor-note">Your code is saved as written and is not executed.</p>
+                  <p class="editor-note">Coding problems: press Run sample tests to check your code. It runs only in your browser, never on our server.</p>
                 </div>
                 <div>
                   <label for="code-language">Language</label>
@@ -2482,6 +3087,8 @@ def _mock_interview_page(user_email: str) -> str:
       <section id="history" class="room-panel" style="margin:12px;padding:14px"></section>
     </section>
   </main>
+  <script src="/static/code_runner.js"></script>
+  <script src="/static/interview_coding.js"></script>
   <script>
     const startBtn = document.getElementById('start-btn');
     const stopBtn = document.getElementById('stop-btn');
@@ -2642,6 +3249,7 @@ def _mock_interview_page(user_email: str) -> str:
       progressLabel.textContent = `${{Math.min(activeIndex + 1, total)}}/${{total}}`;
       progressBar.style.width = `${{Math.round((activeIndex / total) * 100)}}%`;
       codeBox.textContent = `Focus: ${{item.tag || item.category}}\n\nPrompt type: ${{item.category}}\n\nListen fully, pause, then answer with a real project example.`;
+      window.InterviewCoding?.render(item);
       statusText.textContent = `Question ${{activeIndex + 1}} of ${{total}} · Listening...`;
       speak(item.question, item.id);
     }}
@@ -2710,8 +3318,11 @@ def _mock_interview_page(user_email: str) -> str:
         }}
       }}
       const nl = String.fromCharCode(10);
+      const levelNames = {{ entry: 'Entry level (0-2 years)', mid: 'Mid level (2-5 years)', senior: 'Senior (5+ years)' }};
+      const coding = payload.coding_slots || {{}};
+      const levelLine = `Level: ${{levelNames[payload.level] || 'Mid level'}}${{coding.standard ? ` · coding problems: ${{coding.quick}} quick / ${{coding.standard}} standard / ${{coding.deep}} deep` : ''}}`;
       if (payload.job) {{
-        const lines = [`Job-specific interview: ${{payload.job.title}}${{payload.job.company ? ' at ' + payload.job.company : ''}}`];
+        const lines = [`Job-specific interview: ${{payload.job.title}}${{payload.job.company ? ' at ' + payload.job.company : ''}}`, levelLine];
         if (payload.job.skills.length) lines.push('', 'Skills the role needs that you can show:', ...payload.job.skills.slice(0, 8).map((item) => `- ${{item}}`));
         if (payload.job.gaps.length) lines.push('', 'Gaps to prepare for:', ...payload.job.gaps.map((item) => `- ${{item}}`));
         if (payload.job.responsibilities.length) lines.push('', 'From the posting:', ...payload.job.responsibilities.map((item) => `- ${{item}}`));
@@ -2723,7 +3334,7 @@ def _mock_interview_page(user_email: str) -> str:
       const focusLines = focusAreas.length
         ? focusAreas.map((item) => `- ${{item}}`)
         : ['- Add target roles and skills on the dashboard.'];
-      codeBox.textContent = ['Detected focus areas:', ...focusLines].join(nl);
+      codeBox.textContent = [levelLine, '', 'Detected focus areas:', ...focusLines].join(nl);
     }}
     jobSelect.addEventListener('change', loadQuestions);
     async function loadHistory() {{
@@ -2855,6 +3466,7 @@ def _mock_interview_page(user_email: str) -> str:
         answer: response,
         answer_type: codeMode ? 'code' : 'text',
         code_language: codeMode ? codeLanguage.value : '',
+        test_results: codeMode ? (window.InterviewCoding?.results(item.id) || null) : null,
       }});
       renderTranscript();
       if (next && activeIndex < session.questions.length - 1) {{
@@ -2908,6 +3520,7 @@ def _mock_interview_page(user_email: str) -> str:
           <p><strong>${{escapeHtml(item.question)}}</strong></p>
           <p class="muted">${{escapeHtml(item.answer_type === 'code' ? 'Code response · ' + (item.code_language || 'plain text') : item.answer || 'No answer submitted.')}}</p>
           ${{(item.improvements || []).length ? `<ul class="feedback-list">${{list(item.improvements)}}</ul>` : ''}}
+          ${{window.InterviewCoding ? window.InterviewCoding.reviewHtml(item, escapeHtml) : ''}}
         </details>`).join('');
       scorecard.innerHTML = `
         <div class="score">
@@ -2926,7 +3539,9 @@ def _mock_interview_page(user_email: str) -> str:
         <section class="report-section"><h3>Performance dimensions</h3><div class="rubric-list">${{rubric}}</div></section>
         <section class="report-section"><h3>Preparation plan for your next interview</h3><div class="plan-list">${{plan}}</div></section>
         <section class="report-section"><h3>Answer review</h3>${{answerReview}}</section>
+        <p class="muted" style="margin-top:16px">See how your scores change day by day and week by week in <a href="/progress?job=${{encodeURIComponent(session?.job?.job_id || '')}}" style="color:#93c5fd">Progress Reports</a>.</p>
       `;
+      if (session?.session_id) window.InterviewCoding?.renderRating(scorecard, session.session_id);
       statusText.textContent = 'Scorecard ready. Review your transcript and practice again when ready.';
     }}
     startBtn.addEventListener('click', startInterview);
@@ -3031,7 +3646,10 @@ def _mock_interview_page(user_email: str) -> str:
 </html>"""
 
 def _mock_test_page(user_email: str) -> str:
-    return _MOCK_TEST_PAGE.replace("__USER_EMAIL__", _escape_html(user_email))
+    from .pages import practice_nav
+
+    page = _MOCK_TEST_PAGE.replace("__PRACTICE_NAV__", practice_nav("mock-test", user_email))
+    return page.replace("__USER_EMAIL__", _escape_html(user_email))
 
 
 _MOCK_TEST_PAGE = r"""<!doctype html>
@@ -3099,6 +3717,9 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
     .pill.ai { background:rgba(168,85,247,.16); border-color:rgba(168,85,247,.45); color:#e9d5ff; }
     .q-text { margin:14px 0 16px; font-size:18px; line-height:1.5; font-weight:800; white-space:pre-wrap; }
     .q-text code, .q-code { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .code-block { margin:0 0 16px; padding:12px 14px; border-radius:8px; border:1px solid rgba(148,163,184,.35); background:#050b16; color:#dbeafe; font:13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space:pre; overflow:auto; max-height:360px; }
+    .pill.code { background:rgba(14,165,233,.16); border-color:rgba(14,165,233,.45); color:#bae6fd; }
+    .report-q { margin-top:8px; background:none; border:0; color:#93c5fd; font:inherit; font-size:12px; font-weight:800; cursor:pointer; padding:0; }
     .options { display:grid; gap:10px; }
     .option { display:grid; grid-template-columns:34px minmax(0,1fr); gap:10px; align-items:center; width:100%; text-align:left; min-height:52px; padding:10px 12px; border-radius:8px; border:1px solid rgba(148,163,184,.4); background:rgba(15,23,42,.85); color:#e2e8f0; font:inherit; font-size:15px; cursor:pointer; white-space:pre-wrap; }
     .option:hover { border-color:#60a5fa; }
@@ -3158,14 +3779,7 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <div class="topbar">
-    <span class="user-chip">Signed in as __USER_EMAIL__</span>
-    <nav>
-      <a href="/">Back to Dashboard</a>
-      <a href="/mock-interview">Mock Interview</a>
-      <form method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
-    </nav>
-  </div>
+  __PRACTICE_NAV__
   <main>
     <section class="shell">
       <header class="shell-top">
@@ -3189,7 +3803,7 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
             </div>
             <label class="field" for="difficulty-select">Difficulty</label>
             <select id="difficulty-select">
-              <option value="mixed">Mixed (recommended)</option>
+              <option value="mixed">Mixed - matched to your experience (recommended)</option>
               <option value="easy">Mostly easy</option>
               <option value="medium">Mostly medium</option>
               <option value="hard">Mostly hard</option>
@@ -3209,6 +3823,8 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
               <li>Your answers are saved in this browser if the page reloads.</li>
               <li>Answers and explanations are shown only after you submit.</li>
               <li>Each retake prefers questions you have not seen before.</li>
+              <li>Technical jobs include code questions: predict the output, spot the bug, estimate complexity. Every code answer is verified by running it.</li>
+              <li>The difficulty mix you choose is applied exactly; your daily and weekly trends are in <a href="/progress" style="color:#93c5fd">Progress Reports</a>.</li>
             </ul>
             <h3 style="margin-top:18px">Recent tests</h3>
             <div id="history" class="muted" style="margin-top:8px">No completed tests yet.</div>
@@ -3221,6 +3837,7 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
           <div class="card">
             <div class="q-meta" id="q-meta"></div>
             <div class="q-text" id="q-text"></div>
+            <pre class="code-block hidden" id="q-code" aria-label="Code for this question"></pre>
             <div class="options" id="q-options" role="radiogroup" aria-labelledby="q-text"></div>
             <div class="q-nav">
               <div class="actions" style="margin:0">
@@ -3413,7 +4030,10 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
       const remaining = typeof test.remaining_seconds === 'number' ? test.remaining_seconds : test.time_limit_seconds;
       state.deadline = Date.now() + remaining * 1000;
       $('test-title').textContent = test.job_title;
-      $('test-subtitle').textContent = `${test.company ? test.company + ' · ' : ''}${test.questions.length} questions · ${test.topics.slice(0, 4).join(', ')}`;
+      const mix = test.difficulty_mix || {};
+      const mixText = ` · ${mix.easy || 0} easy / ${mix.medium || 0} medium / ${mix.hard || 0} hard`;
+      const codeText = test.coding_count ? ` · ${test.coding_count} code questions` : '';
+      $('test-subtitle').textContent = `${test.company ? test.company + ' · ' : ''}${test.questions.length} questions${mixText}${codeText} · ${test.topics.slice(0, 4).join(', ')}`;
       history.replaceState(null, '', `/mock-test?test=${encodeURIComponent(test.test_id)}`);
       show('test-view');
       renderQuestion();
@@ -3447,8 +4067,10 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
     function renderQuestion() {
       const question = state.test.questions[state.current];
       state.enteredAt = Date.now();
-      $('q-meta').innerHTML = `<span class="pill">Question ${question.number} of ${state.test.questions.length}</span><span class="pill">${escapeHtml(question.topic_label)}</span><span class="pill ${escapeHtml(question.difficulty)}">${escapeHtml(question.difficulty)}</span>${question.source === 'ai_generated' ? '<span class="pill ai">AI-generated</span>' : ''}`;
+      $('q-meta').innerHTML = `<span class="pill">Question ${question.number} of ${state.test.questions.length}</span><span class="pill">${escapeHtml(question.topic_label)}</span><span class="pill ${escapeHtml(question.difficulty)}">${escapeHtml(question.difficulty)}</span>${question.kind === 'code' ? '<span class="pill code">Code</span>' : ''}${question.source === 'ai_generated' ? '<span class="pill ai">AI-generated</span>' : ''}`;
       $('q-text').textContent = question.question;
+      $('q-code').textContent = question.code || '';
+      $('q-code').classList.toggle('hidden', !question.code);
       const chosen = state.answers[question.id];
       $('q-options').innerHTML = question.options.map((option, index) => `
         <button type="button" class="option" role="radio" aria-checked="${chosen === index}" data-index="${index}"><span class="letter">${LETTERS[index]}</span><span>${escapeHtml(option)}</span></button>`).join('');
@@ -3506,6 +4128,7 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
       $('submit-button').disabled = false;
       $('submit-button').textContent = 'Submit Test';
       const card = test.scorecard || {};
+      state.resultTestId = test.test_id;
       $('top-stats').innerHTML = `<span>Completed <strong>${escapeHtml((test.completed_at || '').slice(0, 10))}</strong></span><span>Score <strong>${escapeHtml(card.correct || 0)}/${escapeHtml(card.total || 0)}</strong></span>`;
       state.lastSetup = { job_id: test.job_id || '', run_id: test.run_id || 0, length: test.length || 'standard', difficulty: test.difficulty || 'mixed' };
       history.replaceState(null, '', `/mock-test?test=${encodeURIComponent(test.test_id)}`);
@@ -3526,6 +4149,7 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
         ['Correct', card.correct], ['Incorrect', card.incorrect], ['Unanswered', card.unanswered],
         ['Accuracy', `${Math.round(card.accuracy || 0)}%`],
         ['Time used', `${formatTime(time.elapsed_seconds || 0)} / ${formatTime(time.limit_seconds || 0)}`],
+        ...((card.coding || {}).total ? [['Code questions', `${card.coding.correct}/${card.coding.total} correct`]] : []),
       ].map(([label, value]) => `<div class="stat"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? 0)}</strong></div>`).join('');
       $('topic-breakdown').innerHTML = (card.topic_breakdown || []).map((row) => `
         <div class="bar-row"><div class="bar-label"><span>${escapeHtml(row.label)}</span><span>${escapeHtml(row.correct)}/${escapeHtml(row.total)} · ${escapeHtml(Math.round(row.percent))}%</span></div>
@@ -3551,13 +4175,25 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
         <div class="review-item ${escapeHtml(item.status)}">
           <div class="q-meta"><span class="pill">Q${escapeHtml(item.number)}</span><span class="pill">${escapeHtml(item.topic_label)}</span><span class="pill ${escapeHtml(item.difficulty)}">${escapeHtml(item.difficulty)}</span>${item.source === 'ai_generated' ? '<span class="pill ai">AI-generated</span>' : ''}<span class="pill">${item.status === 'correct' ? 'Correct' : item.status === 'incorrect' ? 'Incorrect' : 'Not answered'}</span></div>
           <div class="review-q">${escapeHtml(item.question)}</div>
+          ${item.code ? `<pre class="code-block">${escapeHtml(item.code)}</pre>` : ''}
           ${item.options.map((option, index) => {
             const cls = index === item.correct_index ? 'right' : index === item.selected_index ? 'wrong' : '';
             const tag = index === item.correct_index ? ' ✓ Correct answer' : index === item.selected_index ? ' ✗ Your answer' : '';
             return `<div class="review-opt ${cls}"><b>${LETTERS[index]}.</b>${escapeHtml(option)}<strong>${tag}</strong></div>`;
           }).join('')}
           ${item.explanation ? `<p class="explain">${escapeHtml(item.explanation)}</p>` : ''}
+          <button type="button" class="report-q" data-question="${escapeHtml(item.id)}">Report a problem with this question</button>
         </div>`).join('') : '<p class="muted">Nothing to show for this filter.</p>';
+      $('review-list').querySelectorAll('.report-q').forEach((button) => button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          await api('/api/mock-test/report-question', { method: 'POST', body: JSON.stringify({ test_id: state.resultTestId, question_id: button.dataset.question, reason: 'wrong_or_unclear' }) });
+          button.textContent = 'Reported - thank you. A reviewer will check this question.';
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = error.message;
+        }
+      }));
     }
 
     // ---------- events ----------
@@ -3611,648 +4247,160 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
 
 
 def _page(user_email: str, profile: dict) -> str:
+    """The signed-in dashboard. Layout and styles come from the shared app shell;
+    behaviour lives in /static/ui/dashboard.js and uses only the JSON APIs."""
+    from .pages import app_shell
+
     sources = active_job_sources()
     other_sources = [name for name in sources if name not in {"LinkedIn", "Naukri"}]
-    page = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Job Hunting Agent</title>
-  <style>
-    :root {
-      color-scheme: light;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      --ink: #142033;
-      --muted: #667085;
-      --line: #d8e0ec;
-      --panel: #ffffff;
-      --page: #f3f6fa;
-      --blue: #175cd3;
-      --green: #087443;
-      --gold: #a15c07;
-      --shadow: 0 18px 45px rgba(29, 41, 57, 0.12);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background:
-        linear-gradient(180deg, rgba(245, 248, 252, 0.82) 0%, rgba(232, 239, 248, 0.9) 42%, rgba(247, 250, 252, 0.96) 100%),
-        url('/static/job-search-hero.png');
-      background-attachment: fixed;
-      background-position: center top;
-      background-size: cover;
-      color: var(--ink);
-    }
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 300px 0 0;
-      pointer-events: none;
-      background:
-        linear-gradient(120deg, rgba(7, 19, 38, 0.08), rgba(255, 255, 255, 0.72) 48%, rgba(23, 92, 211, 0.1)),
-        url('/static/job-search-hero.png');
-      background-size: cover;
-      background-position: center;
-      opacity: 0.22;
-      filter: saturate(0.9);
-    }
-    .hero {
-      min-height: 330px;
-      position: relative;
-      display: flex;
-      align-items: stretch;
-      background-image: linear-gradient(90deg, rgba(9, 24, 47, 0.88) 0%, rgba(9, 24, 47, 0.74) 40%, rgba(9, 24, 47, 0.1) 100%), url('/static/job-search-hero.png');
-      background-position: center;
-      background-size: cover;
-      color: #ffffff;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.2);
-    }
-    .topbar { position: relative; z-index: 3; min-height: 56px; display: flex; justify-content: flex-end; align-items: center; gap: 12px; width: min(1180px, calc(100% - 48px)); margin: 0 auto -56px; color: #ffffff; }
-    .user-chip { display: inline-flex; align-items: center; min-height: 34px; padding: 7px 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.16); border: 1px solid rgba(255, 255, 255, 0.32); font-size: 13px; font-weight: 800; backdrop-filter: blur(12px); }
-    .logout-form { margin: 0; padding: 0; border: 0; background: transparent; box-shadow: none; backdrop-filter: none; }
-    .logout-form button { min-height: 34px; padding: 7px 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.92); color: #152238; box-shadow: none; font-size: 13px; }
-    .hero-content { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 42px 0 34px; display: grid; grid-template-columns: minmax(300px, 620px) 1fr; gap: 28px; align-items: center; }
-    .eyebrow { display: inline-flex; align-items: center; gap: 8px; width: fit-content; padding: 7px 10px; border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 999px; background: rgba(255, 255, 255, 0.14); font-size: 13px; font-weight: 750; }
-    h1 { margin: 18px 0 12px; max-width: 620px; font-size: clamp(34px, 5vw, 58px); line-height: 1.02; letter-spacing: 0; }
-    .hero p { margin: 0; max-width: 620px; color: rgba(255, 255, 255, 0.86); font-size: 16px; line-height: 1.6; }
-    .platform-strip { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
-    .platform-chip { display: inline-flex; align-items: center; gap: 9px; padding: 9px 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.95); color: #152238; font-size: 13px; font-weight: 800; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16); }
-    .platform-mark { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: #ffffff; font-size: 11px; font-weight: 900; }
-    .platform-mark.linkedin { background: #0a66c2; }
-    .platform-mark.naukri { background: #f36f21; }
-    .platform-mark.mail { background: #087443; }
-    .hero-stats { justify-self: end; display: grid; gap: 12px; min-width: 280px; }
-    .stat-card { width: 100%; padding: 16px 18px; border-radius: 8px; background: rgba(255, 255, 255, 0.93); color: #152238; box-shadow: var(--shadow); }
-    .stat-card strong { display: block; font-size: 28px; line-height: 1; }
-    .stat-card span { display: block; margin-top: 5px; color: #5b6472; font-size: 13px; font-weight: 700; }
-    main { width: min(1180px, calc(100% - 48px)); margin: -38px auto 44px; display: grid; grid-template-columns: minmax(340px, 500px) minmax(340px, 1fr); gap: 24px; position: relative; z-index: 2; }
-    form, .panel { background: rgba(255, 255, 255, 0.9); border: 1px solid rgba(216, 224, 236, 0.86); border-radius: 8px; box-shadow: 0 22px 60px rgba(22, 34, 51, 0.16); backdrop-filter: blur(18px); }
-    form { padding: 8px 20px 20px; }
-    .panel { padding: 22px; min-height: 520px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(244, 248, 253, 0.9) 100%); }
-    fieldset { border: 0; padding: 18px 0 2px; margin: 0; border-bottom: 1px solid #edf1f6; }
-    fieldset:last-of-type { border-bottom: 0; }
-    legend { display: flex; align-items: center; gap: 10px; width: 100%; font-size: 16px; font-weight: 850; margin-bottom: 2px; }
-    .section-badge { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: #eaf2ff; color: var(--blue); font-size: 13px; font-weight: 900; }
-    label { display: block; color: #344054; font-size: 13px; font-weight: 750; margin: 12px 0 6px; }
-    input, select, textarea { width: 100%; min-height: 42px; border: 1px solid #c9d4e5; border-radius: 7px; padding: 9px 11px; font: inherit; background: #ffffff; color: var(--ink); outline: none; transition: border-color 140ms ease, box-shadow 140ms ease; }
-    input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(23, 92, 211, 0.12); }
-    input[type="file"] { padding: 8px; background: #f8fafc; }
-    textarea { min-height: 82px; resize: vertical; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    .checkline { display: flex; gap: 10px; align-items: center; min-height: 42px; margin-top: 30px; padding: 10px 12px; border: 1px solid #d8e0ec; border-radius: 7px; background: #f8fafc; color: #344054; font-size: 13px; font-weight: 750; }
-    .checkline input { width: 18px; min-height: 18px; accent-color: var(--blue); }
-    .schedule-help { min-height: 42px; margin-top: 30px; padding: 10px 12px; border: 1px solid #d8e0ec; border-radius: 7px; background: #f8fafc; color: #344054; font-size: 13px; font-weight: 750; line-height: 1.35; }
-    button { min-height: 44px; border: 0; border-radius: 7px; padding: 10px 15px; font-weight: 850; cursor: pointer; background: var(--blue); color: white; box-shadow: 0 10px 24px rgba(23, 92, 211, 0.24); }
-    button.secondary { background: #394150; box-shadow: none; }
-    button:hover { filter: brightness(1.04); }
-    .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding-top: 16px; }
-    .muted { color: var(--muted); font-size: 13px; line-height: 1.5; }
-    .note { margin: 14px 0 0; padding: 12px; border-radius: 7px; background: #fff8eb; border: 1px solid #fedf89; color: #7a4a08; }
-    .workflow-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 14px 0 4px; }
-    .workflow-card { min-height: 86px; padding: 13px; border-radius: 8px; border: 1px solid rgba(223, 231, 242, 0.9); background: linear-gradient(135deg, rgba(255, 255, 255, 0.96) 0%, rgba(237, 245, 255, 0.94) 100%); box-shadow: 0 12px 30px rgba(29, 41, 57, 0.08); }
-    .workflow-card:nth-child(2) { background: linear-gradient(135deg, #ffffff 0%, #ecfdf3 100%); }
-    .workflow-card:nth-child(3) { background: linear-gradient(135deg, #ffffff 0%, #fff7ed 100%); }
-    .workflow-card strong { display: block; font-size: 13px; margin-top: 9px; }
-    .workflow-card span { color: var(--muted); font-size: 12px; font-weight: 700; }
-    .workflow-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: #ffffff; font-size: 14px; font-weight: 900; background: var(--blue); }
-    .workflow-card:nth-child(2) .workflow-icon { background: var(--green); }
-    .workflow-card:nth-child(3) .workflow-icon { background: var(--gold); }
-    .workspace-header { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(280px, 340px); gap: 16px; align-items: start; margin-bottom: 20px; }
-    .results-header { display: block; }
-    .results-header .practice-links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-    .results-header h2 { margin: 0; font-size: 26px; letter-spacing: 0; }
-    .panel-link { display: inline-flex; align-items: center; min-height: 34px; padding: 7px 10px; border-radius: 7px; background: #edf4ff; color: var(--blue); text-decoration: none; font-size: 13px; font-weight: 900; white-space: nowrap; }
-    .status-pill { display: inline-flex; align-items: center; min-height: 30px; padding: 6px 10px; border-radius: 999px; background: #ecfdf3; color: var(--green); font-size: 12px; font-weight: 850; white-space: nowrap; }
-    .empty-state { display: grid; place-items: center; min-height: 360px; border: 1px dashed #cbd5e1; border-radius: 8px; background: #f8fafc; text-align: center; padding: 24px; }
-    .empty-visual { width: 118px; height: 90px; margin-bottom: 14px; border-radius: 8px; background: #ffffff; border: 1px solid #d8e0ec; box-shadow: 0 10px 24px rgba(29, 41, 57, 0.08); position: relative; }
-    .empty-visual::before { content: ""; position: absolute; left: 18px; right: 18px; top: 22px; height: 8px; border-radius: 4px; background: #175cd3; box-shadow: 0 18px 0 #d8e0ec, 0 36px 0 #d8e0ec; }
-    .scheduler-panel { padding: 13px; border: 1px solid #d8e2f0; border-radius: 8px; background: linear-gradient(145deg, #f8fbff, #eef4fb); box-shadow: 0 10px 26px rgba(29, 41, 57, 0.08); }
-    .scheduler-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
-    .scheduler-panel-head h3 { margin: 0; font-size: 14px; }
-    .scheduler-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
-    .scheduler-card { padding: 8px; border: 1px solid #dfe6f0; border-radius: 6px; background: rgba(255, 255, 255, 0.82); }
-    .scheduler-card strong { display: block; font-size: 10px; color: #5b6472; text-transform: uppercase; }
-    .scheduler-card span { display: block; margin-top: 3px; font-size: 12px; font-weight: 800; color: var(--ink); overflow-wrap: anywhere; }
-    .status-pill.off { background: #f2f4f7; color: #5b6472; }
-    .status-pill.error { background: #fef3f2; color: #b42318; }
-    .metric { display: inline-flex; align-items: baseline; gap: 7px; padding: 10px 12px; border: 1px solid #dfe4ee; border-radius: 7px; margin: 0 8px 8px 0; background: #fbfcfe; }
-    .metric strong { font-size: 26px; }
-    .download-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0 12px; }
-    .download-button { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 9px 12px; border-radius: 7px; background: var(--blue); color: #ffffff; text-decoration: none; font-weight: 850; box-shadow: 0 10px 24px rgba(23, 92, 211, 0.2); }
-    .download-button.secondary-link { background: #394150; box-shadow: none; }
-    .download-button:hover { filter: brightness(1.04); }
-    .show-more-row { display: flex; justify-content: center; margin-top: 12px; }
-    .show-more-row button { min-height: 38px; padding: 9px 14px; border: 1px solid #c9d8ef; background: #edf4ff; color: var(--blue); box-shadow: none; }
-    .history-list { grid-column: 1 / -1; margin: 2px 0 0; padding: 8px; list-style: none; border: 1px solid #dfe6f0; border-radius: 6px; background: rgba(255, 255, 255, 0.82); }
-    .history-list li { margin: 0; font-size: 11px; line-height: 1.4; }
-    .result-section { margin-top: 18px; padding: 16px; border: 1px solid rgba(225, 232, 242, 0.92); border-radius: 8px; background: rgba(255, 255, 255, 0.84); box-shadow: 0 12px 32px rgba(29, 41, 57, 0.07); }
-    .result-section h3 { margin: 0 0 12px; font-size: 18px; }
-    .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-    .insight-list { margin: 0; padding-left: 18px; }
-    .table-wrap { overflow-x: auto; border-radius: 8px; }
-    .draft-grid { display: grid; gap: 12px; }
-    .draft-card { border: 1px solid #dfe7f2; border-radius: 8px; background: #ffffff; overflow: hidden; }
-    .draft-card-header { display: flex; justify-content: space-between; gap: 12px; padding: 12px; background: #f8fafc; border-bottom: 1px solid #e6eaf1; }
-    .draft-card-header strong { display: block; }
-    .draft-card-header span { color: var(--muted); font-size: 12px; }
-    .draft-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .copy-draft { min-height: 34px; padding: 7px 10px; box-shadow: none; font-size: 12px; }
-    .draft-message { width: 100%; min-height: 180px; border: 0; border-radius: 0; border-top: 1px solid #eef2f7; background: #fbfcfe; font-size: 13px; line-height: 1.5; }
-    ul { padding-left: 20px; }
-    li { margin: 6px 0; }
-    table { width: 100%; border-collapse: collapse; font-size: 14px; overflow: hidden; border: 1px solid #e6eaf1; border-radius: 8px; }
-    th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid #e6eaf1; vertical-align: top; }
-    th { background: #f8fafc; color: #344054; font-size: 12px; text-transform: uppercase; }
-    td a { color: var(--blue); font-weight: 800; }
-    @media (max-width: 900px) {
-      .hero { min-height: 380px; }
-      .hero-content { width: min(100% - 32px, 720px); grid-template-columns: 1fr; padding: 28px 0 70px; }
-      .hero-stats { justify-self: stretch; grid-template-columns: 1fr 1fr; min-width: 0; }
-      main { width: min(100% - 32px, 720px); grid-template-columns: 1fr; margin-top: -42px; }
-      .workspace-header { grid-template-columns: 1fr; }
-      .row { grid-template-columns: 1fr; }
-      .checkline { margin-top: 12px; }
-      h1 { font-size: 38px; }
-    }
-    @media (max-width: 560px) {
-      /* The top bar overlays the hero on wide screens; on phones give it its own row. */
-      .topbar { width: calc(100% - 28px); margin: 0 auto; padding-top: 10px; justify-content: space-between; }
-      .hero-content { width: calc(100% - 28px); padding-top: 12px; }
-      main { width: calc(100% - 28px); }
-      .hero-stats { grid-template-columns: 1fr; }
-      .results-header { display: block; }
-      .status-pill { margin-top: 10px; }
-      .platform-chip { width: 100%; justify-content: flex-start; }
-      .workflow-strip, .result-grid { grid-template-columns: 1fr; }
-    }
-  </style>
-</head>
-<body>
-  <div class="topbar">
-    <span class="user-chip">Signed in as __USER_EMAIL__</span>
-    <form class="logout-form" method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
-  </div>
-  <header class="hero">
-    <div class="hero-content">
+    body = """
+  <section data-view="overview" aria-labelledby="overview-greeting">
+    <div class="hero-band">
+      <div class="ring" id="overview-ring" role="img" aria-label="No ATS score yet"><span>–<small>No score yet</small></span></div>
       <div>
-        <div class="eyebrow">Resume-first daily automation</div>
-        <h1>Job Hunting Agent</h1>
-        <p>Upload your resume to score ATS readiness, find fresh roles across __SOURCE_COUNT__ job sources, get a tailored resume for every lead, practise with job-specific mock tests and interviews, and prepare recruiter-ready emails.</p>
-        <div class="platform-strip" aria-label="Job sources and channels">
-          <span class="platform-chip"><span class="platform-mark linkedin">in</span> LinkedIn jobs</span>
-          <span class="platform-chip"><span class="platform-mark naukri">N</span> Naukri jobs</span>
-          <span class="platform-chip" title="__OTHER_SOURCE_NAMES__"><span class="platform-mark mail">+</span> __OTHER_SOURCE_COUNT__ more job boards</span>
-        </div>
-      </div>
-      <div class="hero-stats" aria-label="Workflow highlights">
-        <div class="stat-card"><strong>ATS</strong><span>Resume scoring and suggestions</span></div>
-        <div class="stat-card" title="__SOURCE_NAMES__"><strong>__SOURCE_COUNT__</strong><span>Job sources active</span></div>
-        <div class="stat-card"><strong>Daily</strong><span>Scheduled search and draft run</span></div>
+        <h2 id="overview-greeting">Welcome</h2>
+        <p class="lede" id="overview-lede">Upload your resume to get an ATS score, matched job leads, a tailored resume for every lead and recruiter-ready drafts.</p>
+        <div class="btn-row"><a class="btn btn-primary" id="overview-primary" href="#run">Upload resume and run</a><a class="btn hidden" id="overview-secondary" href="#jobs">View job leads</a></div>
       </div>
     </div>
-  </header>
-  <main>
-    <form id="agent-form">
-      <fieldset>
-        <legend><span class="section-badge">1</span>Resume and Profiles</legend>
-        <label for="resume">Resume</label>
-        <input id="resume" name="resume" type="file" accept=".pdf,.docx,.txt,.md">
-        <p class="muted" id="saved-resume">__RESUME_STATUS__</p>
-        <label for="linkedin_profile_url">LinkedIn Profile URL (optional)</label>
-        <input id="linkedin_profile_url" name="linkedin_profile_url" type="text" inputmode="url" autocomplete="url" placeholder="https://www.linkedin.com/in/your-name" value="__LINKEDIN_PROFILE_URL__">
-        <label for="naukri_profile_url">Naukri Profile URL (optional)</label>
-        <input id="naukri_profile_url" name="naukri_profile_url" type="text" inputmode="url" autocomplete="url" placeholder="https://www.naukri.com/mnjuser/profile" value="__NAUKRI_PROFILE_URL__">
-        <p class="muted">These links are added to your recruiter email drafts so recruiters can view your profiles. Your LinkedIn link is also used on the ATS resume if your uploaded resume has no contact details. They are not used to sign in to or search LinkedIn or Naukri; jobs are found from your target roles, skills, locations and experience.</p>
-      </fieldset>
-      <fieldset>
-        <legend><span class="section-badge">2</span>Candidate</legend>
-        <div class="row">
-          <div><label for="name">Name</label><input id="name" name="name" value="__NAME__"></div>
-          <div><label for="phone">Phone</label><input id="phone" name="phone" value="__PHONE__"></div>
-        </div>
-        <label for="email">Email</label>
-        <input id="email" name="email" type="email" value="__PROFILE_EMAIL__" readonly>
-      </fieldset>
-      <fieldset>
-        <legend><span class="section-badge">3</span>Search</legend>
-        <label for="target_roles">Target Roles</label>
-        <textarea id="target_roles" name="target_roles">__TARGET_ROLES__</textarea>
-        <label for="locations">Locations</label>
-        <textarea id="locations" name="locations">__LOCATIONS__</textarea>
-        <label for="skills">Skills</label>
-        <textarea id="skills" name="skills">__SKILLS__</textarea>
-        <label for="experience_years">Professional Experience (years)</label>
-        <input id="experience_years" name="experience_years" type="number" min="0" max="50" step="0.5" value="__EXPERIENCE_YEARS__">
-        <p class="muted">Enter 0 if you are a fresher. This sets portal experience filters; it does not invent experience in the ATS report or improved resume.</p>
-        <label for="job_description">Job Description (optional)</label>
-        <textarea id="job_description" name="job_description" rows="8" placeholder="Paste the target job description for keyword, semantic relevance, and missing-skill analysis.">__JOB_DESCRIPTION__</textarea>
-        <div class="row">
-          <div><label for="max_jobs_per_portal">Max Jobs Per Portal</label><input id="max_jobs_per_portal" name="max_jobs_per_portal" type="number" min="1" max="50" value="__MAX_JOBS__"></div>
-          <div><label for="application_mode">Application Mode</label><select id="application_mode" name="application_mode">__APPLICATION_OPTIONS__</select></div>
-        </div>
-      </fieldset>
-      <fieldset>
-        <legend><span class="section-badge">4</span>Daily Automation</legend>
-        <div class="row">
-          <div><label for="daily_at">Daily Time</label><input id="daily_at" name="daily_at" type="time" value="__DAILY_AT__"></div>
-          <div class="schedule-help">Use Schedule Daily Run to upload this resume and start the timer. The app uses your browser timezone and restores active schedules after server restarts.</div>
-        </div>
-        <input id="daily_timezone" name="daily_timezone" type="hidden" value="UTC">
-      </fieldset>
-      <div class="actions">
-        <button type="submit">Run Agent</button>
-        <button class="secondary" id="schedule-run" type="button">Schedule Daily Run</button>
-        <button class="secondary" id="stop-scheduler" type="button">Stop Daily Run</button>
-      </div>
-      <p class="note">Portal submissions are prepared as drafts or recruiter emails. Authenticated LinkedIn/Naukri application submission needs account-specific browser adapters and user approval.</p>
-      <div class="workflow-strip" aria-label="Agent workflow">
-        <div class="workflow-card"><div class="workflow-icon">CV</div><strong>Resume</strong><span>ATS signals and profile fit</span></div>
-        <div class="workflow-card"><div class="workflow-icon">JP</div><strong>Jobs</strong><span>LinkedIn and Naukri leads</span></div>
-        <div class="workflow-card"><div class="workflow-icon">@</div><strong>Drafts</strong><span>Messages ready to copy</span></div>
-      </div>
-    </form>
-    <section class="panel">
-      <div class="workspace-header">
-        <div class="results-header">
-          <div>
-            <h2>Run Results</h2>
-            <p class="muted">ATS score, role matches, missing keywords, and draft actions appear here.</p>
+    <div class="stat-strip" aria-label="Latest run">
+      <div class="stat"><span class="stat-value" id="stat-jobs">–</span><span class="stat-label">Job leads in the latest run</span></div>
+      <div class="stat"><span class="stat-value" id="stat-strong">–</span><span class="stat-label">Strong matches (70% and up)</span></div>
+      <div class="stat"><span class="stat-value" id="stat-drafts">–</span><span class="stat-label">Drafts ready</span></div>
+      <div class="stat"><span class="stat-value" id="stat-approvals">0</span><span class="stat-label">Emails waiting for approval</span></div>
+    </div>
+    <div class="split">
+      <section class="panel" aria-labelledby="next-title"><div class="panel-head"><h3 id="next-title">Next best actions</h3></div><ul class="action-list" id="next-actions"></ul></section>
+      <section class="panel" aria-labelledby="top-title"><div class="panel-head"><h3 id="top-title">Top matches</h3><a class="btn btn-sm btn-quiet" href="#jobs">All leads</a></div><div id="top-matches"></div></section>
+    </div>
+    <div class="split">
+      <section class="panel" aria-labelledby="sources-title">
+        <div class="panel-head"><h3 id="sources-title">Job sources</h3></div>
+        <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap">
+          <p class="stat-value" title="__SOURCE_NAMES__" style="display:flex;align-items:baseline;gap:10px;font-size:20px"><strong>__SOURCE_COUNT__</strong><span>Job sources active</span></p>
+          <div class="chips" aria-label="Job sources">
+            <span class="chip"><span aria-hidden="true">in</span>&nbsp;LinkedIn</span>
+            <span class="chip"><span aria-hidden="true">N</span>&nbsp;Naukri</span>
+            <span class="chip" title="__OTHER_SOURCE_NAMES__"><span aria-hidden="true">+</span> __OTHER_SOURCE_COUNT__ more job boards</span>
           </div>
-          <div class="practice-links"><a class="panel-link" href="/mock-interview">Mock Interview</a><a class="panel-link" href="/mock-test">Mock Test</a></div>
         </div>
-        <aside class="scheduler-panel" aria-label="Daily scheduler status">
-          <div class="scheduler-panel-head"><h3>Daily Automation</h3><span class="status-pill">Ready</span></div>
-          <div id="scheduler-status" class="scheduler-grid"></div>
-        </aside>
-      </div>
-      <div id="summary" class="empty-state">
-        <div>
-          <div class="empty-visual" aria-hidden="true"></div>
-          <strong>No run yet</strong>
-          <p class="muted">Upload your resume and run the agent to build your daily job pipeline.</p>
-        </div>
-      </div>
-      <div id="details"></div>
-    </section>
-  </main>
-  <script>
-    const form = document.getElementById('agent-form');
-    const summary = document.getElementById('summary');
-    const details = document.getElementById('details');
-    const schedulerStatus = document.getElementById('scheduler-status');
-    const statusPill = document.querySelector('.status-pill');
-    const timezoneInput = document.getElementById('daily_timezone');
-    let activeResult = { key: '', generatedAt: '', source: '' };
-    let activePayload = null;
-    let resumeStatusTimer = null;
-    function enrichFormData() {
-      timezoneInput.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-      const data = new FormData(form);
-      data.set('daily_timezone', timezoneInput.value);
-      return data;
-    }
-    async function responsePayload(response) {
-      const contentType = response.headers.get('content-type') || '';
-      if (contentType.includes('application/json')) return response.json();
-      const message = (await response.text()).trim();
-      return { detail: message || `Request failed with status ${response.status}.` };
-    }
-    function showRequestError(error, fallback) {
-      summary.className = 'note';
-      summary.textContent = error instanceof Error && error.message ? error.message : fallback;
-    }
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      summary.className = 'muted';
-      details.innerHTML = '';
-      const runStarted = Date.now();
-      const runStage = (seconds) => seconds < 8 ? 'Scoring your resume and searching job portals'
-        : seconds < 40 ? 'Searching LinkedIn, Naukri and job boards'
-        : 'Ranking jobs and preparing application drafts';
-      const updateRunStatus = () => {
-        const seconds = Math.round((Date.now() - runStarted) / 1000);
-        summary.textContent = `${runStage(seconds)}... ${seconds}s (usually under a minute)`;
-      };
-      updateRunStatus();
-      const runTimer = setInterval(updateRunStatus, 1000);
-      try {
-        const data = enrichFormData();
-        const response = await fetch('/api/run', { method: 'POST', body: data });
-        clearInterval(runTimer);
-        const payload = await responsePayload(response);
-        if (!response.ok) {
-          showRequestError(new Error(payload.detail || 'Run failed.'), 'Run failed.');
-          return;
-        }
-        render(payload, 'manual');
-        refreshDashboard();
-      } catch (error) {
-        clearInterval(runTimer);
-        showRequestError(error, 'Run failed. Check the server terminal and try again.');
-      }
-    });
-    document.getElementById('schedule-run').addEventListener('click', async () => {
-      summary.className = 'muted';
-      summary.textContent = 'Uploading resume and scheduling the daily agent run...';
-      details.innerHTML = '';
-      try {
-        const data = enrichFormData();
-        const response = await fetch('/api/scheduler/start', { method: 'POST', body: data });
-        const payload = await responsePayload(response);
-        if (!response.ok) {
-          showRequestError(new Error(payload.detail || 'Schedule failed.'), 'Schedule failed.');
-          return;
-        }
-        renderScheduler(payload.scheduler);
-        summary.innerHTML = `<p class="muted">Daily run scheduled. The agent will run at the configured time while this server process is active.</p>`;
-        refreshDashboard();
-      } catch (error) {
-        showRequestError(error, 'Scheduling failed. Check the server terminal and try again.');
-      }
-    });
-    document.getElementById('stop-scheduler').addEventListener('click', async () => {
-      const response = await fetch('/api/scheduler/stop', { method: 'POST' });
-      const payload = await response.json();
-      summary.className = 'muted';
-      summary.textContent = payload.running ? 'Scheduler is still running.' : 'Daily run stopped.';
-      renderScheduler(payload);
-    });
-    async function refreshDashboard() {
-      let latestResult = null;
-      const response = await fetch('/api/dashboard');
-      if (response.ok) {
-        const payload = await response.json();
-        renderScheduler(payload.scheduler);
-        latestResult = newerResult(latestResult, payload.scheduler?.last_result);
-        const latestStoredRun = payload.latest_run?.payload;
-        latestResult = newerResult(latestResult, latestStoredRun);
-      }
-      if (shouldRenderResult(latestResult)) {
-        render(latestResult, latestResult.trigger || 'manual');
-      }
-    }
-    function newerResult(current, candidate) {
-      if (!candidate?.generated_at) return current;
-      if (!current?.generated_at) return candidate;
-      return candidate.generated_at > current.generated_at ? candidate : current;
-    }
-    function resultKey(result) {
-      return result?.generated_at || result?.run_id || '';
-    }
-    function shouldRenderResult(result) {
-      const key = resultKey(result);
-      if (!key || key === activeResult.key) return false;
-      if (!activeResult.generatedAt || !result.generated_at) return true;
-      return result.generated_at > activeResult.generatedAt;
-    }
-    function renderScheduler(scheduler) {
-      const running = scheduler && scheduler.running;
-      const error = scheduler && scheduler.last_error;
-      statusPill.className = `status-pill ${error ? 'error' : running ? '' : 'off'}`;
-      statusPill.textContent = error ? 'Error' : running ? 'Scheduled' : 'Ready';
-      schedulerStatus.innerHTML = `
-        <div class="scheduler-card"><strong>Scheduler</strong><span>${running ? 'Running' : 'Not running'}</span></div>
-        <div class="scheduler-card"><strong>Daily time</strong><span>${escapeHtml(scheduler?.daily_at || 'Not set')}</span></div>
-        <div class="scheduler-card"><strong>Timezone</strong><span>${escapeHtml(scheduler?.timezone || timezoneInput.value || 'UTC')}</span></div>
-        <div class="scheduler-card"><strong>Next run</strong><span>${escapeHtml(scheduler?.next_run_at || 'Not scheduled')}</span></div>
-        <div class="scheduler-card"><strong>Last run</strong><span>${escapeHtml(scheduler?.last_run_at || 'No run yet')}</span></div>
-      `;
-      if (error) {
-        schedulerStatus.innerHTML += `<p class="note">Last scheduled run failed: ${escapeHtml(error)}</p>`;
-      }
-      if (scheduler?.history?.length) {
-        const item = scheduler.history[0];
-        schedulerStatus.innerHTML += `<ul class="history-list"><li><strong>Latest ${escapeHtml(item.trigger)} run:</strong> ${escapeHtml(item.finished_at || '')} · ${escapeHtml(item.jobs ?? 'n/a')} jobs</li></ul>`;
-      }
-    }
-    function render(payload, source = 'manual', options = {}) {
-      const key = resultKey(payload);
-      activeResult = { key, generatedAt: payload.generated_at || activeResult.generatedAt, source };
-      activePayload = payload;
-      const report = payload.ats_report;
-      const appSummary = payload.application_summary || {};
-      const resultLabel = source === 'scheduled'
-        ? `<p class="muted">Showing latest scheduled run from ${escapeHtml(payload.generated_at || 'the scheduler')}.</p>`
-        : '';
-      const improvedResumeAction = improvedResumeDownload(payload);
-      const confidencePercent = Math.round((report.score_confidence || 0) * 100);
-      const extractionPercent = Math.round((report.extraction_confidence || 0) * 100);
-      const scoreRange = report.score_range || [report.score, report.score];
-      const layout = report.layout_analysis || {};
-      const jobPage = payload.job_page || { total: payload.jobs.length, has_more: false, next_cursor: '' };
-      const totalJobs = payload.job_count ?? jobPage.total ?? payload.jobs.length;
-      summary.className = '';
-      summary.innerHTML = `
-        <span class="metric"><strong>${report.score}</strong><span>/100 ATS</span></span>
-        <span class="metric"><strong>${confidencePercent}%</strong><span>${escapeHtml(report.confidence_label || 'Low')} confidence</span></span>
-        <span class="metric"><strong>${totalJobs}</strong><span>jobs</span></span>
-        <span class="metric"><strong>${appSummary.drafted || 0}</strong><span>drafts ready</span></span>
-        ${resultLabel}
-        <p class="muted">Outputs: ${payload.output_dir}</p>
-        <p class="muted">${payload.portal_submission_note}</p>
-      `;
-      const improvements = report.improvements.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
-      const missing = report.missing_keywords.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
-      const jobs = payload.jobs.map((job) => {
-        const reasons = (job.match_reasons || []).map((reason) => `<span class="status-pill">${escapeHtml(reason)}</span>`).join(' ');
-        const jobDetails = [job.workplace_mode, job.employment_type, job.salary_text, job.posted_at ? `Posted ${job.posted_at.slice(0, 10)}` : '', job.freshness_verified ? 'date verified' : 'date unverified'].filter((item) => item && item !== 'unknown').map(escapeHtml).join(' · ');
-        const portalLabels = { linkedin: 'LinkedIn', naukri: 'Naukri', himalayas: 'Himalayas', remotive: 'Remotive', arbeitnow: 'Arbeitnow', jobicy: 'Jobicy', remoteok: 'Remote OK', adzuna: 'Adzuna', careerjet: 'Careerjet', jooble: 'Jooble' };
-        const attribution = job.source_metadata?.source_type === 'partner_api' ? job.source_metadata?.source_attribution : '';
-        const sourceState = attribution || (job.source_validated ? 'Validated API' : 'Public discovery');
-        const normalizedCompany = job.normalized_company && job.normalized_company !== job.company ? `<br><span class="muted">${escapeHtml(job.normalized_company)}</span>` : '';
-        const additionsStatus = job.source_metadata?.additional_skills_status || '';
-        const additionsLabels = {
-          already_listed: 'All supported job skills are already listed',
-          no_evidence: 'No resume evidence for the remaining job skills',
-          no_requirements: 'No specific skills found in this posting',
-          description_unavailable: 'Description unavailable - check the posting',
-        };
-        const additionsHint = escapeHtml(job.source_metadata?.additional_skills_message || '');
-        const addedSkills = (job.additional_skills || []).length
-          ? `<span title="${additionsHint}">${job.additional_skills.map(escapeHtml).join(', ')}</span>`
-          : `<span class="muted" title="${additionsHint}">${escapeHtml(additionsLabels[additionsStatus] || 'No source-backed additions')}</span>`;
-        const matchedSkills = (job.source_metadata?.matched_skills || []).length
-          ? `<br><span class="muted">Matched skills: ${job.source_metadata.matched_skills.map(escapeHtml).join(', ')}</span>`
-          : '';
-        const missingRequirements = (job.source_metadata?.missing_required_skills || []).length
-          ? `<br><span class="muted">Missing required skills: ${job.source_metadata.missing_required_skills.map(escapeHtml).join(', ')}</span>`
-          : '';
-        const tailoredState = payload.improved_resume?.tailored_statuses?.[job.tailored_resume_id]?.status || 'idle';
-        const tailored = job.tailored_resume_id && tailoredState === 'ready'
-          ? `<br><a href="/api/runs/${encodeURIComponent(payload.run_id)}/tailored-resumes/${encodeURIComponent(job.tailored_resume_id)}/docx">DOCX</a> · <a href="/api/runs/${encodeURIComponent(payload.run_id)}/tailored-resumes/${encodeURIComponent(job.tailored_resume_id)}/pdf">PDF</a>`
-          : job.tailored_resume_id
-            ? `<br><button type="button" class="prepare-tailored" data-artifact-id="${escapeHtml(job.tailored_resume_id)}" ${tailoredState === 'preparing' ? 'disabled' : ''}>${tailoredState === 'preparing' ? 'Preparing resume...' : tailoredState === 'failed' ? 'Retry resume' : 'Prepare resume'}</button>`
-            : '';
-        return `<tr><td>${escapeHtml(portalLabels[job.portal] || job.portal)}<br><span class="muted">${escapeHtml(sourceState)}</span></td><td><strong>${escapeHtml(job.title)}</strong><br><span class="muted">${escapeHtml(job.location || '')}</span><br><span class="muted">${jobDetails}</span></td><td>${escapeHtml(job.company)}${normalizedCompany}</td><td><strong>${escapeHtml(job.match_score || 0)}%</strong><br>${reasons}${matchedSkills}${missingRequirements}</td><td>${addedSkills}</td><td><a href="${escapeHtml(job.url)}" target="_blank" rel="noreferrer">Open job</a>${tailored}<br><a href="/mock-test?job=${encodeURIComponent(`${job.portal || ''}:${job.source_id || job.url || ''}`.toLowerCase())}">Mock test</a> · <a href="/mock-interview?job=${encodeURIComponent(`${job.portal || ''}:${job.source_id || job.url || ''}`.toLowerCase())}">Mock interview</a><br><span class="muted">${escapeHtml(job.link_status || 'unchecked')}</span></td></tr>`;
-      }).join('');
-      const remainingJobs = Math.max(0, (jobPage.total || totalJobs) - payload.jobs.length);
-      const showMoreJobs = jobPage.has_more
-        ? `<div class="show-more-row"><button id="show-more-jobs" type="button">Show more jobs (${remainingJobs} remaining)</button></div>`
-        : '';
-      const draftTemplate = buildDraftTemplate(payload.applications);
-      details.innerHTML = `
-        <section class="result-section">
-          <h3>Resume Signals</h3>
-          ${improvedResumeAction || '<p class="muted">Run the agent to prepare a final ATS-friendly resume download.</p>'}
-          <p class="muted">${escapeHtml(report.role_profile || 'General Professional')} profile · estimated range ${escapeHtml(scoreRange[0])}-${escapeHtml(scoreRange[1])} · extraction ${extractionPercent}% · layout ${escapeHtml(layout.score ?? 'not verified')}/100 · semantic provider ${escapeHtml(report.semantic_provider || 'not applicable')}</p>
-          <div class="result-grid">
-            <div><strong>Resume Improvements</strong><ul class="insight-list">${improvements || '<li>No major improvements found.</li>'}</ul></div>
-            <div><strong>Missing Keywords</strong><ul class="insight-list">${missing || '<li>No configured keywords are missing.</li>'}</ul></div>
+        <p class="faint" style="margin-top:12px">__SOURCE_NAMES__</p>
+      </section>
+      <section class="panel" aria-labelledby="auto-title"><div class="panel-head"><h3 id="auto-title">Daily automation</h3><a class="btn btn-sm btn-quiet" href="#run">Change</a></div><div id="overview-schedule"></div></section>
+    </div>
+  </section>
+
+  <section data-view="run" hidden aria-label="Run and profile">
+    <div class="view-head"><div><h2>Run the agent</h2><p>Your resume and search settings. Run once now, or schedule a daily run that finds fresh leads and drafts automatically.</p></div></div>
+    <div class="split-run">
+      <form id="agent-form" class="panel" novalidate data-has-resume="__HAS_RESUME__">
+        <p class="faint" style="margin-bottom:16px" data-i18n="required-note">Fields marked <span class="req">*</span> are required.</p>
+        <fieldset>
+          <legend>Resume <span class="req" aria-hidden="true">*</span></legend>
+          <label class="dropzone" for="resume">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M5 15v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-4"/></svg>
+            <strong id="dropzone-title">Drop your resume here or choose a file</strong>
+            <span class="faint" id="dropzone-hint">PDF, DOCX, TXT or Markdown</span>
+            <input id="resume" name="resume" type="file" accept=".pdf,.docx,.txt,.md" aria-describedby="saved-resume">
+          </label>
+          <p class="muted" id="saved-resume">__RESUME_STATUS__</p>
+        </fieldset>
+        <fieldset>
+          <legend>Candidate</legend>
+          <div class="grid-2">
+            <label class="field" for="name"><span class="field-label">Name <span class="req" aria-hidden="true">*</span></span><input id="name" name="name" autocomplete="name" required data-label="Name" value="__NAME__"></label>
+            <label class="field" for="phone"><span class="field-label">Phone <span class="req" aria-hidden="true">*</span></span><input id="phone" name="phone" type="tel" autocomplete="tel" inputmode="tel" required data-label="Phone" placeholder="+91 98765 43210" value="__PHONE__"></label>
           </div>
-        </section>
-        <section class="result-section">
-          <h3>Job Leads</h3>
-          <p class="muted">Individual postings are matched by role, skills, and location. Experience is checked when stated; otherwise the requirement is marked unverified for your review.</p>
-          ${jobs ? `<div class="table-wrap"><table><thead><tr><th>Portal</th><th>Role & Location</th><th>Company</th><th>Match</th><th>Additional Skills</th><th>Link</th></tr></thead><tbody>${jobs}</tbody></table></div>` : '<p class="muted">No matching individual postings were found in this run. Try a broader role or location, or search again later.</p>'}
-          ${showMoreJobs}
-        </section>
-        <section class="result-section">
-          <h3>Reusable Draft Message</h3>
-          <div class="draft-grid">${draftTemplate ? draftCard(draftTemplate) : '<p class="muted">No draft message was generated for this run.</p>'}</div>
-        </section>
-      `;
-      scheduleResumeStatusPoll();
-    }
-    function improvedResumeDownload(payload) {
-      if (!payload.improved_resume || !payload.run_id) return '';
-      const status = payload.improved_resume.status || 'preparing';
-      if (status === 'preparing') {
-        return `<div class="download-actions"><span class="muted">Preparing the validated base resume in the background...</span></div>`;
-      }
-      if (status === 'failed') {
-        return `<div class="download-actions"><span class="note">Resume preparation failed: ${escapeHtml(payload.improved_resume.error || 'unknown error')}</span></div>`;
-      }
-      const validation = payload.improved_resume.validation || {};
-      const validationLabel = validation.passed
-        ? `${validation.page_count || '?'} page PDF · render and factual checks passed`
-        : `Validation needs review${validation.issues?.length ? `: ${validation.issues[0]}` : ''}`;
-      return `
-        <div class="download-actions">
-          <a class="download-button" href="/api/runs/${encodeURIComponent(payload.run_id)}/improved-resume">Download ATS Resume DOCX</a>
-          <a class="download-button" href="/api/runs/${encodeURIComponent(payload.run_id)}/improved-resume.pdf">Download ATS Resume PDF</a>
-          <a class="download-button secondary-link" href="/mock-interview">Mock Interview Questions</a>
-          <a class="download-button secondary-link" href="/mock-test">Mock Test</a>
-          <span class="muted">${escapeHtml(validationLabel)}. Each job row includes its separately tailored resume.</span>
-        </div>
-      `;
-    }
-    function buildDraftTemplate(applications) {
-      const firstDraft = applications.find((item) => item.draft_message);
-      if (!firstDraft) return '';
-      const company = firstDraft.job.company || '';
-      let message = firstDraft.draft_message
-        .split('\\n')
-        .filter((line) => !line.toLowerCase().startsWith('job link:'))
-        .join('\\n')
-        .trim();
-      if (company) {
-        message = message.split(company).join('[Company Name]');
-      }
-      return message;
-    }
-    function draftCard(message) {
-      return `
-        <article class="draft-card">
-          <div class="draft-card-header">
-            <div>
-              <strong>Reusable recruiter message</strong>
-              <span>Replace [Company Name] before applying to a selected job.</span>
-            </div>
-            <div class="draft-actions">
-              <button class="copy-draft" type="button">Copy Template</button>
-            </div>
+          <label class="field" for="email"><span class="field-label">Email <span class="req" aria-hidden="true">*</span></span><input id="email" name="email" type="email" value="__PROFILE_EMAIL__" readonly></label>
+          <div class="grid-2">
+            <label class="field" for="linkedin_profile_url">LinkedIn profile URL <span class="field-hint">Optional</span><input id="linkedin_profile_url" name="linkedin_profile_url" type="text" inputmode="url" autocomplete="url" placeholder="https://www.linkedin.com/in/your-name" value="__LINKEDIN_PROFILE_URL__"></label>
+            <label class="field" for="naukri_profile_url">Naukri profile URL <span class="field-hint">Optional</span><input id="naukri_profile_url" name="naukri_profile_url" type="text" inputmode="url" autocomplete="url" placeholder="https://www.naukri.com/mnjuser/profile" value="__NAUKRI_PROFILE_URL__"></label>
           </div>
-          <textarea class="draft-message" readonly>${escapeHtml(message)}</textarea>
-        </article>
-      `;
-    }
-    function scheduleResumeStatusPoll(immediate = false) {
-      if (resumeStatusTimer) clearTimeout(resumeStatusTimer);
-      const improved = activePayload?.improved_resume || {};
-      const tailored = Object.values(improved.tailored_statuses || {});
-      const pending = improved.status === 'preparing' || tailored.some((item) => item.status === 'preparing');
-      if (!pending || !activePayload?.run_id) return;
-      resumeStatusTimer = setTimeout(refreshResumeStatus, immediate ? 100 : 1500);
-    }
-    async function refreshResumeStatus() {
-      if (!activePayload?.run_id) return;
-      try {
-        const response = await fetch(`/api/runs/${encodeURIComponent(activePayload.run_id)}/resume-status`);
-        const status = await responsePayload(response);
-        if (!response.ok) throw new Error(status.detail || 'Unable to read resume status.');
-        activePayload.improved_resume = {
-          ...activePayload.improved_resume,
-          status: status.base?.status || activePayload.improved_resume?.status,
-          validation: status.base?.validation || activePayload.improved_resume?.validation,
-          error: status.base?.error || '',
-          tailored_statuses: status.tailored || {},
-        };
-        render(activePayload, activeResult.source);
-      } catch (_) {
-        resumeStatusTimer = setTimeout(refreshResumeStatus, 3000);
-      }
-    }
-    document.addEventListener('click', async (event) => {
-      const prepareButton = event.target.closest('.prepare-tailored');
-      if (prepareButton) {
-        if (!activePayload?.run_id) return;
-        const artifactId = prepareButton.dataset.artifactId;
-        prepareButton.disabled = true;
-        prepareButton.textContent = 'Preparing resume...';
-        const statuses = { ...(activePayload.improved_resume?.tailored_statuses || {}) };
-        statuses[artifactId] = { status: 'preparing' };
-        activePayload.improved_resume = { ...activePayload.improved_resume, tailored_statuses: statuses };
-        try {
-          const response = await fetch(`/api/runs/${encodeURIComponent(activePayload.run_id)}/tailored-resumes/${encodeURIComponent(artifactId)}/prepare`, { method: 'POST' });
-          const payload = await responsePayload(response);
-          if (!response.ok) throw new Error(payload.detail || 'Unable to prepare resume.');
-          scheduleResumeStatusPoll(true);
-        } catch (error) {
-          statuses[artifactId] = { status: 'failed', error: error.message };
-          render(activePayload, activeResult.source);
-        }
-        return;
-      }
-      const showMoreButton = event.target.closest('#show-more-jobs');
-      if (showMoreButton) {
-        if (!activePayload?.run_id || !activePayload?.job_page?.next_cursor) return;
-        showMoreButton.disabled = true;
-        showMoreButton.textContent = 'Loading jobs...';
-        try {
-          const query = new URLSearchParams({ cursor: activePayload.job_page.next_cursor, limit: '8' });
-          const response = await fetch(`/api/runs/${encodeURIComponent(activePayload.run_id)}/jobs?${query.toString()}`);
-          const page = await response.json();
-          if (!response.ok) throw new Error(page.detail || 'Unable to load more jobs.');
-          const known = new Set(activePayload.jobs.map((job) => `${job.portal}:${job.source_id || job.url}`.toLowerCase()));
-          const additions = page.jobs.filter((job) => !known.has(`${job.portal}:${job.source_id || job.url}`.toLowerCase()));
-          activePayload = { ...activePayload, jobs: [...activePayload.jobs, ...additions], job_page: page.page };
-          render(activePayload, activeResult.source, { preserveJobs: true });
-        } catch (error) {
-          showMoreButton.disabled = false;
-          showMoreButton.textContent = error.message;
-        }
-        return;
-      }
-      const button = event.target.closest('.copy-draft');
-      if (!button) return;
-      const card = button.closest('.draft-card');
-      const textarea = card?.querySelector('.draft-message');
-      if (!textarea) return;
-      await navigator.clipboard.writeText(textarea.value);
-      button.textContent = 'Copied';
-      setTimeout(() => { button.textContent = 'Copy'; }, 1600);
-    });
-    function escapeHtml(value) {
-      return String(value).replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
-    }
-    refreshDashboard();
-    setInterval(refreshDashboard, 15000);
-  </script>
-</body>
-</html>"""
+          <p class="faint">These links are added to your recruiter email drafts so recruiters can view your profiles. Your LinkedIn link is also used on the ATS resume if your uploaded resume has no contact details. They are not used to sign in to or search LinkedIn or Naukri; jobs are found from your target roles, skills, locations and experience.</p>
+        </fieldset>
+        <fieldset>
+          <legend>Search</legend>
+          <label class="field" for="target_roles"><span class="field-label">Target roles <span class="req" aria-hidden="true">*</span></span> <span class="field-hint">Comma separated, for example Data Engineer, Analytics Engineer</span><textarea id="target_roles" name="target_roles" rows="2" required data-label="Target roles">__TARGET_ROLES__</textarea></label>
+          <div class="grid-2">
+            <label class="field" for="locations"><span class="field-label">Locations <span class="req" aria-hidden="true">*</span></span><textarea id="locations" name="locations" rows="2" required data-label="Locations">__LOCATIONS__</textarea></label>
+            <label class="field" for="skills"><span class="field-label">Skills <span class="req" aria-hidden="true">*</span></span><textarea id="skills" name="skills" rows="2" required data-label="Skills">__SKILLS__</textarea></label>
+          </div>
+          <div class="grid-3">
+            <label class="field" for="experience_years"><span class="field-label">Experience (years) <span class="req" aria-hidden="true">*</span></span><input id="experience_years" name="experience_years" type="number" min="0" max="50" step="0.5" inputmode="decimal" required data-label="Experience (years)" value="__EXPERIENCE_YEARS__"></label>
+            <label class="field" for="max_jobs_per_portal"><span class="field-label">Max jobs per source <span class="req" aria-hidden="true">*</span></span><input id="max_jobs_per_portal" name="max_jobs_per_portal" type="number" min="1" max="50" required data-label="Max jobs per source" value="__MAX_JOBS__"></label>
+            <label class="field" for="application_mode"><span class="field-label">Application mode <span class="req" aria-hidden="true">*</span></span><select id="application_mode" name="application_mode" required data-label="Application mode">__APPLICATION_OPTIONS__</select></label>
+          </div>
+          <p class="faint">Enter 0 if you are a fresher. Experience sets portal filters; it never adds experience to your ATS report or resume.</p>
+          <label class="field" for="job_description">Job description <span class="field-hint">Optional. Paste one to check keywords, required skills and screening risks.</span><textarea id="job_description" name="job_description" rows="6" placeholder="Paste the target job description">__JOB_DESCRIPTION__</textarea></label>
+        </fieldset>
+        <fieldset>
+          <legend>Daily automation</legend>
+          <div class="grid-2">
+            <label class="field" for="daily_at"><span class="field-label">Daily time <span class="req" aria-hidden="true">*</span></span> <span class="field-hint">Needed for Schedule Daily Run</span><input id="daily_at" name="daily_at" type="time" data-label="Daily time" value="__DAILY_AT__"></label>
+            <p class="faint" style="align-self:end">Schedule Daily Run saves this resume and runs the agent every day at this time in your browser's timezone. Schedules survive server restarts.</p>
+          </div>
+          <input id="daily_timezone" name="daily_timezone" type="hidden" value="UTC">
+        </fieldset>
+        <label class="check"><input type="checkbox" id="consent" name="consent" value="true" data-label="Privacy notice consent" __CONSENT_CHECKED__> <span data-i18n="consent">I agree to the <a href="/privacy">privacy notice</a>. My resume is used only to score it, find jobs, tailor resumes and prepare drafts. Recruiter emails are sent only after I approve each one.</span> <span class="req" aria-hidden="true">*</span></label>
+        <div class="form-actions">
+          <button class="btn btn-primary" id="run-submit" type="submit">Run agent</button>
+          <button class="btn" id="schedule-run" type="button">Schedule Daily Run</button>
+          <button class="btn btn-quiet" id="stop-scheduler" type="button">Stop Daily Run</button>
+        </div>
+      </form>
+      <div class="sticky-col">
+        <section class="panel hidden" id="run-progress" aria-live="polite" aria-labelledby="progress-title">
+          <div class="panel-head"><h3 id="progress-title">Run progress</h3></div>
+          <ol class="stages" id="run-stages"></ol>
+          <p class="muted" id="run-status" style="margin-top:14px"></p>
+        </section>
+        <section class="panel" aria-labelledby="scheduler-title">
+          <div class="panel-head"><h3 id="scheduler-title">Daily automation</h3><span class="badge" id="scheduler-pill">Off</span></div>
+          <div id="scheduler-status"></div>
+        </section>
+        <section class="notice"><span>Nothing is sent without you. In Email mode each recruiter email waits in Approvals: review, edit, approve, and you still have a short undo window. Daily limits stop accidental mass emails.</span></section>
+      </div>
+    </div>
+  </section>
+
+  <section data-view="jobs" hidden aria-label="Job leads">
+    <div class="view-head"><div><h2>Job leads</h2><p>Individual postings matched by role, skills and location. Experience is checked when a posting states it; otherwise it is marked unverified for your review.</p></div>
+      <div class="segmented" id="layout-toggle" role="group" aria-label="Layout"><button type="button" data-layout="list" aria-pressed="true">List</button><button type="button" data-layout="table" aria-pressed="false">Table</button></div></div>
+    <div class="toolbar panel" style="padding:14px 16px">
+      <label class="search">Search<input id="filter-text" type="search" placeholder="Title, company, skill or location"></label>
+      <label>Source<select id="filter-portal"><option value="">All sources</option></select></label>
+      <label>Minimum match <span class="range-value" id="filter-score-value">0%</span><input id="filter-score" type="range" min="0" max="100" step="5" value="0"></label>
+      <label>Sort<select id="filter-sort"><option value="match">Best match</option><option value="newest">Newest</option><option value="company">Company A to Z</option></select></label>
+    </div>
+    <p class="faint" id="jobs-count" aria-live="polite"></p>
+    <div id="jobs-list"></div>
+    <div class="btn-row" id="jobs-more" style="justify-content:center"></div>
+    <div id="portal-links"></div>
+  </section>
+
+  <section data-view="resume" hidden aria-label="Resume and ATS">
+    <div class="view-head"><div><h2>Resume &amp; ATS</h2><p>How applicant tracking systems read your resume, what to fix first, and the validated ATS-ready resume to download.</p></div></div>
+    <div id="resume-body" style="display:grid;gap:22px"></div>
+    <section class="panel" aria-labelledby="draft-title"><h3 id="draft-title" style="margin-bottom:12px">Reusable Draft Message</h3><div id="draft-host"></div></section>
+  </section>
+
+  <section data-view="approvals" hidden aria-label="Approvals">
+    <div class="view-head"><div><h2>Emails waiting for your approval</h2><p id="approvals-summary">Review the recipient and the exact text before anything is sent.</p></div></div>
+    <div id="approvals-list" style="display:grid;gap:16px" aria-live="polite"></div>
+  </section>
+
+  <dialog class="modal" id="missing-dialog" aria-labelledby="missing-title" aria-describedby="missing-intro">
+    <h2 id="missing-title">Fill in the required details</h2>
+    <p class="muted" id="missing-intro">The agent can run once these are complete:</p>
+    <ul class="plain" id="missing-list"></ul>
+    <div class="btn-row" style="justify-content:flex-end;margin-top:18px"><button class="btn btn-primary" id="missing-ok" type="button">Fill in now</button></div>
+  </dialog>
+  <dialog class="drawer" id="changes-drawer" aria-labelledby="drawer-title">
+    <div class="drawer-head"><h2 id="drawer-title" style="font-size:19px">Tailored resume</h2><button class="btn btn-icon btn-quiet" id="drawer-close" type="button" aria-label="Close">×</button></div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </dialog>
+"""
     replacements = {
-        "__USER_EMAIL__": user_email,
         "__PROFILE_EMAIL__": profile.get("email") or user_email,
         "__NAME__": profile.get("name", ""),
         "__PHONE__": profile.get("phone", ""),
@@ -4269,17 +4417,23 @@ def _page(user_email: str, profile: dict) -> str:
         "__JOB_DESCRIPTION__": profile.get("job_description", ""),
         "__MAX_JOBS__": str(profile.get("max_jobs_per_portal", 10)),
         "__DAILY_AT__": profile.get("daily_at", ""),
+        "__HAS_RESUME__": "true" if profile.get("resume_name") else "false",
         "__RESUME_STATUS__": (
-            f"Saved resume available: {profile['resume_name']}. Choose a file only to replace it."
+            f"Saved resume: {profile['resume_name']}. Choose a file only to replace it."
             if profile.get("resume_name")
             else "No resume saved yet. Upload one for your first run."
         ),
         "__APPLICATION_OPTIONS__": (
-            '<option value="draft">Draft</option><option value="email" selected>Email when recruiter email exists</option>'
+            '<option value="draft">Draft only</option><option value="email" selected>Email recruiters after my approval</option>'
             if profile.get("application_mode") == "email"
-            else '<option value="draft" selected>Draft</option><option value="email">Email when recruiter email exists</option>'
+            else '<option value="draft" selected>Draft only</option><option value="email">Email recruiters after my approval</option>'
         ),
+        "__CONSENT_CHECKED__": "checked" if privacy.has_consent(user_email) else "required",
     }
     for token, value in replacements.items():
-        page = page.replace(token, _escape_html(value) if token != "__APPLICATION_OPTIONS__" else value)
-    return page
+        body = body.replace(token, value if token in {"__APPLICATION_OPTIONS__", "__CONSENT_CHECKED__"} else _escape_html(value))
+    actions = '<a class="btn btn-sm btn-primary" href="#run">Run agent</a>'
+    return app_shell(
+        "Overview", user_email, body, active="", scripts=("/static/ui/dashboard.js",),
+        is_admin=user_email in ADMIN_EMAILS, actions=actions,
+    )

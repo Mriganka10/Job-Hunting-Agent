@@ -69,8 +69,91 @@ _STRONG_CODE_INTENT = re.compile(
 _LANGUAGE_CODE_INTENT = re.compile(r"\b(function|method|class|algorithm|script|program|solution)\b", re.IGNORECASE)
 
 
-def build_question_groups(roles: tuple[str, ...], skills: tuple[str, ...]) -> list[dict]:
-    """Build a broad, candidate-aware interview bank."""
+LEVELS = ("entry", "mid", "senior")
+
+
+def interview_level(years: float | None, title: str = "") -> str:
+    """entry (0-2 years), mid (2-5) or senior (5+); a senior/lead title raises the level."""
+    if re.search(r"\b(?:senior|sr\.?|lead|principal|staff|architect|head|manager)\b", title, re.I):
+        return "senior"
+    if re.search(r"\b(?:intern|trainee|fresher|graduate|junior|jr\.?|entry)\b", title, re.I):
+        return "entry"
+    value = float(years or 0)
+    return "senior" if value >= 5 else "mid" if value >= 2 else "entry"
+
+
+def build_question_groups(roles: tuple[str, ...], skills: tuple[str, ...], level: str = "mid") -> list[dict]:
+    """Build a broad, candidate-aware interview bank at the candidate's level.
+
+    Entry-level candidates are asked about projects, internships, learning and
+    design basics instead of leading teams or designing large systems; senior
+    candidates also get technical-leadership questions.
+    """
+    groups = _base_groups(roles, skills)
+    if level == "entry":
+        groups = [_ENTRY_REPLACEMENTS.get(group["topic"], lambda g: g)(group) for group in groups]
+    elif level == "senior":
+        groups.insert(2, _group("Technical Leadership", "Senior ownership", "technical_leadership", [
+            "Tell me about a technical direction you set for a team. How did you get buy-in and how did you measure whether it worked?",
+            "Describe how you review designs from other engineers. What do you look for first, and how do you give difficult feedback?",
+            "How have you grown an engineer on your team? What did you change in how you delegated to them?",
+            "Describe a time you reduced technical debt while the team still had delivery commitments. How did you prioritise it?",
+            "How do you decide between building in-house, buying a product, or adopting an open-source tool for a critical capability?",
+            "Tell me about a production incident you led. How did you coordinate people, communicate status, and prevent a repeat?",
+            "How do you make architecture decisions reversible, and when have you deliberately made one that was not?",
+            "What engineering metrics would you track for a team you lead, and which would you refuse to use as targets?",
+        ]))
+    return groups
+
+
+def _entry_design(group: dict) -> dict:
+    return _group("Design Basics", "Fundamentals of design", "system_design", [
+        "Design a simple URL shortener. What tables or data structures would you use, and how would you look up a short code quickly?",
+        "How would you design the backend for a college event registration form so the same student cannot register twice?",
+        "Explain the difference between a REST API's GET and POST requests and when you would use each in a small app you built.",
+        "If your project's database query became slow as data grew, what would you check first and how could an index help?",
+        "How would you store user passwords in an application you build, and why should they never be stored as plain text?",
+        "Describe how a web request travels from the browser to your server and back. Where could it fail?",
+        "How would you structure the code of a small project so another student could add a feature without breaking existing ones?",
+        "What would you log in a small web application so you can understand a bug reported by a user?",
+    ])
+
+
+def _entry_behavioral(group: dict) -> dict:
+    return _group("Teamwork And Learning", "Collaboration and growth", "behavioral_leadership", [
+        "Tell me about a group project where a teammate was not contributing. What did you do and what was the result?",
+        "Describe a time you had to learn a new tool or concept quickly for a project or internship. How did you approach it?",
+        "Tell me about feedback you received from a mentor or professor and what you changed afterward.",
+        "Describe a mistake you made in a project and how you fixed it.",
+        "Tell me about a time you helped a classmate or colleague understand something difficult.",
+        "How do you plan your work when you have exams, a project deadline and an internship at the same time?",
+        "Describe a situation where you disagreed with a teammate's approach. How did you decide what to do?",
+        "What achievement outside the classroom are you most proud of, and what did it teach you about working with others?",
+    ])
+
+
+def _entry_quality(group: dict) -> dict:
+    return _group("Debugging And Testing", "Quality basics", "quality_and_incidents", [
+        "Your program works on your laptop but fails for a friend. How do you find out why?",
+        "Walk me through how you debug a function that returns the wrong answer for some inputs.",
+        "What test cases would you write for a function that checks whether a password is strong?",
+        "Tell me about the hardest bug you fixed in a project. How did you find the root cause?",
+        "How do you check your code handles empty input, very large input and invalid input?",
+        "What is the difference between a unit test and an integration test? Give an example from your work.",
+        "How would you use Git to safely try a risky change without breaking the working version?",
+        "A teammate's change broke your feature right before a demo. What do you do in the next 30 minutes?",
+    ])
+
+
+_ENTRY_REPLACEMENTS = {
+    "system_design": _entry_design,
+    "behavioral_leadership": _entry_behavioral,
+    "quality_and_incidents": _entry_quality,
+}
+
+
+def _base_groups(roles: tuple[str, ...], skills: tuple[str, ...]) -> list[dict]:
+    """The original broad interview bank (mid-level wording)."""
     role = roles[0] if roles else "your target role"
     skill = skills[0] if skills else "your primary technical skill"
     second_skill = skills[1] if len(skills) > 1 else skill

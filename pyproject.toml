@@ -39,7 +39,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-job_hunting_agent = ["static/*.png"]
+job_hunting_agent = ["static/*.png", "static/*.js", "static/ui/*.css", "static/ui/*.js", "static/ui/i18n/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

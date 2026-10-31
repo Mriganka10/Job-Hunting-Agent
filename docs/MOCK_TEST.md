@@ -42,3 +42,13 @@ Score and percentage, accuracy on attempted questions, correct/incorrect/unanswe
 ## Adding questions
 
 Add tuples to a topic in `mock_test_bank.py` as `(difficulty, question, (four options), correct_index, explanation)`. The correct option can be listed in any position because options are shuffled. `tests/test_mock_test.py` checks every bank question for shape and uniqueness.
+
+
+## Question standards (October 2026)
+
+- **Code questions.** Technical roles get at least 40% code-reading questions among the technical questions (predict the output, find the bug, estimate complexity) in Python, SQL, JavaScript, Java, C/C++, DSA and pandas (`mock_test_code_bank.py`). Code is shown in a monospaced block; SQL questions show the sample table. Every answer key is checked by running the snippet with the real interpreter or compiler (`python scripts/verify_code_questions.py`, also in CI). Code questions get 30 extra seconds.
+- **Exact difficulty mix.** The chosen mix (Mixed, Mostly easy/medium/hard) is applied to the whole test exactly when the bank allows, with nearest-level fallback. "Mixed" follows the candidate's level: entry 40/45/15, mid 25/50/25, senior 15/45/40 (easy/medium/hard). The test header shows the actual mix.
+- **Difficulty measured from real attempts.** Once a question has 30+ graded attempts, its level follows its measured p-value (over 0.85 easy, 0.45-0.85 medium, under 0.45 hard).
+- **Non-technical roles** (HR, sales, operations) get aptitude, reasoning and verbal-ability questions instead of programming topics.
+- **Feedback.** Every reviewed question has "Report a problem with this question"; reports and item-analysis flags appear on `/admin/metrics`.
+- **Progress Reports.** `/progress` shows daily and weekly trends per job.

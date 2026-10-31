@@ -493,6 +493,139 @@ class RemoteOKAdapter(_PartnerAdapter):
         return leads
 
 
+# ---------------------------------------------------------------------------
+# JSearch (Google for Jobs) - https://www.openwebninja.com/api/jsearch
+# Indeed, Foundit, WorkIndia, Shine, Glassdoor and company sites publish their
+# listings to Google for Jobs. JSearch is a licensed API over that index, so it
+# is the compliant way to show those portals' jobs without scraping them.
+# ---------------------------------------------------------------------------
+PUBLISHER_PORTALS = (
+    ("indeed", "indeed"), ("foundit", "foundit"), ("monster", "foundit"), ("workindia", "workindia"),
+    ("shine", "shine"), ("glassdoor", "glassdoor"), ("timesjobs", "timesjobs"), ("naukri", "naukri"),
+    ("linkedin", "linkedin"), ("apna", "apna"), ("instahyre", "instahyre"), ("cutshort", "cutshort"),
+    ("wellfound", "wellfound"), ("internshala", "internshala"), ("freshersworld", "freshersworld"),
+    ("hirist", "hirist"), ("iimjobs", "iimjobs"), ("ziprecruiter", "ziprecruiter"),
+)
+
+
+def publisher_portal(publisher: str) -> str:
+    """Map a Google-for-Jobs publisher name ("Indeed", "Foundit.in") to a portal key."""
+    lowered = re.sub(r"[^a-z]", "", (publisher or "").casefold())
+    return next((portal for needle, portal in PUBLISHER_PORTALS if needle in lowered), "jsearch")
+
+
+class JSearchAdapter(_PartnerAdapter):
+    name = "jsearch"
+    attribution = "via Google for Jobs (JSearch)"
+    # Each query uses API quota (the free plan has 200 requests a month), so
+    # queries are few per run and cached for hours across users.
+    CACHE_SECONDS = 6 * 60 * 60
+
+    def enabled(self) -> bool:
+        return bool(os.getenv("JOB_AGENT_JSEARCH_API_KEY", "").strip())
+
+    def _request(self) -> tuple[str, dict[str, str]]:
+        key = os.environ["JOB_AGENT_JSEARCH_API_KEY"].strip()
+        provider = os.getenv("JOB_AGENT_JSEARCH_PROVIDER", "rapidapi").strip().lower()
+        if provider == "openwebninja":
+            return os.getenv("JOB_AGENT_JSEARCH_ENDPOINT", "https://api.openwebninja.com/jsearch/search").strip(), {**HEADERS, "x-api-key": key}
+        host = os.getenv("JOB_AGENT_JSEARCH_HOST", "jsearch.p.rapidapi.com").strip()
+        return os.getenv("JOB_AGENT_JSEARCH_ENDPOINT", f"https://{host}/search").strip(), {**HEADERS, "x-rapidapi-key": key, "x-rapidapi-host": host}
+
+    @staticmethod
+    def _date_posted(days: int) -> str:
+        return "today" if days <= 1 else "3days" if days <= 3 else "week" if days <= 7 else "month"
+
+    def _search(self, intent: SearchIntent, config: SearchConfig) -> list[JobLead]:
+        endpoint, headers = self._request()
+        budget = max(1, int(os.getenv("JOB_AGENT_JSEARCH_QUERIES_PER_RUN", "3")))
+        leads: list[JobLead] = []
+        seen: set[str] = set()
+        for role, location in _query_pairs(intent, budget):
+            if self._stop():
+                break
+            remote = _is_remote_location(location)
+            params = {
+                "query": f"{role} jobs in India" if remote else f"{role} jobs in {location}, India",
+                "page": 1, "num_pages": 1, "country": "in", "date_posted": self._date_posted(config.freshness_days),
+            }
+            if remote:
+                params["work_from_home"] = "true"
+            if intent.experience_years < 3:
+                # Google for Jobs' own experience filter; leads are still checked one by one.
+                params["job_requirements"] = "under_3_years_experience,no_experience"
+            url = endpoint + "?" + "&".join(f"{key}={quote_plus(str(value))}" for key, value in params.items())
+            try:
+                payload = http_client.get_json(url, headers=headers, timeout=API_TIMEOUT, ttl_seconds=self.CACHE_SECONDS)
+            except (requests.RequestException, ValueError, TypeError) as exc:
+                self._fail(exc)
+                continue
+            records = payload.get("data") if isinstance(payload, dict) else None
+            for record in records or []:
+                lead = self._lead(record, location, config)
+                key = (lead.url if lead else "").casefold()
+                if lead and key not in seen and _role_matches(lead.title, intent):
+                    seen.add(key)
+                    leads.append(lead)
+        return leads
+
+    def _lead(self, record: dict, searched: str, config: SearchConfig) -> JobLead | None:
+        if not isinstance(record, dict):
+            return None
+        title = _clean_html(str(record.get("job_title") or ""))
+        url = str(record.get("job_apply_link") or record.get("job_google_link") or "")
+        if not title or not url.startswith(("https://", "http://")):
+            return None
+        country = str(record.get("job_country") or "").upper()
+        remote = bool(record.get("job_is_remote"))
+        if country and country not in {"IN", "INDIA"} and not remote:
+            return None
+        city = ", ".join(part for part in (str(record.get("job_city") or ""), str(record.get("job_state") or "")) if part)
+        location = city or ("Remote" if remote else searched)
+        publisher = _clean_html(str(record.get("job_publisher") or ""))
+        description = _clean_html(str(record.get("job_description") or ""))
+        highlights = record.get("job_highlights") or {}
+        qualifications = [str(item) for item in (highlights.get("Qualifications") or [])][:15] if isinstance(highlights, dict) else []
+        skills = [str(item) for item in (record.get("job_required_skills") or []) if str(item).strip()][:20]
+        if qualifications:
+            description += " Qualifications: " + " ".join(qualifications)
+        if skills:
+            description += " Required Skills: " + ", ".join(skills) + "."
+        experience = record.get("job_required_experience") or {}
+        months = experience.get("required_experience_in_months") if isinstance(experience, dict) else None
+        no_experience = bool(experience.get("no_experience_required")) if isinstance(experience, dict) else False
+        period = str(record.get("job_salary_period") or "").upper()
+        yearly = period in {"YEAR", "YEARLY", "ANNUAL"}
+        also_on = [
+            str(option.get("publisher") or "") for option in record.get("apply_options") or []
+            if isinstance(option, dict) and option.get("publisher") and str(option.get("publisher")) != publisher
+        ][:6]
+        return JobLead(
+            portal=publisher_portal(publisher),
+            title=title,
+            company=_clean_html(str(record.get("employer_name") or "")),
+            location=location,
+            url=url,
+            description=description[:12000],
+            source_id=str(record.get("job_id") or url),
+            posted_at=str(record.get("job_posted_at_datetime_utc") or ""),
+            salary_min=_number(record.get("job_min_salary")) if yearly else None,
+            salary_max=_number(record.get("job_max_salary")) if yearly else None,
+            salary_currency=str(record.get("job_salary_currency") or ("INR" if yearly and country == "IN" else "")) if yearly else "",
+            workplace_mode="remote" if remote else normalize_workplace_mode(description, location),
+            employment_type=normalize_employment_type(str(record.get("job_employment_type") or "unknown")),
+            source_validated=True,
+            source_metadata=self._metadata(
+                api="jsearch", original_publisher=publisher, also_listed_on=also_on,
+                source_attribution=f"{publisher or 'Google for Jobs'} via Google for Jobs (JSearch)",
+                freshness_requested_days=config.freshness_days,
+                # Structured experience from Google for Jobs; used when the text states none.
+                required_experience_months=months if isinstance(months, (int, float)) and months > 0 else None,
+                no_experience_required=no_experience,
+            ),
+        )
+
+
 def _number(value: Any) -> float | None:
     try:
         number = float(value)
@@ -507,10 +640,11 @@ PARTNER_ADAPTERS = {
     "adzuna": AdzunaAdapter,
     "careerjet": CareerjetAdapter,
     "jooble": JoobleAdapter,
+    "jsearch": JSearchAdapter,
 }
 # Aggregators redirect through tracking links; checking them would register
 # fake clicks with the provider, so link validation skips them.
-TRACKING_LINK_PORTALS = frozenset({"adzuna", "careerjet", "jooble"})
+TRACKING_LINK_PORTALS = frozenset({"adzuna", "careerjet", "jooble", "jsearch"})
 
 
 def partner_status() -> dict[str, bool]:
@@ -522,6 +656,14 @@ SOURCE_LABELS = {
     "linkedin": "LinkedIn", "naukri": "Naukri", "himalayas": "Himalayas", "remotive": "Remotive",
     "arbeitnow": "Arbeitnow", "jobicy": "Jobicy", "remoteok": "Remote OK", "adzuna": "Adzuna",
     "careerjet": "Careerjet", "jooble": "Jooble",
+    "jsearch": "Google for Jobs (Indeed, Foundit, WorkIndia, Shine & more)",
+}
+# Portals whose listings arrive through Google for Jobs (JSearch).
+PUBLISHER_LABELS = {
+    "indeed": "Indeed", "foundit": "Foundit", "workindia": "WorkIndia", "shine": "Shine", "glassdoor": "Glassdoor",
+    "timesjobs": "TimesJobs", "apna": "apna", "instahyre": "Instahyre", "cutshort": "Cutshort", "wellfound": "Wellfound",
+    "internshala": "Internshala", "freshersworld": "Freshersworld", "hirist": "Hirist", "iimjobs": "iimjobs",
+    "ziprecruiter": "ZipRecruiter",
 }
 
 

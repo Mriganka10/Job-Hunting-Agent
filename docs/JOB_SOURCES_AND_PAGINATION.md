@@ -2,7 +2,7 @@
 
 ## Source Strategy
 
-The default search order (`DEFAULT_PORTALS` in `config.py`) is Himalayas, Remotive, Arbeitnow, LinkedIn, Naukri, Jobicy, Remote OK, Adzuna, Careerjet and Jooble. Direct sources come first so that when the same job also appears on an aggregator, the original posting wins de-duplication.
+The default search order (`DEFAULT_PORTALS` in `config.py`) is Himalayas, Remotive, Arbeitnow, LinkedIn, Naukri, Jobicy, Remote OK, Adzuna, Careerjet, Jooble and JSearch (Google for Jobs). Direct sources come first so that when the same job also appears on an aggregator, the original posting wins de-duplication.
 
 | Source | Access | Coverage | Key |
 | --- | --- | --- | --- |
@@ -13,6 +13,14 @@ The default search order (`DEFAULT_PORTALS` in `config.py`) is Himalayas, Remoti
 | Adzuna (`in`) | Official API | Indian city and remote jobs aggregated from many boards | `JOB_AGENT_ADZUNA_APP_ID`, `JOB_AGENT_ADZUNA_APP_KEY` |
 | Careerjet (`en_IN`) | Official v4 API (basic auth); needs the searching user's IP and browser | Indian city jobs | `JOB_AGENT_CAREERJET_API_KEY` |
 | Jooble | Official API | Indian city jobs aggregated from many boards | `JOB_AGENT_JOOBLE_API_KEY` |
+| JSearch (Google for Jobs) | Licensed API over the Google for Jobs index (RapidAPI or OpenWeb Ninja) | Indeed, Foundit, WorkIndia, Shine, Glassdoor, TimesJobs and company career sites in India; each lead is labelled with its original publisher | `JOB_AGENT_JSEARCH_API_KEY` |
+
+### Indeed, Foundit and WorkIndia
+
+None of these portals offers a job-search API to third parties, and their sites block automated access, so the agent does not scrape them. They are covered in two compliant ways:
+
+1. **JSearch (Google for Jobs).** These portals publish their listings to Google for Jobs. With `JOB_AGENT_JSEARCH_API_KEY` set, the `jsearch` adapter returns those listings with the publisher as the portal (`indeed`, `foundit`, `workindia`, ...), the apply link, salary when given, required skills and experience, and "also listed on" publishers. Only India-based or remote listings are kept. Each query uses quota (free plan: 200 requests a month), so a run sends at most `JOB_AGENT_JSEARCH_QUERIES_PER_RUN` (default 3) queries and results are cached for six hours across users.
+2. **Ready-made portal searches.** The dashboard shows "Search more portals directly" links that open the same role, city, recency and experience search on Indeed (`in.indeed.com`), Foundit (`foundit.in/srp/results`) and WorkIndia (`workindia.in/jobs-in-<city>/`).
 
 Keyed sources switch on only when their key is set. All partner adapters (`partner_sources.py`) honour the run's search budget, stop after two failed requests, cache responses, never log URLs (which may contain keys), and keep the provider's attribution and canonical link. Adzuna, Careerjet and Jooble links are click-tracking redirects, so link validation skips them. Aggregator descriptions are short snippets, so those leads more often show "Experience requirement unverified".
 

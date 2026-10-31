@@ -30,7 +30,9 @@ def test_application_draft_includes_portal_profile_links(tmp_path: Path) -> None
     assert "ATS readiness score" not in draft
 
 
-def test_email_failure_is_recorded_and_draft_is_saved(tmp_path: Path) -> None:
+def test_email_failure_is_recorded_and_draft_is_saved(tmp_path: Path, monkeypatch) -> None:
+    # Direct sending exists only for a local CLI operator who opts out of approval.
+    monkeypatch.setenv("JOB_AGENT_REQUIRE_APPROVAL", "false")
     resume_path = tmp_path / "resume.txt"
     resume_path.write_text("Python SQL", encoding="utf-8")
     config = AppConfig(
@@ -76,3 +78,19 @@ def test_already_seen_job_still_produces_reusable_draft(tmp_path: Path) -> None:
     assert "Draft saved to " in second[0].detail
     draft_path = Path(second[0].detail.rsplit("Draft saved to ", 1)[1])
     assert draft_path.read_text(encoding="utf-8").startswith("Hello,")
+
+
+def test_email_mode_waits_for_human_approval_by_default(tmp_path: Path) -> None:
+    config = AppConfig(
+        profile=CandidateProfile(name="Candidate", email="candidate@example.com"),
+        search=SearchConfig(),
+        application=ApplicationConfig(mode="email", data_dir=str(tmp_path)),
+        email=EmailConfig(smtp_host="smtp.example.com", username="u", password="p"),
+    )
+    resume = Resume(str(tmp_path / "resume.txt"), "Python SQL", ("Python",), ("Python Developer",))
+    job = JobLead("linkedin", "Python Developer", "Example Corp", "Remote", "https://example.com/job-2", recruiter_email="hr@example.com")
+
+    results = apply_to_jobs([job], resume, AtsReport(80, (), (), ()), config)
+
+    assert results[0].status == "pending_approval"
+    assert "Draft saved to" in results[0].detail

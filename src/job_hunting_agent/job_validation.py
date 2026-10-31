@@ -34,7 +34,13 @@ LINK_CACHE_TTL_SECONDS = 6 * 60 * 60
 LINK_CHECK_BUDGET_SECONDS = 8.0
 # LinkedIn/Naukri refuse automated checks; Adzuna, Careerjet and Jooble links
 # are click-tracking redirects, so a check would register a fake click.
-LINK_CHECK_SKIPPED_PORTALS = frozenset({"linkedin", "naukri", "adzuna", "careerjet", "jooble"})
+# LinkedIn/Naukri block HEAD checks; aggregators use tracking links; listings that
+# arrive through Google for Jobs point at portals that also block automated checks.
+LINK_CHECK_SKIPPED_PORTALS = frozenset({
+    "linkedin", "naukri", "adzuna", "careerjet", "jooble", "jsearch", "indeed", "foundit", "workindia", "shine",
+    "glassdoor", "timesjobs", "apna", "instahyre", "cutshort", "wellfound", "internshala", "freshersworld", "hirist",
+    "iimjobs", "ziprecruiter",
+})
 _link_cache: dict[str, tuple[float, str]] = {}
 _link_cache_lock = threading.Lock()
 

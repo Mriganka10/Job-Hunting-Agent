@@ -1,3 +1,4 @@
+from dataclasses import replace
 from job_hunting_agent.models import CandidateProfile, JobLead, Resume
 from job_hunting_agent.config import SearchConfig
 from job_hunting_agent.portals import SearchIntent, _extract_job_detail_text, _fetch_job_detail, _linkedin_search_url, _naukri_search_url, _search_pairs, build_search_intent, get_adapters, rank_job_leads
@@ -171,7 +172,9 @@ def test_linkedin_detail_fetch_uses_public_job_posting_endpoint(monkeypatch) -> 
 def test_unknown_experience_is_visible_but_not_presented_as_verified_fit() -> None:
     resume = Resume("resume.txt", "Python", ("Python",), ("Developer",))
     intent = SearchIntent(("AI/ML Engineer",), ("Python",), ("Mumbai",), 0.5)
-    jobs = [JobLead("linkedin", "AI/ML Engineer", "Agnios IQ", "Mumbai", "https://example/job", "Build Python systems for healthcare applications.")]
+    # The portal searched with the candidate's experience, so an unlabelled posting may stay.
+    jobs = [JobLead("linkedin", "AI/ML Engineer", "Agnios IQ", "Mumbai", "https://example/job", "Build Python systems for healthcare applications.",
+                    source_metadata={"experience_filtered": True})]
 
     ranked = rank_job_leads(jobs, intent, resume)
 
@@ -207,10 +210,14 @@ def test_only_individual_jobs_matching_role_skills_location_and_experience_are_s
 
     ranked = rank_job_leads(jobs, intent, resume, SearchConfig(validate_job_links=False))
 
-    assert [job.company for job in ranked] == ["Good Co", "Unknown Co"]
+    # A half-year candidate gets no posting whose level is unknown (Unknown Co).
+    assert [job.company for job in ranked] == ["Good Co"]
     assert ranked[0].required_experience == 0
     assert {"Target-role match", "Skill match", "Location preference", "Experience fit"} <= set(ranked[0].match_reasons)
-    assert "Experience requirement unverified" in ranked[1].match_reasons
+    # With 3 years of experience the unlabelled posting is shown, marked unverified.
+    mid = rank_job_leads(jobs, replace(intent, experience_years=3), resume, SearchConfig(validate_job_links=False))
+    unknown = next(job for job in mid if job.company == "Unknown Co")
+    assert "Experience requirement unverified" in unknown.match_reasons and unknown.match_score <= 75
 
 
 def test_remote_location_constraints_and_month_experience_are_respected() -> None:

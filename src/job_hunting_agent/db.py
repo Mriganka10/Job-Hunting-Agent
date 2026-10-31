@@ -351,6 +351,10 @@ def init_db() -> None:
         _ensure_column(conn, "mock_interview_records", "job_id", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "mock_interview_records", "job_title", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "mock_interview_records", "company", "TEXT NOT NULL DEFAULT ''")
+    # Guardrail, approval, metrics and privacy tables (additive only).
+    from .ops_db import init_ops_db
+
+    init_ops_db()
 
 
 def create_mock_interview_session(

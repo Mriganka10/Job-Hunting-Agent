@@ -85,6 +85,13 @@ def _prepare_existing_job(job: JobLead, resume: Resume, ats_report: AtsReport, c
 
 def _prepare_application(job: JobLead, resume: Resume, ats_report: AtsReport, config: AppConfig) -> ApplicationResult:
     if config.application.mode == "email" and job.recruiter_email:
+        from .approvals import approval_required
+
+        if approval_required():
+            # Human in the loop: the message waits in the approval queue and is
+            # sent only after the user reviews and approves the exact text.
+            draft = write_application_draft(job, resume, ats_report, config)
+            return ApplicationResult(job, "pending_approval", f"Waiting for your approval. Draft saved to {draft}")
         try:
             return ApplicationResult(job, "emailed", send_email_application(job, resume, ats_report, config))
         except Exception as exc:
