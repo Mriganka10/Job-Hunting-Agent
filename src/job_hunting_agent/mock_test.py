@@ -20,13 +20,40 @@ import random
 import re
 from typing import Any
 
-from .http_client import post
-from .mock_test_bank import ROLE_TOPICS, TOPICS
+from .llm_client import call_json
+from .mock_test_bank import ROLE_TOPICS, TOPICS as BASE_TOPICS
+from .mock_test_code_bank import CODE_TOPICS
+from .mock_test_general_bank import EXTRA_QUESTIONS, VERBAL_TOPIC
+
+MCQ_TOPICS: dict[str, dict[str, object]] = {
+    name: ({**data, "questions": [*data["questions"], *EXTRA_QUESTIONS[name]]} if name in EXTRA_QUESTIONS else data)  # type: ignore[misc]
+    for name, data in BASE_TOPICS.items()
+}
+MCQ_TOPICS["verbal"] = VERBAL_TOPIC
+TECH_TITLE = re.compile(r"\b(?:developer|engineer|programmer|sde|software|devops|qa|tester|architect|coder|full[\s-]?stack|front[\s-]?end|back[\s-]?end)\b", re.I)
+
+# Topics that exist only as code-reading questions.
+EXTRA_TOPICS: dict[str, dict[str, object]] = {
+    "cpp": {"label": "C/C++", "keywords": ("c++", "cpp", "c programming", "embedded c", "stl", "c/c++"), "questions": []},
+}
+TOPICS: dict[str, dict[str, object]] = {**MCQ_TOPICS, **EXTRA_TOPICS}
+# Technical topics where code-reading questions are part of a real screen.
+CODING_TOPICS = frozenset(CODE_TOPICS)
+CODE_SHARE_TECH = 0.4  # at least 40% of technical questions are code for tech roles
+CODE_EXTRA_SECONDS = 30
 
 LENGTHS = {"quick": 10, "standard": 20, "full": 30}
 DIFFICULTIES = ("mixed", "easy", "medium", "hard")
-GENERAL_TOPICS = ("aptitude", "reasoning")
+GENERAL_TOPICS = ("aptitude", "reasoning", "verbal")
 SECONDS_PER_DIFFICULTY = {"easy": 60, "medium": 75, "hard": 90}
+LEVEL_ORDER = ("easy", "medium", "hard")
+# "Mixed" follows the candidate's level: freshers see more fundamentals,
+# experienced candidates more multi-step questions (as real screens do).
+SENIORITY_MIX = {
+    "entry": {"easy": 0.4, "medium": 0.45, "hard": 0.15},
+    "mid": {"easy": 0.25, "medium": 0.5, "hard": 0.25},
+    "senior": {"easy": 0.15, "medium": 0.45, "hard": 0.4},
+}
 DIFFICULTY_MIX = {
     "mixed": {"easy": 0.3, "medium": 0.5, "hard": 0.2},
     "easy": {"easy": 0.6, "medium": 0.3, "hard": 0.1},
@@ -58,6 +85,8 @@ STUDY_TIPS = {
     "testing": "Review the testing pyramid, mocking, regression suites and reliable UI-test waits.",
     "aptitude": "Practise percentages, ratios, time-and-work, profit-and-loss and averages under time pressure.",
     "reasoning": "Practise series, coding-decoding, blood relations and syllogisms with a timer.",
+    "cpp": "Revise pointers and references, integer division, STL containers, virtual functions and object slicing.",
+    "verbal": "Practise subject-verb agreement, prepositions (since/for, by/until), active and passive voice and concise writing.",
 }
 
 
@@ -67,20 +96,55 @@ def question_id(topic: str, text: str) -> str:
 
 def _bank() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for topic, data in TOPICS.items():
+    for topic, data in MCQ_TOPICS.items():
         for difficulty, text, options, answer, explanation in data["questions"]:  # type: ignore[misc]
             items.append({
                 "id": question_id(topic, text),
                 "topic": topic,
                 "topic_label": str(data["label"]),
                 "difficulty": difficulty,
+                "kind": "concept",
                 "question": text,
                 "options": list(options),
                 "answer_index": int(answer),
                 "explanation": explanation,
                 "source": "curated_bank",
             })
+    for topic, data in CODE_TOPICS.items():
+        label = str(TOPICS.get(topic, {}).get("label") or topic.title())
+        setup = str(data.get("setup") or "")
+        for item in data["questions"]:
+            code = item["code"]
+            if setup and data["language"] == "sql":
+                code = f"-- Table emp\n{_sql_table_preview(setup)}\n\n{code}"
+            items.append({
+                "id": question_id(topic, item["prompt"] + "\n" + item["code"]),
+                "topic": topic,
+                "topic_label": label,
+                "difficulty": item["difficulty"],
+                "kind": "code",
+                "language": data["language"],
+                "question": item["prompt"],
+                "code": code,
+                "options": list(item["options"]),
+                "answer_index": int(item["answer"]),
+                "explanation": item["explanation"],
+                "source": "curated_bank",
+            })
     return items
+
+
+def _sql_table_preview(setup: str) -> str:
+    """Show the sample table the SQL questions run against, as SQL comments."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(setup)
+    cursor = conn.execute("SELECT * FROM emp")
+    columns = [column[0] for column in cursor.description]
+    rows = ["-- Query results are shown one row per line, columns separated by |", "-- " + " | ".join(columns)]
+    rows.extend("-- " + " | ".join("NULL" if value is None else str(value) for value in row) for row in cursor.fetchall())
+    return "\n".join(rows)
 
 
 BANK = _bank()
@@ -149,8 +213,11 @@ def rank_topics(title: str, body: str, limit: int = 5) -> list[tuple[str, float]
             for rank, topic in enumerate(topics):
                 scores[topic] = scores.get(topic, 0.0) + 2.5 - rank * 0.4
     ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-    if not ranked:
+    if not ranked and TECH_TITLE.search(title_text):
+        # A generic technical title with no named skills: core programming topics.
         ranked = [("dsa", 1.0), ("python", 1.0), ("sql", 1.0)]
+    # Non-technical roles with no technical evidence get no technical topics;
+    # their test is aptitude, reasoning and verbal ability (as real screens are).
     return ranked[:limit]
 
 
@@ -172,28 +239,127 @@ def _allocate(total: int, weights: list[tuple[str, float]]) -> dict[str, int]:
     return {topic: count for topic, count in counts.items() if count > 0}
 
 
+def candidate_level(job: dict[str, Any] | None, profile: dict[str, Any] | None) -> str:
+    """entry (0-2 years), mid (2-5) or senior (5+), from the job first, then the profile."""
+    years: float | None = None
+    title = str((job or {}).get("title") or "")
+    if job and isinstance(job.get("required_experience"), (int, float)):
+        years = float(job["required_experience"])
+    if re.search(r"\b(?:senior|sr\.?|lead|principal|staff|architect|manager)\b", title, re.I):
+        years = max(years or 0.0, 5.0)
+    elif re.search(r"\b(?:intern|trainee|fresher|graduate|junior|jr\.?|entry)\b", title, re.I):
+        years = min(years if years is not None else 0.0, 1.0)
+    if years is None:
+        try:
+            years = float((profile or {}).get("experience_years") or 0)
+        except (TypeError, ValueError):
+            years = 0.0
+    return "senior" if years >= 5 else "mid" if years >= 2 else "entry"
+
+
+def _level_mix(difficulty: str, level: str) -> dict[str, float]:
+    if difficulty == "mixed":
+        return SENIORITY_MIX.get(level, DIFFICULTY_MIX["mixed"])
+    return DIFFICULTY_MIX.get(difficulty, DIFFICULTY_MIX["mixed"])
+
+
+def _nearest_levels(level: str) -> tuple[str, ...]:
+    """Fallback order when a topic runs out of one level: closest level first."""
+    return {"easy": ("easy", "medium", "hard"), "medium": ("medium", "easy", "hard"), "hard": ("hard", "medium", "easy")}[level]
+
+
+def level_quota(total: int, mix: dict[str, float], rng: random.Random) -> dict[str, int]:
+    """Exact number of easy/medium/hard questions for a test (largest remainder)."""
+    raw = {name: total * mix.get(name, 0.0) for name in LEVEL_ORDER}
+    quota = {name: math.floor(value) for name, value in raw.items()}
+    remainders = sorted(LEVEL_ORDER, key=lambda name: (raw[name] - quota[name], rng.random()), reverse=True)
+    for name in remainders[: total - sum(quota.values())]:
+        quota[name] += 1
+    return quota
+
+
 def _pick_from_topic(
-    topic: str, count: int, difficulty: str, rng: random.Random, seen: set[str], used: set[str]
+    topic: str, count: int, difficulty: str, rng: random.Random, seen: set[str], used: set[str],
+    *, level: str = "mid", kind: str | None = None, levels: dict[str, str] | None = None,
+    quota: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
-    pool = [item for item in BANK if item["topic"] == topic and item["id"] not in used]
-    mix = DIFFICULTY_MIX.get(difficulty, DIFFICULTY_MIX["mixed"])
-    # Sample a level per slot so small topics follow the overall mix on
-    # average instead of each forcing at least one hard question.
-    levels = rng.choices(list(mix), weights=list(mix.values()), k=count)
-    targets = {level: levels.count(level) for level in mix}
+    """Pick ``count`` questions following the difficulty mix as closely as the bank allows.
+
+    ``quota`` is the test-wide count still needed per level; each pick takes the
+    level with the most remaining need, so the whole test matches the chosen
+    mix exactly when the bank has enough questions. ``levels`` overrides a
+    question's labelled difficulty with the one measured from real attempts.
+    """
+    levels = levels or {}
+    pool = [item for item in BANK if item["topic"] == topic and item["id"] not in used and (kind is None or item.get("kind") == kind)]
+    mix = _level_mix(difficulty, level)
+    if quota is None:
+        quota = level_quota(count, mix, rng)
+    wanted: list[str] = []
+    for _ in range(count):
+        target = max(LEVEL_ORDER, key=lambda name: (quota.get(name, 0), mix.get(name, 0.0)))
+        wanted.append(target)
+        quota[target] = quota.get(target, 0) - 1
     chosen: list[dict[str, Any]] = []
-    for level in ("easy", "medium", "hard"):
-        candidates = [item for item in pool if item["difficulty"] == level and item not in chosen]
-        rng.shuffle(candidates)
-        # Unseen questions first; previously attempted ones only to fill gaps.
-        candidates.sort(key=lambda item: item["id"] in seen)
-        chosen.extend(candidates[: targets.get(level, 0)])
-    if len(chosen) < count:
-        rest = [item for item in pool if item not in chosen]
-        rng.shuffle(rest)
-        rest.sort(key=lambda item: item["id"] in seen)
-        chosen.extend(rest[: count - len(chosen)])
+    chosen_ids: set[str] = set()
+    for target in sorted(wanted, key=LEVEL_ORDER.index):
+        for option in _nearest_levels(target):
+            candidates = [item for item in pool if levels.get(item["id"], item["difficulty"]) == option and item["id"] not in chosen_ids]
+            if not candidates:
+                continue
+            rng.shuffle(candidates)
+            # Unseen questions first; previously attempted ones only to fill gaps.
+            candidates.sort(key=lambda item: item["id"] in seen)
+            pick = candidates[0]
+            chosen.append({**pick, "difficulty": levels.get(pick["id"], pick["difficulty"])})
+            chosen_ids.add(pick["id"])
+            if option != target:
+                # Give the unmet level back so a later topic can supply it.
+                quota[target] = quota.get(target, 0) + 1
+                quota[option] = quota.get(option, 0) - 1
+            break
+        else:
+            quota[target] = quota.get(target, 0) + 1
     return chosen[:count]
+
+
+_EMPIRICAL_CACHE: dict[str, Any] = {"at": 0.0, "levels": {}}
+
+
+def empirical_levels(max_age_seconds: int = 3600) -> dict[str, str]:
+    """Difficulty measured from real attempts (classical p-value), refreshed hourly.
+
+    A question needs at least 30 graded attempts before its label can change:
+    p > 0.85 -> easy, 0.45-0.85 -> medium, p < 0.45 -> hard. This keeps the
+    labels honest as the user base grows, without manual re-tagging.
+    """
+    import time
+
+    if os.getenv("JOB_AGENT_EMPIRICAL_DIFFICULTY", "on").strip().lower() in {"off", "false", "0"}:
+        return {}
+    if time.time() - float(_EMPIRICAL_CACHE["at"]) < max_age_seconds:
+        return dict(_EMPIRICAL_CACHE["levels"])
+    levels: dict[str, str] = {}
+    try:
+        from .metrics import item_analysis
+
+        analysis = item_analysis(days=180, min_attempts=30, include_all=True)
+        for entry in analysis.get("items", []):
+            p_value = float(entry["p_value"])
+            levels[str(entry["id"])] = "easy" if p_value > 0.85 else "hard" if p_value < 0.45 else "medium"
+    except Exception:
+        levels = {}
+    _EMPIRICAL_CACHE.update(at=time.time(), levels=levels)
+    return dict(levels)
+
+
+def is_technical(title: str, technical: list[tuple[str, float]]) -> bool:
+    """A role whose screen includes code: a technical title or programming topics in the job."""
+    if not technical:
+        return False
+    if TECH_TITLE.search(title) or re.search(r"\b(?:data|analyst|scientist|ml|ai)\b", title, re.I):
+        return True
+    return any(topic in CODING_TOPICS for topic, _ in technical[:3])
 
 
 def build_mock_test(
@@ -213,9 +379,12 @@ def build_mock_test(
     rng = random.Random(seed or os.urandom(8).hex())
     seen = set(seen_question_ids or ())
     title, body = job_context_text(job, profile)
+    level = candidate_level(job, profile)
+    levels = empirical_levels()
     technical = rank_topics(title, body)
-    general_count = max(2, round(total * 0.2))
+    general_count = max(2, round(total * 0.2)) if technical else total
     technical_count = total - general_count
+    quota = level_quota(total, _level_mix(difficulty, level), rng)
 
     generated: list[dict[str, Any]] = []
     if allow_llm:
@@ -226,32 +395,62 @@ def build_mock_test(
 
     questions: list[dict[str, Any]] = []
     used: set[str] = set()
-    allocation = _allocate(technical_count, technical)
+
+    def take(topic: str, count: int, kind: str | None = None) -> int:
+        if count <= 0:
+            return 0
+        picked = _pick_from_topic(topic, count, difficulty, rng, seen, used, level=level, kind=kind, levels=levels, quota=quota)
+        used.update(item["id"] for item in picked)
+        questions.extend(picked)
+        return len(picked)
+
+    # Tech roles: reserve a share of the technical questions for code reading
+    # (output prediction, bug spotting, complexity) in the job's languages.
+    code_target = 0
+    code_topics = [topic for topic, _ in technical if topic in CODING_TOPICS]
+    if is_technical(title, technical):
+        if not code_topics:
+            code_topics = ["python", "dsa"]
+        code_target = max(2, round(technical_count * CODE_SHARE_TECH))
+    code_taken = 0
+    if code_target:
+        code_weights = [(topic, weight) for topic, weight in technical if topic in code_topics] or [(topic, 1.0) for topic in code_topics]
+        for topic, count in _allocate(code_target, code_weights).items():
+            code_taken += take(topic, count, "code")
+        for topic in ("dsa", "python", "sql"):
+            if code_taken >= code_target:
+                break
+            code_taken += take(topic, code_target - code_taken, "code")
+
+    allocation = _allocate(technical_count - code_taken, technical)
     # Fill each topic; any shortfall rolls over to the next-best topic.
     shortfall = 0
     ordered_topics = [topic for topic, _ in technical]
     for topic in ordered_topics:
         wanted = allocation.get(topic, 0) + shortfall
-        picked = _pick_from_topic(topic, wanted, difficulty, rng, seen, used)
-        used.update(item["id"] for item in picked)
-        questions.extend(picked)
-        shortfall = wanted - len(picked)
+        shortfall = wanted - take(topic, wanted)
     if shortfall:
         backup = [topic for topic in TOPICS if topic not in ordered_topics and topic not in GENERAL_TOPICS]
         for topic in ("dsa", "python", "sql", *backup):
             if shortfall <= 0:
                 break
-            picked = _pick_from_topic(topic, shortfall, difficulty, rng, seen, used)
-            used.update(item["id"] for item in picked)
-            questions.extend(picked)
-            shortfall -= len(picked)
-    for topic, count in _allocate(general_count, [("aptitude", 1.0), ("reasoning", 1.0)]).items():
-        picked = _pick_from_topic(topic, count, difficulty, rng, seen, used)
-        used.update(item["id"] for item in picked)
-        questions.extend(picked)
+            shortfall -= take(topic, shortfall)
+    if not technical:
+        general_weights = [("aptitude", 1.0), ("reasoning", 1.0), ("verbal", 1.0)]
+    elif general_count >= 4:
+        general_weights = [("aptitude", 1.5), ("reasoning", 1.2), ("verbal", 0.5)]
+    else:  # short tests keep the classic aptitude + reasoning pair
+        general_weights = [("aptitude", 1.0), ("reasoning", 1.0)]
+    general_short = 0
+    for topic, count in _allocate(general_count, general_weights).items():
+        general_short += count - take(topic, count)
+    for topic in GENERAL_TOPICS:
+        if general_short <= 0:
+            break
+        general_short -= take(topic, general_short)
     questions.extend(generated)
 
-    # Shuffle question order (grouped loosely by topic) and every option list.
+    # Shuffle question order and every option list.
     rng.shuffle(questions)
     prepared: list[dict[str, Any]] = []
     for number, item in enumerate(questions, start=1):
@@ -263,25 +462,37 @@ def build_mock_test(
             "options": [item["options"][index] for index in order],
             "answer_index": order.index(int(item["answer_index"])),
         })
-    time_limit = sum(SECONDS_PER_DIFFICULTY.get(item["difficulty"], 75) for item in prepared)
+    time_limit = sum(
+        SECONDS_PER_DIFFICULTY.get(item["difficulty"], 75) + (CODE_EXTRA_SECONDS if item.get("kind") == "code" else 0)
+        for item in prepared
+    )
     topic_labels = []
     for item in prepared:
         if item["topic_label"] not in topic_labels:
             topic_labels.append(item["topic_label"])
+    mix = {name: sum(item["difficulty"] == name for item in prepared) for name in LEVEL_ORDER}
     return {
         "length": length,
         "difficulty": difficulty,
+        "level": level,
         "questions": prepared,
         "topics": topic_labels,
         "time_limit_seconds": int(math.ceil(time_limit / 60.0) * 60),
         "ai_generated_count": sum(item["source"] == "ai_generated" for item in prepared),
+        "difficulty_mix": mix,
+        "coding_count": sum(item.get("kind") == "code" for item in prepared),
     }
 
 
 def public_questions(questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Questions as sent to the browser: no answer key, no explanation."""
     return [
-        {key: item[key] for key in ("id", "number", "topic", "topic_label", "difficulty", "question", "options", "source")}
+        {
+            **{key: item[key] for key in ("id", "number", "topic", "topic_label", "difficulty", "question", "options", "source")},
+            "kind": item.get("kind", "concept"),
+            "code": item.get("code", ""),
+            "language": item.get("language", ""),
+        }
         for item in questions
     ]
 
@@ -366,6 +577,9 @@ def grade_mock_test(
             "status": "unanswered" if choice is None else ("correct" if is_correct else "incorrect"),
             "explanation": item.get("explanation", ""),
             "source": item.get("source", "curated_bank"),
+            "kind": item.get("kind", "concept"),
+            "code": item.get("code", ""),
+            "language": item.get("language", ""),
             "seconds": round(spent, 1),
         })
     total = len(questions)
@@ -409,6 +623,7 @@ def grade_mock_test(
         "negative_marking": False,
         "topic_breakdown": topic_rows,
         "difficulty_breakdown": difficulty_rows,
+        "coding": _coding_breakdown(review),
         "strengths": [f"{row['label']}: {row['correct']}/{row['total']} correct" for row in strong[:4]],
         "weak_areas": [{"label": row["label"], "percent": row["percent"], "tip": row["tip"]} for row in weak[:4]],
         "time": {
@@ -421,6 +636,12 @@ def grade_mock_test(
         "improvement": round(percent - previous_best, 1) if previous_best is not None else None,
         "review": review,
     }
+
+
+def _coding_breakdown(review: list[dict[str, Any]]) -> dict[str, Any]:
+    code = [item for item in review if item.get("kind") == "code"]
+    correct = sum(bool(item.get("is_correct")) for item in code)
+    return {"total": len(code), "correct": correct, "percent": round(100 * correct / len(code), 1) if code else None}
 
 
 def _uncovered_job_skills(job: dict[str, Any] | None, technical: list[tuple[str, float]]) -> list[str]:
@@ -453,15 +674,7 @@ def generate_llm_questions(role: str, skills: list[str], *, count: int, difficul
     api_key = os.getenv("JOB_AGENT_MOCK_TEST_LLM_API_KEY", "").strip() or os.getenv("JOB_AGENT_LLM_API_KEY", "").strip()
     if not api_key or not skills or count <= 0:
         return []
-    endpoint = os.getenv("JOB_AGENT_MOCK_TEST_LLM_ENDPOINT", "").strip() or os.getenv("JOB_AGENT_LLM_ENDPOINT", "https://api.openai.com/v1/responses").strip()
-    model = os.getenv("JOB_AGENT_MOCK_TEST_LLM_MODEL", "").strip() or os.getenv("JOB_AGENT_LLM_MODEL", "gpt-4o-mini").strip()
     level = "a mix of easy, medium and hard" if difficulty == "mixed" else difficulty
-    prompt = (
-        f"Write {count} multiple-choice questions to screen candidates for a {role} role on these skills: "
-        f"{', '.join(skills)}. Difficulty: {level}. Each question must test practical, factual knowledge, have exactly "
-        "four options and exactly one unambiguously correct answer, and include a one-sentence explanation. "
-        "Do not use 'all of the above' or 'none of the above'. Return JSON only."
-    )
     schema = {
         "type": "object",
         "properties": {
@@ -485,31 +698,26 @@ def generate_llm_questions(role: str, skills: list[str], *, count: int, difficul
         "required": ["questions"],
         "additionalProperties": False,
     }
-    try:
-        response = post(
-            endpoint,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "store": False,
-                "input": prompt,
-                "text": {"format": {"type": "json_schema", "name": "mock_test_questions", "strict": True, "schema": schema}},
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        output_text = payload.get("output_text") or next(
-            (
-                content.get("text", "")
-                for item in payload.get("output", [])
-                for content in item.get("content", [])
-                if content.get("type") == "output_text"
-            ),
-            "",
-        )
-        parsed = json.loads(output_text)
-    except Exception:
+    parsed = call_json(
+        "mock_test_questions",
+        instructions=(
+            f"Write {count} multiple-choice questions to screen candidates for the role and skills in the data blocks. "
+            f"Difficulty: {level}. Calibrate difficulty to an Indian campus or lateral hiring screen: easy = definition or "
+            "direct recall, medium = applying a concept to a short scenario or code snippet, hard = multi-step reasoning, "
+            "debugging or trade-offs. Each question must test practical, factual knowledge, have exactly four options and "
+            "exactly one unambiguously correct answer, and include a one-sentence explanation. Do not use 'all of the above' "
+            "or 'none of the above'. Return JSON only."
+        ),
+        data={"role": role[:200], "skills": ", ".join(skills)[:600]},
+        schema=schema,
+        schema_name="mock_test_questions",
+        key_envs=("JOB_AGENT_MOCK_TEST_LLM_API_KEY", "JOB_AGENT_LLM_API_KEY"),
+        endpoint_envs=("JOB_AGENT_MOCK_TEST_LLM_ENDPOINT", "JOB_AGENT_LLM_ENDPOINT"),
+        model_envs=("JOB_AGENT_MOCK_TEST_LLM_MODEL", "JOB_AGENT_LLM_MODEL"),
+        max_output_tokens=1800,
+        timeout=20,
+    )
+    if not isinstance(parsed, dict):
         return []
     return validate_generated_questions(parsed.get("questions") if isinstance(parsed, dict) else None, count)
 

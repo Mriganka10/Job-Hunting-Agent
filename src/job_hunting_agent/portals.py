@@ -131,7 +131,8 @@ class LinkedInAdapter(PortalAdapter):
                         description=f"LinkedIn public listing matched {role or query} ({_experience_label(experience_years)})",
                         posted_at=posted_at,
                         workplace_mode="remote" if remote_filter or "remote" in (job_location or location).casefold() else "unknown",
-                        source_metadata={"source_type": "public_html", "freshness_requested_days": config.freshness_days},
+                        source_metadata={"source_type": "public_html", "freshness_requested_days": config.freshness_days,
+                                         **_level_filter_metadata(experience_years, "linkedin")},
                     )
                 )
             if len(leads) >= config.max_jobs_per_portal:
@@ -185,7 +186,8 @@ class NaukriAdapter(PortalAdapter):
                         description=f"Naukri public listing matched {role or query} ({_experience_label(experience_years)})",
                         posted_at=posted_at,
                         workplace_mode="remote" if "remote" in (job_location or location).casefold() else "unknown",
-                        source_metadata={"source_type": "public_html", "freshness_requested_days": config.freshness_days},
+                        source_metadata={"source_type": "public_html", "freshness_requested_days": config.freshness_days,
+                                         **_level_filter_metadata(experience_years, "naukri")},
                     )
                 )
             if len(leads) >= config.max_jobs_per_portal:
@@ -204,7 +206,7 @@ class NaukriAdapter(PortalAdapter):
         remote = location.strip().casefold() in {"remote", "work from home", "wfh"}
         params = {
             "noOfResults": 20, "urlType": "search_by_key_loc", "searchType": "adv", "keyword": query,
-            "experience": max(0, min(round(experience_years), 30)), "jobAge": max(1, config.freshness_days), "pageNo": 1,
+            "experience": _whole_years(experience_years), "jobAge": max(1, config.freshness_days), "pageNo": 1,
         }
         if remote:
             params["wfhType"] = 2
@@ -224,11 +226,11 @@ class NaukriAdapter(PortalAdapter):
         if not isinstance(records, list):
             self._structured_blocked = True
             return []
-        leads = [lead for lead in (_naukri_lead(record, location, config) for record in records if isinstance(record, dict)) if lead]
+        leads = [lead for lead in (_naukri_lead(record, location, config, experience_years) for record in records if isinstance(record, dict)) if lead]
         return leads[: max(config.max_jobs_per_portal, 1) * 2]
 
 
-def _naukri_lead(record: dict, searched_location: str, config: SearchConfig) -> JobLead | None:
+def _naukri_lead(record: dict, searched_location: str, config: SearchConfig, experience_years: float | None = None) -> JobLead | None:
     title = _clean_html(str(record.get("title") or ""))
     job_url = str(record.get("jdURL") or record.get("staticUrl") or "").strip()
     if job_url.startswith("/"):
@@ -267,6 +269,7 @@ def _naukri_lead(record: dict, searched_location: str, config: SearchConfig) -> 
             "freshness_requested_days": config.freshness_days,
             "naukri_skills": skills[:25],
             "experience_label": experience,
+            **(_level_filter_metadata(experience_years, "naukri") if experience_years is not None else {}),
         },
     )
 
@@ -350,17 +353,15 @@ def rank_job_leads(
         if coverage is not None and len(job_requirement_skills(description)) >= 3:
             skill_fit = min(skill_fit, coverage)
         location_fit = _location_fit(intent.locations, job.location, job.workplace_mode)
-        required = _required_experience(job_text)
-        if required is None:
-            required = _seniority_experience(job.title)
-        if required is None and re.search(r"\b(?:entry[ -]level|fresher|new graduate|recent graduate)\b", description, flags=re.I):
-            required = 0.0
-        experience_fit = _experience_fit(required, intent.experience_years, job.title)
+        required, upper, evidence = experience_requirement(job.title, description, job.source_metadata)
+        experience_fit = _experience_fit(required, intent.experience_years, job.title, upper)
         seniority_fit = _seniority_alignment(job.title, intent.experience_years)
         prepared = replace(job, required_experience=required, source_metadata={
             **job.source_metadata,
             "missing_required_skills": tuple(canonicalize_skill(skill) for skill in missing),
             "matched_skills": matched_candidate_skills(intent.skills, description)[:8],
+            "experience_evidence": evidence,
+            "experience_max_years": upper,
         })
         if _is_eligible(prepared, intent, config):
             candidates.append((prepared, role_fit, skill_fit, location_fit, experience_fit, required, seniority_fit))
@@ -375,7 +376,7 @@ def rank_job_leads(
             score = min(score, 75)
         if job.source_metadata.get("detail_unavailable"):
             score = min(score, 60)
-        reasons = _match_reasons(role_fit, skill_fit, location_fit, experience_fit, required, intent, job)
+        reasons = _match_reasons(role_fit, skill_fit, location_fit, experience_fit, required, intent, job, upper)
         scored.append(replace(job, match_score=max(0, min(100, score)), match_reasons=reasons, required_experience=required))
     return sorted(scored, key=lambda job: job.match_score, reverse=True)
 
@@ -653,25 +654,45 @@ def _location_fit(locations: tuple[str, ...], job_location: str, workplace_mode:
     return best
 
 
-def _experience_fit(required: float | None, candidate_years: float, title: str) -> float:
+def _experience_fit(required: float | None, candidate_years: float, title: str, upper: float | None = None) -> float:
     if required is None:
         inferred = _seniority_experience(title)
         if inferred is None:
             return 0.55
         required = inferred
-    if candidate_years + _experience_tolerance(candidate_years) >= required:
-        return 1.0
-    gap = required - candidate_years
-    return max(0.0, 1 - gap / 5)
+    if candidate_years + _experience_tolerance(candidate_years) < required:
+        return max(0.0, 1 - (required - candidate_years) / 5)
+    # Over-qualified: the posting's range tops out well below the candidate.
+    if upper is not None and candidate_years >= upper + 2:
+        return 0.6
+    return 1.0
 
 
 def _experience_tolerance(candidate_years: float) -> float:
-    return 0.5
+    """How far above the candidate's years a requirement may sit.
+
+    Strict for early careers, where a single year is a different level:
+    under 1 year nothing above the candidate's own experience is accepted;
+    1-3 years allows half a year; 3+ years allows one year.
+    """
+    if candidate_years < 1:
+        return 0.0
+    if candidate_years < 3:
+        return 0.5
+    return 1.0
+
+
+_SENIOR_TITLE = re.compile(
+    r"\b(?:senior|sr\.?|lead|principal|staff|manager|architect|head|director|vp|vice president|chief|expert)\b", re.I
+)
 
 
 def _seniority_alignment(title: str, candidate_years: float) -> float:
     lowered = title.casefold()
-    if candidate_years < 2 and re.search(r"\b(?:senior|sr\.?|lead|principal|staff|manager|architect)\b", lowered):
+    implied = _seniority_experience(title)
+    if implied is not None and implied > candidate_years + _experience_tolerance(candidate_years):
+        return 0.45
+    if candidate_years < 2 and _SENIOR_TITLE.search(lowered) and not _JUNIOR_TITLE.search(lowered):
         return 0.45
     if candidate_years >= 6 and re.search(r"\b(?:intern|trainee|entry|fresher|junior)\b", lowered):
         return 0.65
@@ -686,6 +707,7 @@ def _match_reasons(
     required: float | None,
     intent: SearchIntent,
     job: JobLead,
+    upper: float | None = None,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
     if role_fit >= 0.38:
@@ -703,7 +725,9 @@ def _match_reasons(
         reasons.append("Experience requirement unverified")
     elif experience_fit >= 0.8:
         reasons.append("Experience fit")
-    elif required is not None:
+    elif upper is not None and intent.experience_years >= upper + 2:
+        reasons.append("Below your experience level")
+    else:
         reasons.append(f"Requires about {required:g}+ years")
     if job.source_metadata.get("detail_unavailable"):
         reasons.insert(0, "Description unavailable - confirm skills on posting")
@@ -754,23 +778,193 @@ def _is_eligible(job: JobLead, intent: SearchIntent, config: SearchConfig | None
         return False
     if _seniority_alignment(job.title, intent.experience_years) < 0.8:
         return False
-    return job.required_experience is None or job.required_experience <= intent.experience_years + _experience_tolerance(intent.experience_years)
+    if job.required_experience is None:
+        # Early careers: a posting that states no level is a guess, and most
+        # unlabelled postings are not entry level. Keep it only when the
+        # portal itself filtered the search by the candidate's experience.
+        return intent.experience_years >= 2 or bool(job.source_metadata.get("experience_filtered"))
+    return job.required_experience <= intent.experience_years + _experience_tolerance(intent.experience_years)
+
+
+_NUMBER_WORDS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "twelve": 12, "fifteen": 15}
+_NUM = r"\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fifteen"
+_EXPERIENCE_AMOUNT = re.compile(
+    rf"(?<![\w.])(?P<low>{_NUM})\s*(?:\+|plus)?\s*(?:(?:-|–|—|to)\s*(?P<high>{_NUM})\s*\+?\s*)?(?P<unit>years?|yrs?|months?|mos?)\b", re.I
+)
+_OPTIONAL_SECTION = re.compile(
+    r"\b(?:preferred|desirable|nice[ -]to[ -]have|good[ -]to[ -]have|bonus)\s+(?:skills|qualifications|requirements|experience)\b\s*[:\-]?"
+    r"|\b(?:preferred|desirable|nice[ -]to[ -]have|good[ -]to[ -]have|benefits|perks|about us|about the company|who we are|our story)\s*:",
+    re.I,
+)
+_REQUIRED_SECTION = re.compile(
+    r"\b(?:basic|minimum|required|key)?\s*(?:requirements?|qualifications?|must[ -]haves?|what you(?:'ll| will)? need|"
+    r"what we(?:'re| are) looking for|who you are|eligibility|responsibilities|experience|job description|skills)\s*:",
+    re.I,
+)
+# A year count in these sentences is about the company, a degree or a contract.
+_NOT_REQUIREMENT = re.compile(
+    r"\b(?:old|ago|since|founded|established|in business|history|legacy|heritage|anniversary|serving|served|clients|customers|"
+    r"degree|b\.?\s?tech|bachelor'?s?|master'?s?|diploma|graduation|course|programme|bond|contract|agreement|warranty|"
+    r"tenure|duration|within|next|over the (?:past|last)|for the (?:past|last)|years of age|age limit)\b",
+    re.I,
+)
+_COMPANY_VOICE = re.compile(r"\b(?:we|our company|our firm|the company)\s+(?:have|has|are|is|been)\b", re.I)
+_CANDIDATE_VOICE = re.compile(
+    r"\b(?:you|candidate|applicant|must|should|require[sd]?|requirement|need|looking for|seeking|minimum|at least|min\.?|experience\s*:|exp\s*:)\b",
+    re.I,
+)
+_PREFERRED = re.compile(r"\b(?:prefer(?:red|ably)?|nice to have|good to have|a plus|is a plus|bonus|ideally|desirable|advantage(?:ous)?)\b", re.I)
+_EXPERIENCE_WORD = re.compile(r"\b(?:experience[d]?|exp\.?|expertise|work(?:ing)? in|hands[ -]on|background)\b", re.I)
+_JUNIOR_TITLE = re.compile(r"\b(?:intern(?:ship)?|trainee|fresher|junior|jr\.?|entry|graduate|apprentice|associate)\b", re.I)
+_JUNIOR_SIGNAL = re.compile(
+    r"\b(?:intern(?:ship)?|trainee|freshers?|fresh graduates?|entry[ -]level|new grad(?:uate)?s?|recent graduates?|"
+    r"graduate (?:engineer|trainee|program(?:me)?)|apprentice(?:ship)?|campus (?:hire|hiring|recruitment)|"
+    r"no (?:prior )?experience (?:is )?(?:required|needed|necessary))\b",
+    re.I,
+)
+# LinkedIn "Seniority level" criteria and remote-board seniority labels.
+_PORTAL_LEVELS = (
+    (re.compile(r"seniority level\s*:?\s*internship", re.I), 0.0),
+    (re.compile(r"seniority level\s*:?\s*entry level", re.I), 0.0),
+    (re.compile(r"seniority level\s*:?\s*junior", re.I), 0.0),
+    (re.compile(r"seniority level\s*:?\s*associate", re.I), 1.0),
+    (re.compile(r"seniority level\s*:?\s*mid[ -]senior level", re.I), 3.0),
+    (re.compile(r"(?<!seniority level )\bmid[ -]senior level\b", re.I), 3.0),
+    (re.compile(r"seniority level\s*:?\s*director", re.I), 8.0),
+    (re.compile(r"seniority level\s*:?\s*executive", re.I), 10.0),
+)
+_BOARD_LEVELS = {"entry-level": 0.0, "entry level": 0.0, "junior": 0.0, "intern": 0.0, "internship": 0.0,
+                 "mid-level": 2.0, "mid level": 2.0, "senior": 4.0, "lead": 6.0, "manager": 5.0, "director": 8.0, "executive": 10.0}
+
+
+def _number(value: str) -> float:
+    lowered = value.casefold()
+    return float(_NUMBER_WORDS[lowered]) if lowered in _NUMBER_WORDS else float(value)
+
+
+def _requirement_text(text: str) -> str:
+    """Drop the preferred, benefits and company sections; keep everything else.
+
+    Only the sections themselves are dropped, so requirements listed after an
+    "About us" block are still read.
+    """
+    kept: list[str] = []
+    position, keep = 0, True
+    markers = sorted(
+        [(m.start(), m.end(), False) for m in _OPTIONAL_SECTION.finditer(text)]
+        + [(m.start(), m.end(), True) for m in _REQUIRED_SECTION.finditer(text)]
+    )
+    for start, end, is_required in markers:
+        if start < position:
+            continue
+        if keep:
+            kept.append(text[position:start])
+        keep, position = is_required, (start if is_required else end)
+    if keep:
+        kept.append(text[position:])
+    return " ".join(kept)
+
+
+def experience_range(text: str) -> tuple[float | None, float | None]:
+    """Minimum years a posting requires, and the top of its range if it gives one.
+
+    Every year count stated as a requirement is read; the highest minimum
+    wins, because "1-3 years overall, 3+ years of Spark" asks for 3. Counts in
+    sentences about the company, a degree or a contract, and preferred
+    qualifications, are ignored.
+    """
+    lows: list[float] = []
+    highs: list[float] = []
+    for sentence in re.split(r"(?<=[.;!?])\s+|\n+|•|·|\|", _requirement_text(text)):
+        if not sentence.strip() or _PREFERRED.search(sentence):
+            continue
+        noise = _NOT_REQUIREMENT.search(sentence) or (_COMPANY_VOICE.search(sentence) and not _CANDIDATE_VOICE.search(sentence))
+        # "Freshers or 1 year of experience" and "up to 2 years" both start at zero.
+        open_to_freshers = bool(_JUNIOR_SIGNAL.search(sentence))
+        for match in _EXPERIENCE_AMOUNT.finditer(sentence):
+            ceiling = re.search(r"\b(?:up ?to|upto|less than|under|below|maximum|max\.?|not more than|at most)\s*$", sentence[:match.start()], re.I)
+            months = match.group("unit").casefold().startswith(("month", "mo"))
+            if noise and not re.search(r"experience\s*:|exp\s*:", sentence, re.I):
+                continue
+            if months and not _EXPERIENCE_WORD.search(sentence):
+                continue  # "6 months internship" is a duration, not a requirement
+            scale = 12.0 if months else 1.0
+            low = _number(match.group("low")) / scale
+            if low > 30:
+                continue
+            high = _number(match.group("high")) / scale if match.group("high") else None
+            if ceiling or open_to_freshers:
+                low, high = 0.0, high if high is not None else _number(match.group("low")) / scale
+            lows.append(round(low, 2))
+            if high is not None:
+                highs.append(round(high, 2))
+    if not lows:
+        return None, None
+    low = max(lows)
+    high = max(highs) if highs else None
+    return low, (high if high is not None and high >= low else None)
 
 
 def _required_experience(text: str) -> float | None:
-    # Preferred qualifications are useful context, but cannot be treated as
-    # minimum eligibility. This also avoids dates in company background text.
-    required_text = re.split(OPTIONAL_HEADING, text, maxsplit=1, flags=re.I)[0]
-    values = [float(value) for value in re.findall(r"\b(\d+(?:\.\d+)?)\+?\s*(?:-|–|to)?\s*\d*(?:\.\d+)?\s*(?:years?|yrs?)\b", required_text, flags=re.I)]
-    values.extend(float(value) / 12 for value in re.findall(r"\b(\d+(?:\.\d+)?)\+?\s*months?\s+(?:of\s+)?(?:relevant\s+|professional\s+|work\s+|hands-on\s+)?experience\b", required_text, flags=re.I))
-    return min(values) if values else None
+    return experience_range(text)[0]
+
+
+def _portal_level(description: str, metadata: dict) -> float | None:
+    for pattern, years in _PORTAL_LEVELS:
+        if pattern.search(description):
+            return years
+    labels = metadata.get("seniority") or []
+    if isinstance(labels, str):
+        labels = [labels]
+    levels = [_BOARD_LEVELS[str(label).casefold().strip()] for label in labels if str(label).casefold().strip() in _BOARD_LEVELS]
+    return min(levels) if levels else None
+
+
+def experience_requirement(title: str, description: str, metadata: dict | None = None) -> tuple[float | None, float | None, str]:
+    """(minimum years, top of range, where it came from) for one posting.
+
+    Evidence, strongest first: the posting text, the source API's structured
+    field, the portal's seniority level, the job title, then entry-level words.
+    """
+    metadata = metadata or {}
+    low, high = experience_range(f"{title}. {description}")
+    if low is not None:
+        return low, high, "posting"
+    if metadata.get("no_experience_required"):
+        return 0.0, None, "source"
+    months = metadata.get("required_experience_months")
+    if isinstance(months, (int, float)) and months >= 0:
+        return round(float(months) / 12, 2), None, "source"
+    level = _portal_level(description, metadata)
+    if level is not None:
+        return level, None, "portal level"
+    implied = _seniority_experience(title)
+    if implied is not None:
+        return implied, None, "title"
+    if _JUNIOR_SIGNAL.search(description):
+        return 0.0, None, "entry-level wording"
+    return None, None, "not stated"
+
+
+_LEVEL_SUFFIX = re.compile(r"\b(?:sde|swe|engineer|developer|analyst|scientist|programmer)[\s-]*(?P<level>i{1,3}|iv|[1-4])\b", re.I)
 
 
 def _seniority_experience(title: str) -> float | None:
     lowered = title.casefold()
-    for marker, years in (("principal", 7.0), ("staff", 7.0), ("lead", 6.0), ("manager", 5.0), ("senior", 4.0), ("sr.", 4.0), ("junior", 0.0), ("intern", 0.0), ("entry", 0.0), ("fresher", 0.0), ("graduate", 0.0)):
+    if re.search(r"\bassociate\s+(?:product\s+|project\s+)?manager\b", lowered):
+        return 1.0
+    for marker, years in (("intern", 0.0), ("internship", 0.0), ("trainee", 0.0), ("fresher", 0.0), ("apprentice", 0.0),
+                          ("junior", 0.0), ("jr", 0.0), ("jr.", 0.0), ("entry", 0.0), ("graduate", 0.0)):
         if re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", lowered):
             return years
+    for marker, years in (("chief", 10.0), ("vice president", 10.0), ("vp", 10.0), ("director", 8.0), ("head", 8.0),
+                          ("principal", 7.0), ("staff", 7.0), ("architect", 7.0), ("lead", 6.0), ("manager", 5.0),
+                          ("senior", 4.0), ("sr", 4.0), ("sr.", 4.0), ("mid-level", 2.0), ("mid level", 2.0), ("intermediate", 2.0)):
+        if re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", lowered):
+            return years
+    level = _LEVEL_SUFFIX.search(lowered)
+    if level:
+        return {"i": 0.0, "1": 0.0, "ii": 2.0, "2": 2.0, "iii": 4.0, "3": 4.0, "iv": 6.0, "4": 6.0}[level.group("level")]
     return None
 
 
@@ -972,6 +1166,40 @@ def _fallback_search_links(
     return leads[: config.max_jobs_per_portal]
 
 
+def portal_search_links(
+    roles: tuple[str, ...], locations: tuple[str, ...], experience_years: float = 0.0, freshness_days: int = 14,
+) -> list[dict[str, str]]:
+    """Ready-made searches on portals that have no public job API.
+
+    Indeed, Foundit and WorkIndia do not offer a job-search API to third
+    parties, and their sites block automated access. Instead of scraping them,
+    the dashboard opens the same search (role, city, recency, experience) on
+    the portal itself. Their listings can also reach the leads table through
+    Google for Jobs (JSearch) when ``JOB_AGENT_JSEARCH_API_KEY`` is set.
+    """
+    links: list[dict[str, str]] = []
+    years = _whole_years(experience_years)
+    indeed_level = "&sc=0kf%3Aexplvl%28ENTRY_LEVEL%29%3B" if experience_years < 2 else ""
+    for role in roles[:2]:
+        for location in (locations or ("India",))[:2]:
+            remote = location.strip().casefold() in {"remote", "work from home", "wfh", "anywhere"}
+            city = "India" if remote else location.strip()
+            city_slug = re.sub(r"[^a-z0-9]+", "-", city.casefold()).strip("-") or "india"
+            # WorkIndia city pages use official city names (jobs-in-bengaluru).
+            city_slug = {"bangalore": "bengaluru", "bombay": "mumbai", "calcutta": "kolkata", "madras": "chennai"}.get(city_slug, city_slug)
+            query = f"{role} remote" if remote else role
+            label = f"{role} · {'Remote' if remote else city}"
+            links.extend((
+                {"portal": "indeed", "label": label, "url": f"https://in.indeed.com/jobs?q={quote_plus(query)}&l={quote_plus(city)}&fromage={max(1, min(freshness_days, 14))}{indeed_level}"},
+                {"portal": "foundit", "label": label, "url": f"https://www.foundit.in/srp/results?query={quote_plus(query)}&locations={quote_plus(city)}&experienceRanges={years}~{years}"},
+                {"portal": "workindia", "label": label, "url": f"https://www.workindia.in/jobs-in-{city_slug}/"},
+            ))
+    unique: dict[str, dict[str, str]] = {}
+    for link in links:
+        unique.setdefault(link["url"], link)
+    return list(unique.values())[:12]
+
+
 def _linkedin_location(location: str) -> tuple[str, str]:
     """LinkedIn has no place called "Remote"; search India with the remote filter."""
     if location.strip().casefold() in {"remote", "work from home", "wfh", "anywhere"}:
@@ -991,8 +1219,7 @@ def _linkedin_search_url(role: str, location: str, config: SearchConfig, experie
 def _naukri_search_url(role: str, location: str, config: SearchConfig, experience_years: float = 0.0) -> str:
     slug = quote_plus(role).replace("+", "-").lower()
     loc = quote_plus(location).replace("+", "-").lower()
-    years = max(0, min(round(experience_years), 30))
-    return f"https://www.naukri.com/{slug}-jobs-in-{loc}?jobAge={config.freshness_days}&experience={years}"
+    return f"https://www.naukri.com/{slug}-jobs-in-{loc}?jobAge={config.freshness_days}&experience={_whole_years(experience_years)}"
 
 
 def _linkedin_experience_filter(experience_years: float) -> str:
@@ -1003,6 +1230,22 @@ def _linkedin_experience_filter(experience_years: float) -> str:
     if experience_years < 7:
         return "3,4"
     return "4,5"
+
+
+def _whole_years(experience_years: float) -> int:
+    """Portal experience filters take whole years. Round down: 1.5 years must
+    search as 1, not 2, or the portal returns jobs above the candidate."""
+    return max(0, min(int(experience_years), 30))
+
+
+def _level_filter_metadata(experience_years: float, portal: str) -> dict:
+    """Marks leads whose search the portal already filtered by experience.
+
+    Naukri returns only jobs whose range includes the given years. LinkedIn's
+    Internship/Entry level/Associate filter is trusted below 2 years.
+    """
+    trusted = portal == "naukri" or (portal == "linkedin" and experience_years < 2)
+    return {"experience_filtered": True, "searched_experience_years": experience_years} if trusted else {}
 
 
 def _experience_label(experience_years: float) -> str:

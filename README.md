@@ -13,15 +13,21 @@ Resume-first job-search assistant that evaluates ATS readiness, generates an imp
 - Generates downloadable single-column DOCX and PDF companions while avoiding ATS-hostile text boxes, columns, icons, and fabricated qualifications.
 - Produces a separately tailored DOCX/PDF pair for every job lead by prioritizing only source-supported skills, projects, and experience evidence from that job description.
 - Enforces a configurable one-to-three-page budget with progressive content compression, pixel rendering, PDF text recovery, section-semantic checks, and output-to-source factual validation.
-- Searches validated Himalayas, Remotive, Arbeitnow, Jobicy and Remote OK feeds, optional Adzuna, Careerjet and Jooble partner APIs, and best-effort LinkedIn and Naukri public adapters. See [Job Sources](docs/JOB_SOURCES_AND_PAGINATION.md).
+- Searches validated Himalayas, Remotive, Arbeitnow, Jobicy and Remote OK feeds, optional Adzuna, Careerjet, Jooble and JSearch (Google for Jobs: Indeed, Foundit, WorkIndia, Shine and more) partner APIs, and best-effort LinkedIn and Naukri public adapters. See [Job Sources](docs/JOB_SOURCES_AND_PAGINATION.md).
+- Checks the resume against the job description the way ATS filters do: must-have vs nice-to-have skills, skills shown in experience vs only listed, job-title match, years of experience and degree requirements, with "screening risks" listed first.
+- Keeps a human in the loop: recruiter emails wait in an approval queue (edit, approve, undo window, daily cap, no duplicate recipients, audit log); users rate job leads relevant or not relevant, which become live quality labels.
+- Enforces production guardrails: OTP attempt and request limits, per-user rate limits, LLM spend and token caps, prompt-injection framing of job descriptions, protected attributes removed before scoring or AI review, consent, data export, account deletion and retention (DPDP Act 2023). See [Production Readiness](docs/PRODUCTION_READINESS.md).
+- Tracks production metrics (CloudWatch Embedded Metric Format plus an in-app admin dashboard at `/admin/metrics`) with alerts for slow runs, failing sources, server errors, scheduled-run failures, LLM spend and relevance drops.
+- Shows daily and weekly Progress Reports for mock tests and interviews, per job: score trends, topic and difficulty accuracy, interview skill trends, coding accuracy, streaks and next steps.
 - Measures recommendation quality on a labelled corpus (`python scripts/evaluate_job_relevance.py`) with precision, recall, nDCG and zero-leak gates.
 - Normalizes posting dates, salary, workplace mode, employment type, company aliases, expiry, and link status before ranking leads.
 - Loads additional leads through an owner-scoped, signed server cursor; `Show More` no longer downloads the full result set on the first request.
 - Keeps a local ledger so the same job is not applied twice.
-- Creates email-ready applications and can send them through SMTP.
+- Creates email-ready applications; in Email mode each one is sent through SMTP or SES only after the user approves it.
 - Provides an OTP-protected web UI for resume upload, profile settings, immediate runs, downloads, and daily scheduling.
 - Includes a virtual mock-interview studio that can target a specific job lead (job-fit questions from the posting, its skills and skill gaps) or use profile-derived questions, optional camera preview and browser speech features, a code editor, transcripts, section-end feedback reports, and recent-session history.
 - Includes a Mock Test section with timed MCQ tests tailored to each job lead (required, matched and Additional Skills plus aptitude and reasoning), server-side grading, and a scorecard with topic and difficulty breakdowns, a readiness verdict, study tips, and an answer review. See [Mock Test](docs/MOCK_TEST.md).
+- Matches question level to the candidate (entry, mid, senior) and adds real coding problems for technical roles (Python and JavaScript tests and SQL queries run in the browser; model solutions in the scorecard). Mock tests include code-reading questions whose answer keys are verified by running them.
 - Varies question selection by quick, standard, and deep modes; avoids prior user questions when possible; and evaluates communication, technical accuracy, confidence in the submitted wording, and problem solving.
 - Persists user profiles, verification state, runs, schedules, application history, and mock interviews in SQLite locally or PostgreSQL in production.
 - Supports SMTP login OTP delivery or Amazon SES registration verification and OTP delivery.
@@ -150,6 +156,7 @@ See [ATS Calibration](docs/ATS_CALIBRATION.md) for testing against a private, co
 - [Job Sources and Pagination](docs/JOB_SOURCES_AND_PAGINATION.md)
 - [Resume Tailoring and Render Validation](docs/RESUME_TAILORING_AND_VALIDATION.md)
 - [Security and Compliance](docs/SECURITY_AND_COMPLIANCE.md)
+- [Production Readiness: guardrails, human in the loop, metrics](docs/PRODUCTION_READINESS.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Owner Handoff Guide](docs/OWNER_HANDOFF_GUIDE.md)
 - [AWS Deployment Guide](docs/AWS_DEPLOYMENT.md)
@@ -157,6 +164,6 @@ See [ATS Calibration](docs/ATS_CALIBRATION.md) for testing against a private, co
 
 ## Current Prototype Boundaries
 
-This repository contains a working core agent and authenticated web application. ATS scoring uses deterministic evidence plus optional LLM writing evaluation, and an optional job description drives semantic matching. The web flow returns ATS and job results before document rendering completes: the validated base DOCX/PDF is prepared in a bounded background pool, while evidence-preserving job-specific variants are generated on demand and cached. Job discovery combines concurrent structured APIs and defensive public HTML adapters, freshness and expiry filtering, cached link checks, duplicate removal, and server-side paging. Production daily schedules are durable through EventBridge Scheduler and an SQS/ECS worker. The next product steps are an explicit application approval queue and authenticated browser adapters per portal account. Naukri and LinkedIn can require login, CAPTCHA, OTP, or screening answers; the current implementation does not bypass those controls or submit automatically.
+This repository contains a working core agent and authenticated web application. ATS scoring uses deterministic evidence plus optional LLM writing evaluation, and an optional job description drives semantic matching. The web flow returns ATS and job results before document rendering completes: the validated base DOCX/PDF is prepared in a bounded background pool, while evidence-preserving job-specific variants are generated on demand and cached. Job discovery combines concurrent structured APIs and defensive public HTML adapters, freshness and expiry filtering, cached link checks, duplicate removal, and server-side paging. Production daily schedules are durable through EventBridge Scheduler and an SQS/ECS worker. Recruiter emails go through an explicit approval queue. The next product step is authenticated browser adapters per portal account. Naukri and LinkedIn can require login, CAPTCHA, OTP, or screening answers; the current implementation does not bypass those controls or submit automatically.
 
 Performance-sensitive work is bounded by `JOB_AGENT_DOCUMENT_WORKERS` and `JOB_AGENT_APPLICATION_WORKERS`. ATS results are keyed by resume content, candidate profile, job description, and scoring version; generated documents are keyed by source resume, target job content, page target, and builder version. HTTP adapters reuse pooled sessions, API feed responses have short TTLs, link results are retained for six hours, and local semantic models and resume embeddings remain resident after first use.

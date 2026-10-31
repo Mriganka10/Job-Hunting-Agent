@@ -152,6 +152,42 @@ def tailoring_analysis(resume: Resume, profile: CandidateProfile, job: JobLead) 
     }
 
 
+def change_summary(resume: Resume, job: JobLead, artifact: dict[str, object]) -> dict[str, object]:
+    """Plain-language "what changed" list shown before a tailored resume is downloaded.
+
+    Every added skill is listed with the line of the user's own resume that
+    supports it, so the user can confirm nothing was invented.
+    """
+    tailoring = dict(artifact.get("tailoring") or {})
+    added = [str(skill) for skill in tailoring.get("additional_skills_added") or []]
+    source_lines = [line.strip() for line in resume.text.splitlines() if line.strip()]
+    evidence = []
+    for skill in added:
+        line = next((value for value in source_lines if _contains_term(value.casefold(), skill.casefold())), "")
+        evidence.append({"skill": skill, "evidence": line[:180]})
+    missing = [str(item) for item in (job.source_metadata or {}).get("missing_required_skills") or []]
+    validation = dict(artifact.get("validation") or {})
+    changes = [
+        f"Professional summary and headline aimed at {job.title}" + (f" at {job.company}" if job.company else "") + ".",
+        "Skills, experience bullets and projects reordered so the ones most relevant to this job come first.",
+    ]
+    if added:
+        changes.append("Added to Skills (already shown elsewhere in your resume): " + ", ".join(added) + ".")
+    else:
+        changes.append("No new skills were added; the skills this job asks for are already listed or not evidenced in your resume.")
+    not_added = [skill for skill in missing if skill not in added][:8]
+    if not_added:
+        changes.append("Not added because your resume shows no evidence: " + ", ".join(not_added) + ". Add them yourself only if true.")
+    changes.append("No employers, dates, degrees, metrics or achievements were created or changed.")
+    return {
+        "changes": changes,
+        "added_skills": evidence,
+        "not_added": not_added,
+        "factual_check_passed": bool((validation.get("factual_consistency") or {}).get("passed")),
+        "page_count": validation.get("page_count"),
+    }
+
+
 def relevance_score(value: str, target_text: str) -> int:
     target = set(_tokens(target_text))
     value_tokens = set(_tokens(value))

@@ -17,6 +17,7 @@ from .models import AtsReport, CandidateProfile, JobLead, Resume
 from .ats_profiles import select_role_profile
 from .resume import canonicalize_skill, normalize_ats_text
 from .portals import job_requirement_skills
+from .resume_templates import ResumeTemplate, apply_template_order, get_template
 from .resume_validation import relevance_score, tailoring_analysis, validate_factual_consistency
 
 ACTION_VERB_REPLACEMENTS = {
@@ -42,12 +43,13 @@ def write_improved_resume(
     jobs: list[JobLead] | tuple[JobLead, ...] = (),
     *,
     page_target: int = 2,
+    template: str | None = None,
 ) -> dict[str, object]:
     output_dir = Path(data_dir) / "improved_resume"
-    primary = write_base_resume(resume, report, profile, output_dir, page_target=page_target)
+    primary = write_base_resume(resume, report, profile, output_dir, page_target=page_target, template=template)
     tailored: list[dict[str, object]] = []
     for job in jobs:
-        tailored.append(write_tailored_resume(resume, report, profile, output_dir / "tailored", job, page_target=page_target))
+        tailored.append(write_tailored_resume(resume, report, profile, output_dir / "tailored", job, page_target=page_target, template=template))
     return {**primary, "artifact_id": "base", "tailored_resumes": tailored}
 
 
@@ -58,14 +60,18 @@ def write_base_resume(
     output_dir: str | Path,
     *,
     page_target: int = 2,
+    template: str | None = None,
 ) -> dict[str, object]:
+    """The ATS resume in one template (Classic Professional unless another is chosen)."""
     output_dir = Path(output_dir)
+    chosen = get_template(template)
     detected_name = _candidate_name((resume.sections or {}).get("contact", ""))
     base_name = _safe_filename(detected_name or profile.name or "candidate")
     display_name = detected_name or profile.name.strip() or "Candidate"
+    suffix = "" if chosen.key == "professional" else "-" + re.sub(r"[^A-Za-z0-9]+", "-", chosen.name).strip("-")
     return _write_resume_artifact(
-        output_dir / f"{base_name}-ATS-Friendly-Resume", resume, report, profile, display_name,
-        page_target=max(1, min(int(page_target), 3)),
+        output_dir / f"{base_name}-ATS-Friendly-Resume{suffix}", resume, report, profile, display_name,
+        page_target=max(1, min(int(page_target), 3)), template=chosen,
     )
 
 
@@ -77,6 +83,7 @@ def write_tailored_resume(
     job: JobLead,
     *,
     page_target: int = 2,
+    template: str | None = None,
 ) -> dict[str, object]:
     detected_name = _candidate_name((resume.sections or {}).get("contact", ""))
     base_name = _safe_filename(detected_name or profile.name or "candidate")
@@ -85,7 +92,7 @@ def write_tailored_resume(
     artifact = _write_resume_artifact(
         Path(output_dir) / f"{base_name[:24]}-{artifact_id}", resume, report,
         replace(profile, target_roles=(job.title,)), display_name,
-        page_target=max(1, min(int(page_target), 3)), job=job,
+        page_target=max(1, min(int(page_target), 3)), job=job, template=get_template(template),
     )
     additions = tuple(job.additional_skills) or job_skill_additions(resume, profile, job)
     analysis = tailoring_analysis(resume, profile, job)
@@ -205,13 +212,15 @@ def _write_resume_artifact(
     *,
     page_target: int,
     job: JobLead | None = None,
+    template: ResumeTemplate | None = None,
 ) -> dict[str, object]:
+    template = template or get_template(None)
     stem.parent.mkdir(parents=True, exist_ok=True)
     docx_path = stem.with_suffix(".docx")
     pdf_path = stem.with_suffix(".pdf")
     validation_key = sha256(str(stem).encode("utf-8")).hexdigest()[:12]
     validation_path = stem.parent / "_validation" / f"{validation_key}.json"
-    base_sections = _resume_sections(resume, report, profile, job=job)
+    base_sections = apply_template_order(_resume_sections(resume, report, profile, job=job), template)
     final_sections = base_sections
     density = 0
     pdf_strategy = "parallel_semantic_render"
@@ -220,19 +229,19 @@ def _write_resume_artifact(
         facts = validate_factual_consistency(resume, profile, final_sections, job)
         if not facts["passed"]:
             raise RuntimeError("Resume generation stopped because output-to-source validation failed: " + "; ".join(facts["blocking_issues"][:3]))
-        _write_docx(docx_path, final_sections, display_name, density=density)
+        _write_docx(docx_path, final_sections, display_name, density=density, template=template)
         if convert_docx_to_pdf(docx_path, pdf_path):
             pdf_strategy = "libreoffice_docx_render"
         else:
             pdf_strategy = "parallel_semantic_render"
-            write_pdf_resume(pdf_path, final_sections, display_name, density=density)
+            write_pdf_resume(pdf_path, final_sections, display_name, density=density, template=template)
         if 0 < pdf_page_count(pdf_path) <= page_target and not has_sparse_trailing_page(pdf_path):
             break
     expected_parts = [display_name]
     for heading, items in final_sections:
         if not items:
             continue
-        expected_parts.append(heading)
+        expected_parts.append(template.heading(heading))
         expected_parts.extend(
             item.removeprefix("ROLE::").removeprefix("META::").removeprefix("BULLET::")
             for item in items
@@ -254,6 +263,8 @@ def _write_resume_artifact(
         "pdf_path": str(pdf_path),
         "validation_path": str(validation_path),
         "validation": validation,
+        "template": template.key,
+        "template_name": template.name,
     }
 
 
@@ -470,28 +481,34 @@ def _limit_experience_bullets(items: list[str], per_role: int) -> list[str]:
     return limited
 
 
-def _write_docx(path: Path, sections: list[tuple[str, list[str]]], display_name: str, *, density: int = 0) -> None:
+def _write_docx(
+    path: Path, sections: list[tuple[str, list[str]]], display_name: str, *, density: int = 0, template: ResumeTemplate | None = None,
+) -> None:
     try:
         from docx import Document
     except ImportError as exc:
         raise RuntimeError("Install DOCX support with: pip install -e '.[docs]'") from exc
 
+    template = template or get_template(None)
     document = Document()
-    _configure_document(document, density=density)
+    _configure_document(document, density=density, template=template)
     title = document.add_paragraph()
     title.style = document.styles["ResumeName"]
     title.add_run(display_name)
+    if template.name_rule:
+        _add_bottom_border(title, color=template.accent, size=12)
     for heading, items in sections:
         if not items:
             continue
         if heading == "CONTACT":
             from docx.enum.text import WD_ALIGN_PARAGRAPH
-            paragraph = document.add_paragraph(items[0], style="ResumeBody")
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph = document.add_paragraph(_contact_text(items[0], template), style="ResumeBody")
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if template.header_align == "center" else WD_ALIGN_PARAGRAPH.LEFT
             paragraph.style = document.styles["ResumeContact"]
             continue
-        heading_paragraph = document.add_paragraph(heading, style="ResumeHeading")
-        _add_bottom_border(heading_paragraph)
+        heading_paragraph = document.add_paragraph(template.heading(heading), style="ResumeHeading")
+        if template.heading_rule:
+            _add_bottom_border(heading_paragraph, color=template.accent)
         item_index = 0
         while item_index < len(items):
             item = items[item_index]
@@ -537,43 +554,46 @@ def _write_docx(path: Path, sections: list[tuple[str, list[str]]], display_name:
     document.save(path)
 
 
-def _configure_document(document, *, density: int = 0) -> None:
+def _configure_document(document, *, density: int = 0, template: ResumeTemplate | None = None) -> None:
     from docx.enum.style import WD_STYLE_TYPE
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
     from docx.shared import Inches, Mm, Pt, RGBColor
 
+    template = template or get_template(None)
+    font = template.font
     section = document.sections[0]
     section.page_width = Mm(210)
     section.page_height = Mm(297)
     compact = min(max(density, 0), 3)
     section.top_margin = Inches(0.55 - compact * 0.03)
     section.bottom_margin = Inches(0.5 - compact * 0.025)
-    section.left_margin = Inches(0.65)
-    section.right_margin = Inches(0.65)
+    section.left_margin = Inches(template.margin_inches)
+    section.right_margin = Inches(template.margin_inches)
 
     styles = document.styles
     normal = styles["Normal"]
-    normal.font.name = "Arial"
-    normal._element.rPr.rFonts.set(qn("w:ascii"), "Arial")
-    normal._element.rPr.rFonts.set(qn("w:hAnsi"), "Arial")
-    normal.font.size = Pt(9.5 - compact * 0.2)
+    normal.font.name = font
+    normal._element.rPr.rFonts.set(qn("w:ascii"), font)
+    normal._element.rPr.rFonts.set(qn("w:hAnsi"), font)
+    normal.font.size = Pt(template.body_size - compact * 0.2)
     normal.paragraph_format.space_after = Pt(max(0.5, 2 - compact * 0.4))
     normal.paragraph_format.line_spacing = max(1.0, 1.05 - compact * 0.01)
 
+    body = template.body_size
     for name, font_size, bold, before, after, color in (
-        ("ResumeName", 20, True, 0, 2, "17365D"),
-        ("ResumeContact", 8.8, False, 0, 5, "44546A"),
-        ("ResumeHeading", 10.5, True, 7, 2, "17365D"),
-        ("ResumeRole", 9.8, True, 2, 0, "1F1F1F"),
-        ("ResumeMeta", 9, False, 0, 1.5, "595959"),
-        ("ResumeBody", 9.5, False, 0, 2.5, "1F1F1F"),
-        ("ResumeBullet", 9.3, False, 0, 1.2, "1F1F1F"),
+        ("ResumeName", template.name_size, True, 0, 2, template.accent),
+        ("ResumeContact", body - 0.7, False, 0, 5, template.muted),
+        ("ResumeHeading", template.heading_size, True, 7, 2, template.accent),
+        ("ResumeRole", body + 0.3, True, 2, 0, template.text),
+        ("ResumeMeta", body - 0.5, False, 0, 1.5, template.muted),
+        ("ResumeBody", body, False, 0, 2.5, template.text),
+        ("ResumeBullet", body - 0.2, False, 0, 1.2, template.text),
     ):
         style = styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
-        style.font.name = "Arial"
-        style._element.rPr.rFonts.set(qn("w:ascii"), "Arial")
-        style._element.rPr.rFonts.set(qn("w:hAnsi"), "Arial")
+        style.font.name = font
+        style._element.rPr.rFonts.set(qn("w:ascii"), font)
+        style._element.rPr.rFonts.set(qn("w:hAnsi"), font)
         style.font.size = Pt(font_size - compact * (0.3 if name != "ResumeName" else 0.45))
         style.font.bold = bold
         style.font.color.rgb = RGBColor.from_string(color)
@@ -584,10 +604,11 @@ def _configure_document(document, *, density: int = 0) -> None:
     styles["ResumeBullet"].base_style = styles["List Bullet"]
     styles["ResumeBullet"].paragraph_format.left_indent = Inches(0.18)
     styles["ResumeBullet"].paragraph_format.first_line_indent = Inches(-0.12)
-    styles["ResumeBullet"]._element.rPr.rFonts.set(qn("w:ascii"), "Arial")
-    styles["ResumeBullet"]._element.rPr.rFonts.set(qn("w:hAnsi"), "Arial")
-    styles["ResumeName"].paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    styles["ResumeContact"].paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    styles["ResumeBullet"]._element.rPr.rFonts.set(qn("w:ascii"), font)
+    styles["ResumeBullet"]._element.rPr.rFonts.set(qn("w:hAnsi"), font)
+    header_alignment = WD_ALIGN_PARAGRAPH.CENTER if template.header_align == "center" else WD_ALIGN_PARAGRAPH.LEFT
+    styles["ResumeName"].paragraph_format.alignment = header_alignment
+    styles["ResumeContact"].paragraph_format.alignment = header_alignment
     styles["ResumeRole"].paragraph_format.keep_with_next = True
     styles["ResumeHeading"].paragraph_format.keep_with_next = True
 
@@ -595,11 +616,15 @@ def _configure_document(document, *, density: int = 0) -> None:
     styles["ResumeMeta"].paragraph_format.tab_stops.add_tab_stop(usable_width, 2)
 
     document.core_properties.title = "ATS-Friendly Resume"
-    document.core_properties.subject = "Professional resume"
+    document.core_properties.subject = f"Professional resume ({template.name} template)"
 
 
-def _add_bottom_border(paragraph) -> None:
-    """Add the thin section rule used by the supplied Canva reference."""
+def _contact_text(value: str, template: ResumeTemplate) -> str:
+    return value.replace(" | ", template.contact_separator) if template.contact_separator != " | " else value
+
+
+def _add_bottom_border(paragraph, *, color: str = "4472C4", size: int = 5) -> None:
+    """Thin rule under a heading (or under the name in templates that use one)."""
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 
@@ -610,9 +635,9 @@ def _add_bottom_border(paragraph) -> None:
         paragraph_properties.append(borders)
     bottom = OxmlElement("w:bottom")
     bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), "5")
+    bottom.set(qn("w:sz"), str(size))
     bottom.set(qn("w:space"), "1")
-    bottom.set(qn("w:color"), "4472C4")
+    bottom.set(qn("w:color"), color)
     borders.append(bottom)
 
 
@@ -2336,8 +2361,17 @@ def _split_contact_blob(text: str) -> str:
     return re.sub(r"\s*\|\s*", " | ", separated)
 
 
+_CONTACT_HEADINGS = {
+    "personal details", "personal information", "personal profile", "personal data", "contact", "contact details",
+    "contact information", "declaration",
+}
+
+
 def _extract_source_location(text: str) -> str:
-    separated = _split_contact_blob(text)
+    from .guardrails import redact_protected
+
+    # Protected attributes (DOB, gender, religion...) never reach the generated resume.
+    separated = _split_contact_blob(redact_protected(text).text)
     explicit = re.search(r"(?im)^\s*(?:location|address|city)\s*[:\-]\s*([^|\n]{2,70})", separated)
     if explicit:
         return _clean_sentence(explicit.group(1))
@@ -2350,8 +2384,10 @@ def _extract_source_location(text: str) -> str:
     fallback = ""
     for raw in re.split(r"[|\n]", separated):
         candidate = _clean_sentence(raw).strip(" ,")
-        if not candidate or candidate.casefold() in known_labels | known_languages or candidate.casefold() == identity_name:
+        if not candidate or candidate.casefold() in known_labels | known_languages | _CONTACT_HEADINGS or candidate.casefold() == identity_name:
             continue
+        if re.match(r"^[A-Za-z' ]{2,30}\s*:", candidate):
+            continue  # "Label: value" lines are details, not a location
         candidate = re.sub(r"^\+?[\d\s().-]{8,}", "", candidate).strip(" ,")
         if not candidate or re.search(r"@|https?://|\d", candidate):
             continue

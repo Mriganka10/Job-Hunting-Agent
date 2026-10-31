@@ -294,15 +294,22 @@ def test_request_otp_fails_closed_when_production_email_is_not_configured(monkey
 def test_home_page_contains_resume_and_profile_inputs() -> None:
     client = authenticated_client(f"fresh-{uuid4().hex}@example.com")
 
-    response = client.get("/")
+    page = client.get("/")
+    script = client.get("/static/ui/dashboard.js")
 
-    assert response.status_code == 200
+    assert page.status_code == 200 and script.status_code == 200
+    assert '<script src="/static/ui/dashboard.js' in page.text
+    assert '<link rel="stylesheet" href="/static/ui/app.css' in page.text
+
+    class Combined:  # the page markup plus the dashboard logic it loads
+        text = page.text + script.text
+
+    response = Combined
     assert 'name="resume"' in response.text
     assert 'name="linkedin_profile_url"' in response.text
     assert 'name="naukri_profile_url"' in response.text
     assert 'name="experience_years"' in response.text
     assert "responsePayload(response)" in response.text
-    assert "/static/job-search-hero.png" in response.text
     assert "Schedule Daily Run" in response.text
     assert "scheduler-status" in response.text
     assert "activeResult" in response.text
@@ -372,6 +379,8 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
             "daily_at": "23:45",
             "daily_timezone": "Asia/Kolkata",
             "name": "Mock Candidate",
+            "phone": "+91 98765 43210",
+            "experience_years": "2",
             "target_roles": "Data Engineer, Machine Learning Engineer",
             "locations": "Bengaluru, Remote",
             "skills": "Python, SQL, Spark, AWS, Machine Learning",
@@ -393,7 +402,7 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert 'id="code-language"' in page.text
     assert "codeEditor.setRangeText('  ', start, end, 'end')" in page.text
     assert "item.answer_mode === 'code'" in page.text
-    assert "Your code is saved as written and is not executed." in page.text
+    assert "It runs only in your browser, never on our server." in page.text
     assert '<option value="plaintext">Other / Plain text</option>' in page.text
     assert "Preparation plan for your next interview" in page.text
     assert "Performance dimensions" in page.text
@@ -720,6 +729,8 @@ def test_profile_values_are_isolated_by_authenticated_email() -> None:
             "daily_at": "23:59",
             "daily_timezone": "Asia/Kolkata",
             "name": "Profile Owner",
+            "phone": "+91 98765 43210",
+            "experience_years": "2",
             "linkedin_profile_url": "https://www.linkedin.com/in/profile-owner/",
             "naukri_profile_url": "https://www.naukri.com/mnjuser/profile/profile-owner",
             "target_roles": "Data Engineer",
@@ -749,6 +760,8 @@ def test_profile_values_are_isolated_by_authenticated_email() -> None:
             "daily_at": "22:30",
             "daily_timezone": "Asia/Kolkata",
             "name": "Profile Owner",
+            "phone": "+91 98765 43210",
+            "experience_years": "2",
             "target_roles": "Data Engineer",
             "locations": "Mumbai, Remote",
             "skills": "Python, SQL",
@@ -844,7 +857,8 @@ def test_run_endpoint_rejects_unsupported_resume_format(tmp_path: Path) -> None:
 
     response = client.post(
         "/api/run",
-        data={"application_mode": "draft"},
+        data={"application_mode": "draft", "name": "Runner", "phone": "+91 98765 43210", "target_roles": "Python Developer",
+              "locations": "Remote", "skills": "Python", "experience_years": "1"},
         files={"resume": ("resume.exe", b"not a resume", "application/octet-stream")},
     )
 
@@ -863,6 +877,9 @@ def test_scheduler_start_endpoint_starts_without_immediate_run() -> None:
             "daily_at": "23:59",
             "daily_timezone": "Asia/Kolkata",
             "application_mode": "draft",
+            "name": "Scheduler User",
+            "phone": "+91 98765 43210",
+            "experience_years": "1",
             "target_roles": "Python Developer",
             "locations": "Remote",
             "skills": "Python, SQL",
@@ -929,3 +946,22 @@ def test_restore_active_schedule_keeps_last_result(monkeypatch) -> None:
     assert snapshot["history"][-1]["status"] == "completed"
 
     schedulers.stop(user_email)
+
+
+def test_run_and_schedule_require_every_mandatory_profile_field() -> None:
+    client = authenticated_client(f"required-{uuid4().hex}@example.com")
+    resume = {"resume": ("resume.txt", b"Python SQL", "text/plain")}
+    full = {"name": "Asha", "phone": "+91 98765 43210", "target_roles": "Data Analyst", "locations": "Pune",
+            "skills": "SQL, Python", "experience_years": "0.5", "application_mode": "draft", "daily_at": "23:50"}
+    for endpoint in ("/api/run", "/api/scheduler/start"):
+        missing = client.post(endpoint, data={**full, "phone": "", "skills": " "}, files=resume)
+        assert missing.status_code == 422
+        assert missing.json()["detail"] == "Please fill in the required fields: Phone, Skills."
+        no_experience = client.post(endpoint, data={k: v for k, v in full.items() if k != "experience_years"}, files=resume)
+        assert no_experience.status_code == 422 and "Experience (years)" in no_experience.json()["detail"]
+        bad_phone = client.post(endpoint, data={**full, "phone": "12ab"}, files=resume)
+        assert bad_phone.status_code == 422 and "valid phone number" in bad_phone.json()["detail"]
+    # LinkedIn, Naukri and the job description stay optional.
+    ok = client.post("/api/scheduler/start", data=full, files=resume)
+    assert ok.status_code == 200
+    assert client.post("/api/scheduler/stop").status_code == 200

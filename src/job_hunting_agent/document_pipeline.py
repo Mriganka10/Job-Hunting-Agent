@@ -17,10 +17,15 @@ def write_pdf_resume(
     display_name: str,
     *,
     density: int = 0,
+    template=None,
 ) -> None:
+    """PDF fallback used when LibreOffice is unavailable; follows the same template."""
+    from .resume_templates import get_template
+
+    template = template or get_template(None)
     try:
         from reportlab.lib import colors
-        from reportlab.lib.enums import TA_CENTER
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.units import inch
@@ -30,45 +35,51 @@ def write_pdf_resume(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     compact = min(max(density, 0), 3)
-    body_size = 9.3 - compact * 0.25
+    body_size = template.body_size - 0.2 - compact * 0.25
+    accent, text, muted = (colors.HexColor(f"#{value}") for value in (template.accent, template.text, template.muted))
+    regular, bold = template.pdf_font, template.pdf_bold_font
+    header_alignment = TA_CENTER if template.header_align == "center" else TA_LEFT
     styles = getSampleStyleSheet()
     name_style = ParagraphStyle(
-        "ResumeName", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=19 - compact * 0.5,
-        leading=21 - compact * 0.5, textColor=colors.HexColor("#17365D"), alignment=TA_CENTER, spaceAfter=3,
+        "ResumeName", parent=styles["Normal"], fontName=bold, fontSize=template.name_size - 1 - compact * 0.5,
+        leading=template.name_size + 1 - compact * 0.5, textColor=accent, alignment=header_alignment, spaceAfter=3,
     )
     contact_style = ParagraphStyle(
-        "ResumeContact", parent=styles["Normal"], fontName="Helvetica", fontSize=8.5,
-        leading=10, textColor=colors.HexColor("#44546A"), alignment=TA_CENTER, spaceAfter=max(2, 5 - compact),
+        "ResumeContact", parent=styles["Normal"], fontName=regular, fontSize=body_size - 0.8,
+        leading=body_size + 0.7, textColor=muted, alignment=header_alignment, spaceAfter=max(2, 5 - compact),
     )
     heading_style = ParagraphStyle(
-        "ResumeHeading", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=10.3,
-        leading=11.5, textColor=colors.HexColor("#17365D"), spaceBefore=max(3, 7 - compact), spaceAfter=1,
+        "ResumeHeading", parent=styles["Normal"], fontName=bold, fontSize=template.heading_size - 0.2,
+        leading=template.heading_size + 1, textColor=accent, spaceBefore=max(3, 7 - compact), spaceAfter=1,
     )
     body_style = ParagraphStyle(
-        "ResumeBody", parent=styles["Normal"], fontName="Helvetica", fontSize=body_size,
-        leading=body_size + 1.2, textColor=colors.HexColor("#1F1F1F"), spaceAfter=max(0.5, 2 - compact * 0.4),
+        "ResumeBody", parent=styles["Normal"], fontName=regular, fontSize=body_size,
+        leading=body_size + 1.2, textColor=text, spaceAfter=max(0.5, 2 - compact * 0.4),
     )
     bullet_style = ParagraphStyle(
         "ResumeBullet", parent=body_style, leftIndent=13, firstLineIndent=-8, bulletIndent=4,
         spaceAfter=max(0.3, 1.2 - compact * 0.3),
     )
-    role_style = ParagraphStyle("ResumeRole", parent=body_style, fontName="Helvetica-Bold", spaceAfter=0)
-    meta_style = ParagraphStyle("ResumeMeta", parent=body_style, fontSize=body_size - 0.3, textColor=colors.HexColor("#595959"), spaceAfter=0.5)
+    role_style = ParagraphStyle("ResumeRole", parent=body_style, fontName=bold, spaceAfter=0)
+    meta_style = ParagraphStyle("ResumeMeta", parent=body_style, fontSize=body_size - 0.3, textColor=muted, spaceAfter=0.5)
 
     document = SimpleDocTemplate(
-        str(path), pagesize=A4, leftMargin=0.65 * inch, rightMargin=0.65 * inch,
+        str(path), pagesize=A4, leftMargin=template.margin_inches * inch, rightMargin=template.margin_inches * inch,
         topMargin=0.48 * inch, bottomMargin=0.45 * inch,
         title="ATS-Friendly Resume", author="",
     )
     story = [Paragraph(_escape(display_name), name_style)]
+    if template.name_rule:
+        story.append(HRFlowable(width="100%", thickness=1.4, color=accent, spaceAfter=3))
     for heading, items in sections:
         if not items:
             continue
         if heading == "CONTACT":
-            story.append(Paragraph(_escape(items[0]), contact_style))
+            story.append(Paragraph(_escape(items[0].replace(" | ", template.contact_separator)), contact_style))
             continue
-        story.append(Paragraph(_escape(heading), heading_style))
-        story.append(HRFlowable(width="100%", thickness=0.55, color=colors.HexColor("#4472C4"), spaceAfter=2))
+        story.append(Paragraph(_escape(template.heading(heading)), heading_style))
+        if template.heading_rule:
+            story.append(HRFlowable(width="100%", thickness=0.55, color=accent, spaceAfter=2))
         for item in items:
             if item.startswith("ROLE::"):
                 story.append(Paragraph(_escape(item.removeprefix("ROLE::")), role_style))
@@ -79,6 +90,11 @@ def write_pdf_resume(
             else:
                 story.append(Paragraph(_styled_resume_text(heading, item.removeprefix("BULLET::")), bullet_style, bulletText="•"))
         story.append(Spacer(1, max(0, 1.5 - compact * 0.4)))
+    # ReportLab's built-in serif needs its own bold/italic mapping for <b> runs.
+    if regular.startswith("Times"):
+        from reportlab.lib.fonts import addMapping
+
+        addMapping("Times-Roman", 1, 0, "Times-Bold")
     document.build(story)
     _remove_blank_trailing_pages(path)
 

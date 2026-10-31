@@ -33,7 +33,8 @@ def test_mock_test_options_return_whole_roles_and_skills():
     saved = client.post(
         "/api/scheduler/start",
         data={"daily_at": "23:45", "daily_timezone": "Asia/Kolkata", "target_roles": "AI Developer, ML Engineer",
-              "locations": "Kolkata", "skills": "C++, Python, SQL", "application_mode": "draft"},
+              "locations": "Kolkata", "skills": "C++, Python, SQL", "application_mode": "draft",
+              "name": "Dash User", "phone": "+91 98765 43210", "experience_years": "0"},
         files={"resume": ("resume.txt", b"Python SQL machine learning", "text/plain")},
     )
     assert saved.status_code == 200
@@ -76,7 +77,8 @@ def test_run_endpoint_rejects_a_wrong_profile_link():
     client = authenticated_client(f"link-{uuid4().hex}@example.com")
     response = client.post(
         "/api/run",
-        data={"target_roles": "Data Analyst", "linkedin_profile_url": "https://example.com/me", "application_mode": "draft"},
+        data={"target_roles": "Data Analyst", "linkedin_profile_url": "https://example.com/me", "application_mode": "draft",
+              "name": "Link User", "phone": "+91 98765 43210", "locations": "Pune", "skills": "SQL", "experience_years": "1"},
         files={"resume": ("resume.txt", b"SQL Python", "text/plain")},
     )
     assert response.status_code == 400 and "linkedin.com" in response.json()["detail"]

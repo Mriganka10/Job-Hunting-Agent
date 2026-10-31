@@ -68,6 +68,25 @@ def mirror_artifacts(data_dir: str | Path, user_email: str, generated_at: str) -
     return uris
 
 
+def delete_prefix(key_prefix: str) -> int:
+    """Delete every S3 object under a prefix (used for user data deletion)."""
+    bucket = bucket_name()
+    if not bucket:
+        return 0
+    prefix = _clean_prefix(key_prefix) + "/"
+    client = _client()
+    deleted = 0
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        keys = [{"Key": item["Key"]} for item in page.get("Contents", [])]
+        for start in range(0, len(keys), 1000):
+            batch = keys[start:start + 1000]
+            if batch:
+                client.delete_objects(Bucket=bucket, Delete={"Objects": batch, "Quiet": True})
+                deleted += len(batch)
+    return deleted
+
+
 def _client():
     import boto3
 

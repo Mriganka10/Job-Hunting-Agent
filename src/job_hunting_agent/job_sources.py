@@ -217,6 +217,7 @@ class HimalayasAdapter:
                         source_metadata={
                             "api": self.endpoint, "source_attribution": "Himalayas",
                             "seniority": record.get("seniority") or [],
+                            **({"experience_filtered": True} if seniority else {}),
                             "location_restrictions": restrictions,
                         },
                     ))

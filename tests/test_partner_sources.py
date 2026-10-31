@@ -14,6 +14,7 @@ from job_hunting_agent.partner_sources import (
     CareerjetAdapter,
     JobicyAdapter,
     JoobleAdapter,
+    JSearchAdapter,
     RemoteOKAdapter,
     RequestContext,
     _post_cache,
@@ -59,10 +60,10 @@ def test_keyed_sources_are_silent_without_keys(monkeypatch):
     calls = []
     monkeypatch.setattr(http_client, "get", lambda *a, **k: calls.append(a) or Response({}))
     monkeypatch.setattr(http_client, "post", lambda *a, **k: calls.append(a) or Response({}))
-    for adapter in (AdzunaAdapter(), CareerjetAdapter(), JoobleAdapter()):
+    for adapter in (AdzunaAdapter(), CareerjetAdapter(), JoobleAdapter(), JSearchAdapter()):
         assert adapter.search(INTENT, CONFIG, CandidateProfile()) == []
     assert calls == []
-    assert partner_status() == {"jobicy": True, "remoteok": True, "adzuna": False, "careerjet": False, "jooble": False}
+    assert partner_status() == {"jobicy": True, "remoteok": True, "adzuna": False, "careerjet": False, "jooble": False, "jsearch": False}
 
 
 def test_adzuna_maps_india_results(monkeypatch):

@@ -12,7 +12,7 @@ from .models import CandidateProfile
 # careerjet, jooble) are skipped automatically when no key is configured.
 DEFAULT_PORTALS: tuple[str, ...] = (
     "himalayas", "remotive", "arbeitnow", "linkedin", "naukri",
-    "jobicy", "remoteok", "adzuna", "careerjet", "jooble",
+    "jobicy", "remoteok", "adzuna", "careerjet", "jooble", "jsearch",
 )
 
 

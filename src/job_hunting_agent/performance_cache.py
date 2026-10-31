@@ -12,7 +12,7 @@ from .models import AtsReport, CandidateProfile, JobLead, Resume
 
 
 ATS_CACHE_VERSION = "ats-role-calibration-v6"
-RESUME_BUILDER_VERSION = "semantic-render-v7"
+RESUME_BUILDER_VERSION = "semantic-render-v8-templates"
 _lock = threading.RLock()
 
 
@@ -63,12 +63,14 @@ def tailored_artifact_id(job: JobLead) -> str:
     return sha256(job.stable_id.encode("utf-8")).hexdigest()[:16]
 
 
-def document_cache_key(resume_hash: str, profile: CandidateProfile, page_target: int, job: JobLead | None = None) -> str:
+def document_cache_key(
+    resume_hash: str, profile: CandidateProfile, page_target: int, job: JobLead | None = None, template: str = "professional",
+) -> str:
     job_input = None if job is None else {
         "id": job.stable_id, "title": job.title, "company": job.company,
         "description_hash": sha256(job.description.encode("utf-8")).hexdigest(),
     }
-    return content_hash(RESUME_BUILDER_VERSION, resume_hash, asdict(profile), page_target, job_input)
+    return content_hash(RESUME_BUILDER_VERSION, resume_hash, asdict(profile), page_target, job_input, template)
 
 
 def cached_document(

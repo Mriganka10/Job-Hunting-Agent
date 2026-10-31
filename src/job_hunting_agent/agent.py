@@ -14,6 +14,7 @@ from .config import AppConfig
 from .models import ApplicationResult, AtsReport, JobLead, Resume
 from .job_validation import deduplicate_job_leads, validate_job_leads
 from .portals import build_search_intent, get_adapters, rank_job_leads
+from .resume_templates import recommend_template
 from .reports import write_ats_report, write_run_summary
 from .resume import parse_resume
 from .resume_builder import ADDITION_STATUS_MESSAGES, job_skill_additions_report, write_improved_resume
@@ -35,6 +36,8 @@ class JobHuntingAgent:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.timings: dict[str, object] = {}
+        # Per-source yield, latency and outcome for production metrics.
+        self._source_stats: dict[str, dict[str, object]] = {}
 
     def score(self, resume_path: str) -> tuple[Resume, AtsReport]:
         fingerprint = resume_fingerprint(resume_path)
@@ -52,6 +55,7 @@ class JobHuntingAgent:
     def search(self, resume_path: str) -> tuple[Resume, AtsReport, list[JobLead]]:
         started = time.monotonic()
         self.timings = {}
+        self._source_stats = {}
         # ATS scoring (which may call an LLM) runs alongside the portal search
         # instead of delaying it; the search only needs the parsed resume.
         score_future = SCORING_EXECUTOR.submit(self.score, resume_path)
@@ -72,6 +76,12 @@ class JobHuntingAgent:
             for future in futures:  # submission order keeps portal registry order
                 if future in done:
                     jobs.extend(future.result())
+            for adapter in adapters:
+                name = getattr(adapter, "name", "portal")
+                stats = self._source_stats.setdefault(name, {"leads": 0, "seconds": None, "status": "timeout"})
+                if name in {futures[future] for future in pending}:
+                    stats["status"] = "timeout"
+            self.timings["sources"] = self._source_stats  # type: ignore[assignment]
             if pending:
                 self.timings["skipped_portals"] = sorted(futures[future] for future in pending)  # type: ignore[assignment]
                 logger.warning("Job search budget reached; skipped slow portals: %s", ", ".join(futures[future] for future in pending))
@@ -118,13 +128,25 @@ class JobHuntingAgent:
 
     def _search_adapter(self, adapter, intent) -> list[JobLead]:
         started = time.monotonic()
+        name = getattr(adapter, "name", "portal")
+        stats: dict[str, object] = {"leads": 0, "seconds": None, "status": "running"}
+        self._source_stats[name] = stats
+        enabled = getattr(adapter, "enabled", None)
+        if callable(enabled) and not enabled():
+            stats.update(status="disabled", seconds=0.0)
+            return []
         try:
-            return adapter.search(intent, self.config.search, self.config.profile)
+            leads = adapter.search(intent, self.config.search, self.config.profile)
+            failures = int(getattr(adapter, "_failures", 0) or 0)
+            stats.update(leads=len(leads), status="ok" if leads else ("failed" if failures else "empty"))
+            return leads
         except Exception:
-            logger.exception("Portal adapter %s failed", getattr(adapter, "name", adapter))
+            logger.exception("Portal adapter %s failed", name)
+            stats["status"] = "failed"
             return []
         finally:
-            logger.info("Portal %s finished in %.1fs", getattr(adapter, "name", adapter), time.monotonic() - started)
+            stats["seconds"] = round(time.monotonic() - started, 2)
+            logger.info("Portal %s finished in %.1fs", name, time.monotonic() - started)
 
     def run(
         self, resume_path: str, *, build_documents: bool = True
@@ -132,11 +154,13 @@ class JobHuntingAgent:
         run_started = time.monotonic()
         resume, report, jobs = self.search(resume_path)
         jobs = [self._with_additions(job, resume) if self.config.application.tailor_each_job else job for job in jobs]
+        # The agent picks the ATS template that suits the candidate; the user can switch later.
+        template, template_reason = recommend_template(self.config.profile.experience_years, report.role_profile)
         if build_documents:
             tailored_jobs = jobs if self.config.application.tailor_each_job else []
             improved_resume = write_improved_resume(
                 resume, report, self.config.profile, self.config.application.data_dir, tailored_jobs,
-                page_target=self.config.application.resume_page_target,
+                page_target=self.config.application.resume_page_target, template=template,
             )
             generated_ids = {
                 str(item.get("job_id")): str(item.get("artifact_id"))
@@ -151,6 +175,7 @@ class JobHuntingAgent:
                 "_resume_snapshot": asdict(resume),
                 "_resume_hash": resume_fingerprint(resume_path),
             }
+        improved_resume.update({"template": template, "recommended_template": template, "template_reason": template_reason})
         results = apply_to_jobs(jobs, resume, report, self.config)
         write_run_summary(resume, report, jobs, results, self.config.application.data_dir)
         self.timings = {**getattr(self, "timings", {}), "total": round(time.monotonic() - run_started, 2)}
