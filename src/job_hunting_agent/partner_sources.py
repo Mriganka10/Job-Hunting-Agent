@@ -435,7 +435,12 @@ class JobicyAdapter(_PartnerAdapter):
                 workplace_mode="remote",
                 employment_type=normalize_employment_type(str(job_types[0] if isinstance(job_types, list) and job_types else job_types or "unknown")),
                 source_validated=True,
-                source_metadata=self._metadata(api="jobicy", job_geo=geo, job_level=level, freshness_requested_days=config.freshness_days),
+                source_metadata=self._metadata(
+                    api="jobicy", job_geo=geo, job_level=level, freshness_requested_days=config.freshness_days,
+                    # Jobicy's level (Junior, Midweight, Senior, Lead) is the board's
+                    # own experience evidence; "Any" says nothing, so it is left out.
+                    **({"seniority": [str(level)]} if str(level).strip().casefold() not in {"", "any"} else {}),
+                ),
             ))
         return leads
 
@@ -443,6 +448,10 @@ class JobicyAdapter(_PartnerAdapter):
 # ---------------------------------------------------------------------------
 # Remote OK - https://remoteok.com/api (attribution required)
 # ---------------------------------------------------------------------------
+# Remote OK puts the level in its tags; these are read as the board's seniority.
+REMOTEOK_LEVEL_TAGS = {"junior", "entry", "entry level", "entry-level", "intern", "internship", "mid", "mid-level", "senior", "lead", "exec", "executive"}
+
+
 class RemoteOKAdapter(_PartnerAdapter):
     name = "remoteok"
     attribution = "Remote OK"
@@ -488,7 +497,10 @@ class RemoteOKAdapter(_PartnerAdapter):
                 salary_currency="USD" if salary_min or salary_max else "",
                 workplace_mode="remote",
                 source_validated=True,
-                source_metadata=self._metadata(api="remoteok", tags=tags[:20], freshness_requested_days=config.freshness_days),
+                source_metadata=self._metadata(
+                    api="remoteok", tags=tags[:20], freshness_requested_days=config.freshness_days,
+                    **({"seniority": levels} if (levels := [tag for tag in tags if tag.casefold() in REMOTEOK_LEVEL_TAGS]) else {}),
+                ),
             ))
         return leads
 

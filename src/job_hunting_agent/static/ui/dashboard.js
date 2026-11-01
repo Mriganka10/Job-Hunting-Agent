@@ -406,7 +406,8 @@
       return [job.title, job.company, job.location, ...(job.match_reasons || []), ...(job.source_metadata?.matched_skills || [])]
         .join(' ').toLowerCase().includes(text);
     });
-    if (filters.sort === 'match') list.sort((a, b) => (b.job.match_score || 0) - (a.job.match_score || 0) || a.rank - b.rank);
+    // The agent's order is best match first, with sources mixed when matches are close.
+    if (filters.sort === 'match') list.sort((a, b) => a.rank - b.rank);
     if (filters.sort === 'newest') list.sort((a, b) => String(b.job.posted_at || '').localeCompare(String(a.job.posted_at || '')));
     if (filters.sort === 'company') list.sort((a, b) => String(a.job.company || '').localeCompare(String(b.job.company || '')));
     return list;
@@ -515,6 +516,7 @@
     if (!payload) {
       host.innerHTML = `<div class="empty"><strong>No job leads yet</strong><p class="muted">Run the agent with your resume and target roles to see matched postings here.</p><a class="btn btn-primary" href="#run">Start a run</a></div>`;
       $('jobs-count').textContent = '';
+      $('source-mix').innerHTML = '';
       $('jobs-more').innerHTML = '';
       $('portal-links').innerHTML = portalLinksHtml();
       return;
@@ -525,6 +527,7 @@
     portalSelect.value = portals.includes(selected) ? selected : '';
     filters.portal = portalSelect.value;
 
+    $('source-mix').innerHTML = sourceMixHtml(payload);
     const jobPage = payload.job_page || { total: payload.jobs.length, has_more: false, next_cursor: '' };
     const totalJobs = payload.job_count ?? jobPage.total ?? payload.jobs.length;
     const list = filteredJobs();
@@ -544,6 +547,29 @@
       : '';
     $('portal-links').innerHTML = portalLinksHtml();
     document.querySelectorAll('#layout-toggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.layout === filters.layout)));
+  }
+
+  const KEYED_SOURCES = ['adzuna', 'careerjet', 'jooble', 'jsearch'];
+  const SOURCE_STATUS = { empty: 'No postings for your roles', failed: 'Did not answer this time', timeout: 'Too slow; skipped this run' };
+  function sourceMixHtml(payload) {
+    const sources = payload?.timings?.sources;
+    if (!sources || typeof sources !== 'object') return '';
+    const active = Object.entries(sources).filter(([, info]) => info && info.status !== 'disabled');
+    const offline = Object.entries(sources).filter(([name, info]) => info && info.status === 'disabled' && KEYED_SOURCES.includes(name)).map(([name]) => portalName(name));
+    if (!active.length && !offline.length) return '';
+    active.sort((a, b) => (b[1].shown || 0) - (a[1].shown || 0) || (b[1].leads || 0) - (a[1].leads || 0));
+    const rows = active.map(([name, info]) => {
+      const found = Number(info.leads) || 0;
+      const shown = Number(info.shown) || 0;
+      const detail = info.status === 'ok'
+        ? (shown ? `${shown} shown of ${found} found` : `${found} found, none fit your experience, role or location`)
+        : (SOURCE_STATUS[info.status] || 'No postings for your roles');
+      return `<li><strong>${escapeHtml(portalName(name))}</strong><span class="muted">${escapeHtml(detail)}</span></li>`;
+    }).join('');
+    const note = offline.length
+      ? `<p class="muted source-note">Not connected: ${escapeHtml(offline.join(', '))}. These search Indian job boards beyond LinkedIn and Naukri; connecting them needs an API key from each provider.</p>`
+      : '';
+    return `<details class="panel source-mix"><summary>Where these leads came from</summary><ul class="source-list">${rows}</ul>${note}</details>`;
   }
 
   function portalLinksHtml() {

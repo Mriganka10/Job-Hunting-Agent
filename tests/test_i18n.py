@@ -1,4 +1,4 @@
-"""Interface languages (English, Hindi, Arabic) and their language packs."""
+"""Interface languages (English, Arabic) and the language pack."""
 import json
 import re
 from pathlib import Path
@@ -26,27 +26,26 @@ def _client(email: str, lang: str | None = None) -> TestClient:
     return client
 
 
-def test_hindi_and_arabic_packs_cover_the_same_text():
-    hindi, arabic = _pack("hi"), _pack("ar")
-    assert hindi["strings"].keys() == arabic["strings"].keys()
-    assert len(hindi["strings"]) > 600
-    assert [source for source, _ in hindi["patterns"]] == [source for source, _ in arabic["patterns"]]
-    assert hindi["html"].keys() == arabic["html"].keys() == {"consent", "required-note"}
-    for source, _ in hindi["patterns"]:
+def test_arabic_pack_is_complete_and_hindi_is_not_published():
+    arabic = _pack("ar")
+    assert len(arabic["strings"]) > 600
+    assert arabic["html"].keys() == {"consent", "required-note"}
+    for source, _ in arabic["patterns"]:
         re.compile(source)
-    # Every translation is really in the target script.
-    assert all(re.search(r"[ऀ-ॿ]", value) for value in hindi["strings"].values())
+    # Every translation is really in Arabic script.
     assert all(re.search(r"[؀-ۿ]", value) for value in arabic["strings"].values())
+    assert not (PACKS / "hi.js").exists()
 
 
-def test_language_packs_match_the_generator():
+def test_language_pack_matches_the_generator():
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("i18n_strings", Path(__file__).resolve().parents[1] / "scripts" / "i18n_strings.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     rows = module.parse_rows()
-    assert rows.keys() == _pack("hi")["strings"].keys(), "Run python scripts/i18n_strings.py after editing translations."
+    assert rows.keys() == _pack("ar")["strings"].keys(), "Run python scripts/i18n_strings.py after editing translations."
+    assert module.ENABLED_PACKS == ("ar",)
 
 
 def test_documents_get_language_direction_and_translator():
@@ -56,23 +55,30 @@ def test_documents_get_language_direction_and_translator():
     assert "/static/ui/i18n/ar.js" in arabic and "/static/ui/i18n.js" in arabic
     english = localize_document(html, "fr")  # unknown languages fall back to English
     assert '<html lang="en" dir="ltr"' in english and "/static/ui/i18n/" not in english and "/static/ui/i18n.js" in english
-    assert normalize_lang("HI") == "hi" and normalize_lang(None) == "en"
+    assert normalize_lang("AR") == "ar" and normalize_lang(None) == "en"
+    # Hindi is switched off: an old "hi" choice falls back to English.
+    assert normalize_lang("hi") == "en"
+    hindi = localize_document(html, "hi")
+    assert '<html lang="en" dir="ltr"' in hindi and "/static/ui/i18n/hi.js" not in hindi
 
 
 def test_every_page_follows_the_language_cookie():
-    client = _client(f"lang-{uuid4().hex}@example.com", "hi")
+    client = _client(f"lang-{uuid4().hex}@example.com", "ar")
     for path in ("/", "/progress", "/privacy", "/mock-test", "/mock-interview"):
         page = client.get(path)
         assert page.status_code == 200
-        assert '<html lang="hi" dir="ltr"' in page.text, path
-        assert "/static/ui/i18n/hi.js" in page.text and "data-lang-picker" in page.text, path
-        assert page.headers["content-language"] == "hi"
+        assert '<html lang="ar" dir="rtl"' in page.text, path
+        assert "/static/ui/i18n/ar.js" in page.text and "data-lang-picker" in page.text, path
+        assert page.headers["content-language"] == "ar"
+        assert 'value="hi"' not in page.text  # the picker offers English and Arabic only
     anonymous = TestClient(app)
     anonymous.cookies.set("jha_lang", "ar")
     for path in ("/login", "/register"):
         page = anonymous.get(path)
         assert '<html lang="ar" dir="rtl"' in page.text and "data-lang-picker" in page.text
     assert TestClient(app).get("/static/ui/i18n/ar.js").status_code == 200
+    old_choice = _client(f"lang-hi-{uuid4().hex}@example.com", "hi").get("/")
+    assert '<html lang="en" dir="ltr"' in old_choice.text and old_choice.headers["content-language"] == "en"
 
 
 def test_required_fields_are_marked_and_optional_ones_are_not():

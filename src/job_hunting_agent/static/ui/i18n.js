@@ -1,5 +1,5 @@
 /*
- * Interface translation (English, Hindi, Arabic).
+ * Interface translation (English, Arabic).
  *
  * The pages are written in English. For another language the server sets
  * <html lang dir> and loads /static/ui/i18n/<lang>.js (window.JHA_I18N)
@@ -16,8 +16,8 @@
 (function () {
   'use strict';
   const root = document.documentElement;
-  const LANGS = ['en', 'hi', 'ar'];
-  const LOCALES = { en: 'en-IN', hi: 'hi-IN', ar: 'ar-u-nu-latn' };
+  const LANGS = ['en', 'ar'];
+  const LOCALES = { en: 'en-IN', ar: 'ar-u-nu-latn' };
   const lang = LANGS.includes(root.lang) ? root.lang : 'en';
 
   function setLanguage(next) {

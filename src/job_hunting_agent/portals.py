@@ -833,8 +833,9 @@ _PORTAL_LEVELS = (
     (re.compile(r"seniority level\s*:?\s*director", re.I), 8.0),
     (re.compile(r"seniority level\s*:?\s*executive", re.I), 10.0),
 )
-_BOARD_LEVELS = {"entry-level": 0.0, "entry level": 0.0, "junior": 0.0, "intern": 0.0, "internship": 0.0,
-                 "mid-level": 2.0, "mid level": 2.0, "senior": 4.0, "lead": 6.0, "manager": 5.0, "director": 8.0, "executive": 10.0}
+_BOARD_LEVELS = {"entry-level": 0.0, "entry level": 0.0, "entry": 0.0, "junior": 0.0, "intern": 0.0, "internship": 0.0,
+                 "mid-level": 2.0, "mid level": 2.0, "midweight": 2.0, "middle": 2.0, "mid": 2.0,
+                 "senior": 4.0, "lead": 6.0, "manager": 5.0, "director": 8.0, "executive": 10.0, "exec": 10.0}
 
 
 def _number(value: str) -> float:
