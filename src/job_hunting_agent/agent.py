@@ -32,6 +32,35 @@ SEARCH_BUDGET_SECONDS = max(10.0, float(os.getenv("JOB_AGENT_SEARCH_BUDGET_SECON
 logger = logging.getLogger(__name__)
 
 
+# Leads from different sources within this many match points count as equally
+# good, so the list alternates sources instead of showing one board's run.
+SOURCE_MIX_MARGIN = 8
+
+
+def diversify_sources(jobs: list[JobLead], margin: int = SOURCE_MIX_MARGIN) -> list[JobLead]:
+    """Reorder ranked leads so one source does not crowd out the others.
+
+    The best lead always comes first. After that, when the next lead is from
+    the same source as the previous one and another source has a lead within
+    ``margin`` match points of it, that lead goes first. A clearly better
+    lead is never pushed below a clearly worse one.
+    """
+    remaining = list(jobs)
+    ordered: list[JobLead] = []
+    while remaining:
+        pick = 0
+        if ordered and remaining[0].portal == ordered[-1].portal:
+            floor = (remaining[0].match_score or 0) - margin
+            for index, job in enumerate(remaining[1:], start=1):
+                if (job.match_score or 0) < floor:
+                    break
+                if job.portal != ordered[-1].portal:
+                    pick = index
+                    break
+        ordered.append(remaining.pop(pick))
+    return ordered
+
+
 class JobHuntingAgent:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -100,7 +129,18 @@ class JobHuntingAgent:
                 continue
             counts[job.portal] = counts.get(job.portal, 0) + 1
             limited.append(job)
+        limited = diversify_sources(limited)
+        self._record_source_yield(jobs, ranked, limited)
         return resume, report, limited
+
+    def _record_source_yield(self, valid: list[JobLead], matched: list[JobLead], shown: list[JobLead]) -> None:
+        """Per source: valid (live, de-duplicated) leads, leads that passed the fit checks, and leads shown."""
+        for label, leads in (("valid", valid), ("matched", matched), ("shown", shown)):
+            tally: dict[str, int] = {}
+            for job in leads:
+                tally[job.portal] = tally.get(job.portal, 0) + 1
+            for name, stats in self._source_stats.items():
+                stats[label] = tally.get(name, 0)
 
     def _with_additions(self, job: JobLead, resume: Resume) -> JobLead:
         """Attach the job's Additional Skills plus why the list is what it is."""

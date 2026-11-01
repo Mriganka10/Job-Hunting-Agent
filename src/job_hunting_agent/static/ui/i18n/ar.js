@@ -618,6 +618,71 @@ window.JHA_I18N = {
   "You have under 2 years of experience, so education, skills and projects lead the page.": "خبرتك أقل من سنتين، لذا يتصدر التعليم والمهارات والمشاريع الصفحة.",
   "With 8+ years of experience, a senior layout puts leadership and achievements first.": "مع خبرة 8+ سنوات، يضع التخطيط القيادي القيادة والإنجازات أولًا.",
   "A classic layout is the safest choice for this role and parses in every ATS.": "التخطيط الكلاسيكي هو الخيار الأكثر أمانًا لهذا الدور ويُقرأ في كل أنظمة ATS.",
+  "Recommendation from Kairoz": "توصية من Kairoz",
+  "Based on your mock tests, mock interviews, the ATS check of your resume, the skills for your target roles and your job leads.": "بناءً على اختباراتك ومقابلاتك التجريبية وفحص ATS لسيرتك ومهارات أدوارك المستهدفة وفرص العمل.",
+  "Gaps": "الفجوات",
+  "Next steps": "الخطوات التالية",
+  "Priority": "الأولوية",
+  "Area": "المجال",
+  "Gap": "الفجوة",
+  "What we saw": "ما لاحظناه",
+  "Medium": "متوسطة",
+  "Why:": "السبب:",
+  "Skills for target roles": "مهارات الأدوار المستهدفة",
+  "No gaps found. Your resume, job leads and practice scores look strong.": "لم تُعثر على فجوات. تبدو سيرتك وفرص عملك ونتائج تدريبك قوية.",
+  "Recommendations are not available right now.": "التوصيات غير متاحة الآن.",
+  "No gaps found in your latest resume check, job leads or practice.": "لم تُعثر على فجوات في آخر فحص لسيرتك أو فرص عملك أو تدريبك.",
+  "Your resume has not been checked yet": "لم تُفحص سيرتك الذاتية بعد",
+  "ATS score is below the 80 most screening systems pass comfortably": "درجة ATS أقل من 80 التي تجتازها معظم أنظمة الفرز بسهولة",
+  "Keywords for your target roles are missing from your resume": "الكلمات المفتاحية لأدوارك المستهدفة غير موجودة في سيرتك",
+  "Your resume may be filtered out by the job description's screening rules": "قد تستبعد قواعد الفرز في الوصف الوظيفي سيرتك",
+  "Parts of your resume are hard for an ATS to read": "يصعب على ATS قراءة أجزاء من سيرتك",
+  "None of your job leads is a strong match yet": "لا توجد فرصة عمل مطابقة بقوة بعد",
+  "Most leads do not state the experience they need": "معظم الفرص لا تذكر الخبرة المطلوبة",
+  "No mock test taken yet": "لم تُجرِ أي اختبار تجريبي بعد",
+  "Weak topics in your mock tests": "مواضيع ضعيفة في اختباراتك التجريبية",
+  "Hard questions are a weak spot": "الأسئلة الصعبة نقطة ضعف",
+  "Code-reading questions need work": "أسئلة قراءة الرمز تحتاج إلى تحسين",
+  "Mock test scores are below the level for applying": "درجات الاختبار التجريبي أقل من مستوى التقديم",
+  "No mock interview completed yet": "لم تُكمل أي مقابلة تجريبية بعد",
+  "Some question types score low": "بعض أنواع الأسئلة تحصل على درجات منخفضة",
+  "Coding answers in interviews need work": "إجابات البرمجة في المقابلات تحتاج إلى تحسين",
+  "Upload your resume and run the agent to get your ATS score and job leads.": "ارفع سيرتك وشغّل الوكيل للحصول على درجة ATS وفرص العمل.",
+  "Follow the resume improvements, then run the agent again.": "طبّق تحسينات السيرة، ثم شغّل الوكيل مجددًا.",
+  "Add the missing keywords you genuinely have to your skills and experience bullets; never add ones you cannot show.": "أضف الكلمات المفتاحية الناقصة التي تملكها فعلًا إلى المهارات ونقاط الخبرة؛ ولا تضف أبدًا ما لا يمكنك إثباته.",
+  "Close the listed screening risks in your resume, or target roles whose requirements you meet.": "عالج مخاطر الفرز المذكورة في سيرتك، أو استهدف أدوارًا تستوفي متطلباتها.",
+  "Download your resume in an ATS template from Resume & ATS and use that file to apply.": "نزّل سيرتك بقالب ATS من قسم السيرة الذاتية وATS واستخدم ذلك الملف للتقديم.",
+  "Broaden your target roles or locations (or add Remote), then run the agent again.": "وسّع الأدوار أو المواقع المستهدفة (أو أضف العمل عن بُعد)، ثم شغّل الوكيل مجددًا.",
+  "Add the skills you already have to your profile and paste a target job description, then run again.": "أضف المهارات التي تملكها إلى ملفك والصق وصفًا وظيفيًا مستهدفًا، ثم شغّل مجددًا.",
+  "Open those postings and confirm the experience level before applying.": "افتح تلك الإعلانات وتأكد من مستوى الخبرة قبل التقديم.",
+  "Take a Quick mock test on your top job lead to find your weak topics.": "خذ اختبارًا تجريبيًا سريعًا على أفضل فرصة عمل لديك لتعرف مواضيعك الضعيفة.",
+  "Practise multi-step and code-reading problems under time; choose 'Mostly hard' once a week.": "تدرّب على المسائل متعددة الخطوات وقراءة الرمز ضمن وقت محدد؛ واختر «صعب في الغالب» مرة أسبوعيًا.",
+  "Trace short snippets by hand (loops, indexes, mutation) before checking the answer.": "تتبّع المقاطع القصيرة يدويًا (الحلقات والفهارس والتعديل) قبل التحقق من الإجابة.",
+  "Review the explanations of your last test, then retake it with new questions.": "راجع شروح اختبارك الأخير، ثم أعده بأسئلة جديدة.",
+  "Complete one mock interview to get scores for communication, accuracy, confidence and problem solving.": "أكمل مقابلة تجريبية واحدة لتحصل على درجات التواصل والدقة والثقة وحل المشكلات.",
+  "Run the sample tests, handle empty input and state time and space complexity in a comment.": "شغّل الاختبارات النموذجية، وتعامل مع المدخلات الفارغة، واذكر تعقيد الوقت والمساحة في تعليق.",
+  "Keep your edge: retake a mock test on your top job lead and aim to beat your best score.": "حافظ على تفوقك: أعد اختبارًا تجريبيًا على أفضل فرصة عمل لديك واسعَ لتجاوز أفضل درجاتك.",
+  "Answer in 60-90 seconds with one example and a clear result.": "أجب في 60-90 ثانية بمثال واحد ونتيجة واضحة.",
+  "State the concept, the trade-off you chose and how you validated it.": "اذكر المفهوم والموازنة التي اخترتها وكيف تحققت منها.",
+  "Lead with your decision and your own role (\"I built...\").": "ابدأ بقرارك ودورك أنت (\"أنا بنيت...\").",
+  "Use clarify, options, decision, test, outcome.": "اتبع: التوضيح، الخيارات، القرار، الاختبار، النتيجة.",
+  "Practise this skill in your next mock interview.": "تدرّب على هذه المهارة في مقابلتك التجريبية القادمة.",
+  "Narrow your target roles to the titles you want, then run the agent again.": "ضيّق أدوارك المستهدفة إلى المسميات التي تريدها، ثم شغّل الوكيل مجددًا.",
+  "Update your locations (add Remote if you accept it), then run again.": "حدّث مواقعك (وأضف العمل عن بُعد إن كنت تقبله)، ثم شغّل مجددًا.",
+  "Check that your years of experience on Run & profile are correct.": "تأكد من صحة سنوات خبرتك في التشغيل والملف الشخصي.",
+  "List your strongest skills first on Run & profile so matching uses them.": "اكتب أقوى مهاراتك أولًا في التشغيل والملف الشخصي لتعتمد عليها المطابقة.",
+  "Refine your target roles, skills and locations, then run again.": "حسّن أدوارك ومهاراتك ومواقعك المستهدفة، ثم شغّل مجددًا.",
+  "wrong role": "دور غير مناسب",
+  "wrong location": "موقع غير مناسب",
+  "wrong seniority": "مستوى أقدمية غير مناسب",
+  "skills do not match": "المهارات غير متطابقة",
+  "other reasons": "أسباب أخرى",
+  "high": "مرتفعة",
+  "low": "منخفضة",
+  "your target roles": "أدوارك المستهدفة",
+  "No agent run found": "لم يُعثر على أي تشغيل للوكيل",
+  "0 leads found": "لم تُعثر على فرص",
+  "What we saw:": "ما لاحظناه:",
   "No answers captured yet.": "لم تُسجَّل أي إجابات بعد.",
   "User specific": "خاص بالمستخدم",
   "Logical Reasoning": "الاستدلال المنطقي",
@@ -656,7 +721,6 @@ window.JHA_I18N = {
   "Example": "مثال",
   "Input:": "المدخل:",
   "Output:": "المخرج:",
-  "Why:": "السبب:",
   "Write your solution, press \"Run sample tests\", then Submit.": "اكتب حلك، واضغط \"تشغيل الاختبارات النموذجية\"، ثم سلّم.",
   "This language is reviewed without running. Explain your approach in comments.": "تُراجع هذه اللغة دون تشغيل. اشرح طريقتك في التعليقات.",
   "Tests run for Python, JavaScript and SQL only": "تعمل الاختبارات لـ Python وJavaScript وSQL فقط",
@@ -676,7 +740,40 @@ window.JHA_I18N = {
   "Could not save your rating.": "تعذّر حفظ تقييمك.",
   "This problem has no runnable entry point.": "لا تحتوي هذه المسألة على نقطة دخول قابلة للتشغيل.",
   "Time limit exceeded. Check for an infinite loop or a very slow approach.": "تم تجاوز الحد الزمني. تحقق من وجود حلقة لا نهائية أو طريقة بطيئة جدًا.",
-  "The runner could not start. Check your internet connection.": "تعذّر بدء المشغّل. تحقق من اتصالك بالإنترنت."
+  "The runner could not start. Check your internet connection.": "تعذّر بدء المشغّل. تحقق من اتصالك بالإنترنت.",
+  "Certifications": "الشهادات",
+  "Target role skills": "مهارات الدور المستهدف",
+  "Resume content": "محتوى السيرة الذاتية",
+  "Your resume has no Projects section": "لا يوجد قسم للمشاريع في سيرتك",
+  "Add a Projects section with 2-3 projects (tools used and a measurable result for each).": "أضف قسمًا للمشاريع فيه 2-3 مشاريع (الأدوات المستخدمة ونتيجة قابلة للقياس لكل منها).",
+  "Your resume has no Certifications section": "لا يوجد قسم للشهادات في سيرتك",
+  "Skills on your profile that your resume does not mention": "مهارات في ملفك لا تذكرها سيرتك",
+  "Skills your job leads ask for that your Skills section leaves out": "مهارات تطلبها فرص العمل ولا يذكرها قسم المهارات لديك",
+  "Your resume has no summary at the top": "لا يوجد ملخص في أعلى سيرتك",
+  "No Summary or Profile section found": "لم يُعثر على قسم الملخص أو النبذة",
+  "Few resume bullets show a measurable result": "قليل من نقاط سيرتك يُظهر نتيجة قابلة للقياس",
+  "Rewrite your top three bullets as action, tool and result, with a real number (time saved, users, accuracy or cost).": "أعد كتابة أهم ثلاث نقاط بصيغة الإجراء والأداة والنتيجة، مع رقم حقيقي (الوقت الموفَّر أو المستخدمون أو الدقة أو التكلفة).",
+  "Where these leads came from": "مصادر هذه الفرص",
+  "No postings for your roles": "لا توجد إعلانات لأدوارك",
+  "Did not answer this time": "لم يستجب هذه المرة",
+  "Too slow; skipped this run": "بطيء جدًا؛ تم تخطيه في هذا التشغيل",
+  "a small web service with a REST API, a database and tests, deployed online with its code on GitHub": "خدمة ويب صغيرة بواجهة REST API وقاعدة بيانات واختبارات، منشورة على الإنترنت وشيفرتها على GitHub",
+  "an end-to-end pipeline that loads a public dataset into a warehouse on a schedule, with data-quality checks": "خط بيانات متكامل يحمّل مجموعة بيانات عامة إلى مستودع بيانات وفق جدول، مع فحوص لجودة البيانات",
+  "a dashboard on a public dataset that answers three business questions, with a short write-up of the findings": "لوحة معلومات على مجموعة بيانات عامة تجيب عن ثلاثة أسئلة عمل، مع ملخص قصير للنتائج",
+  "a model trained on a public dataset, evaluated with a clear metric and served behind a small API": "نموذج مدرَّب على مجموعة بيانات عامة، مُقيَّم بمقياس واضح ومتاح عبر واجهة API صغيرة",
+  "a containerised app deployed to the cloud with Terraform, a CI/CD pipeline and basic monitoring": "تطبيق في حاوية منشور على السحابة باستخدام Terraform وخط CI/CD ومراقبة أساسية",
+  "a written case study of one product or project: the problem, the plan, delivery and the measured result": "دراسة حالة مكتوبة لمنتج أو مشروع واحد: المشكلة والخطة والتنفيذ والنتيجة المقاسة",
+  "a valuation model and a one-page investment note on a listed company": "نموذج تقييم ومذكرة استثمار من صفحة واحدة عن شركة مدرجة",
+  "a sample lesson plan with learning outcomes, an activity and an assessment": "خطة درس نموذجية بنواتج تعلّم ونشاط وتقييم",
+  "a short write-up of one hiring or onboarding improvement, with time-to-hire or retention numbers": "ملخص قصير لتحسين واحد في التوظيف أو التهيئة، مع أرقام مدة التوظيف أو الاحتفاظ",
+  "a campaign plan or sales pipeline report with targets, channels and results": "خطة حملة أو تقرير مسار مبيعات بالأهداف والقنوات والنتائج",
+  "a short case log of the procedures and patient outcomes you can discuss in an interview": "سجل حالات قصير للإجراءات ونتائج المرضى التي يمكنك مناقشتها في المقابلة",
+  "a process-improvement write-up showing the before and after cost, time or error rate": "ملخص لتحسين عملية يبيّن التكلفة أو الوقت أو معدل الخطأ قبل التحسين وبعده",
+  "two writing samples: a contract review memo and a research note on a recent judgment": "عيّنتا كتابة: مذكرة مراجعة عقد ومذكرة بحثية عن حكم حديث",
+  "two portfolio case studies that show the brief, your process and the outcome": "دراستا حالة في ملف الأعمال تعرضان المطلوب وطريقة عملك والنتيجة",
+  "a worked month-end close or reconciliation example you can walk an interviewer through": "مثال عملي لإقفال نهاية الشهر أو تسوية حسابات يمكنك شرحه للمقابِل",
+  "a short summary of the volume you handled and the CSAT or resolution-time results you achieved": "ملخص قصير لحجم العمل الذي تعاملت معه ونتائج رضا العملاء أو وقت الحل التي حققتها",
+  "a design or process-improvement project with drawings and measured results": "مشروع تصميم أو تحسين عملية مع رسومات ونتائج مقاسة"
  },
  "patterns": [
   [
@@ -1072,6 +1169,110 @@ window.JHA_I18N = {
    "يناسب التخطيط الحديث البسيط أدوار $1 ويبقى مقروءًا بالكامل لأنظمة ATS."
   ],
   [
+   "(\\d+) (high|medium|low) priority",
+   "$1 بأولوية $2"
+  ],
+  [
+   "(.+) is below interview level",
+   "$1 أقل من مستوى المقابلة"
+  ],
+  [
+   "Skills employers ask for in (.+) that your profile does not show",
+   "مهارات يطلبها أصحاب العمل في $1 ولا يُظهرها ملفك"
+  ],
+  [
+   "No job leads matched (.+) in your latest run",
+   "لم تطابق أي فرصة عمل $1 في آخر تشغيل"
+  ],
+  [
+   "You marked (\\d+) leads not relevant, mostly for (.+)",
+   "علّمت $1 فرص كغير مناسبة، غالبًا بسبب $2"
+  ],
+  [
+   "Apply the top fix first: (.+)",
+   "طبّق أهم تحسين أولًا: $1"
+  ],
+  [
+   "Revise (.+), then retake a Quick test on the same job\\.",
+   "راجع $1، ثم أعد اختبارًا سريعًا على الوظيفة نفسها."
+  ],
+  [
+   "Learn (.+) through a small project; add them to your resume only once you can show that work\\.",
+   "تعلّم $1 عبر مشروع صغير؛ وأضفها إلى سيرتك فقط عندما تستطيع إظهار ذلك العمل."
+  ],
+  [
+   "Prepare two strong examples for (.+) questions using situation, action and measurable result\\.",
+   "حضّر مثالين قويين لأسئلة $1 باستخدام الموقف والإجراء والنتيجة القابلة للقياس."
+  ],
+  [
+   "Based on (\\d+) mock tests, (\\d+) mock interviews, your resume check on (\\S+) and (\\d+) job leads\\.",
+   "بناءً على $1 اختبارات تجريبية و$2 مقابلات تجريبية وفحص سيرتك في $3 و$4 فرص عمل."
+  ],
+  [
+   "Based on (\\d+) mock tests and (\\d+) mock interviews\\.",
+   "بناءً على $1 اختبارات تجريبية و$2 مقابلات تجريبية."
+  ],
+  [
+   "Target roles: (.+)\\.",
+   "الأدوار المستهدفة: $1."
+  ],
+  [
+   "ATS score (\\d+)/100; (\\d+) fixes suggested",
+   "درجة ATS ‏$1/100؛ $2 تحسينات مقترحة"
+  ],
+  [
+   "ATS score (\\d+)/100",
+   "درجة ATS ‏$1/100"
+  ],
+  [
+   "(.+) (\\d+)/100 over (\\d+) interviews",
+   "$1 ‏$2/100 (في $3 مقابلات)"
+  ],
+  [
+   "Coding answers average (\\d+)/100",
+   "متوسط إجابات البرمجة $1/100"
+  ],
+  [
+   "Missing: (.+)",
+   "الناقصة: $1"
+  ],
+  [
+   "(\\d+) leads, average match (\\d+)%",
+   "$1 فرص، متوسط التطابق $2%"
+  ],
+  [
+   "(\\d+) of (\\d+) leads have no stated experience",
+   "$1 من $2 فرص لا تذكر الخبرة"
+  ],
+  [
+   "Hard questions (\\d+)% correct \\((\\d+) answered\\)",
+   "الأسئلة الصعبة $1% صحيحة (تمت الإجابة على $2)"
+  ],
+  [
+   "Code questions (\\d+)% correct \\((\\d+) answered\\)",
+   "أسئلة البرمجة $1% صحيحة (تمت الإجابة على $2)"
+  ],
+  [
+   "Average (\\d+)% over (\\d+) tests",
+   "المتوسط $1% في $2 اختبارات"
+  ],
+  [
+   "(\\d+) completed tests",
+   "$1 اختبارات مكتملة"
+  ],
+  [
+   "(\\d+) completed interviews",
+   "$1 مقابلات مكتملة"
+  ],
+  [
+   "(\\d+) of (\\d+) rated leads not relevant",
+   "$1 من $2 فرص مقيّمة غير مناسبة"
+  ],
+  [
+   "Layout (.+)/100, text read (\\d+)%",
+   "التخطيط $1/100، النص المقروء $2%"
+  ],
+  [
    "Matched skills: (.+)",
    "المهارات المطابقة: $1"
   ],
@@ -1098,6 +1299,106 @@ window.JHA_I18N = {
   [
    "Mark (.+) as not relevant",
    "علّم $1 كغير مناسبة"
+  ],
+  [
+   "Core skills for (.+) that your resume does not show",
+   "مهارات أساسية لدور $1 لا تُظهرها سيرتك"
+  ],
+  [
+   "Not on your resume: (.+) \\((\\d+) of (\\d+) core skills\\)",
+   "غير موجودة في سيرتك: $1 ($2 من $3 مهارات أساسية)"
+  ],
+  [
+   "Learn (.+) and (.+), then build a project: (.+)\\.",
+   "تعلّم $1 و$2، ثم ابنِ مشروعًا: $3."
+  ],
+  [
+   "Add (.+), (.+) and (.+) to your resume's Skills section and mention each in a bullet where you used it\\.",
+   "أضف $1، $2 و$3 إلى قسم المهارات في سيرتك واذكر كلًّا منها في نقطة استخدمته فيها."
+  ],
+  [
+   "Add (.+) and (.+) to your resume's Skills section and mention each in a bullet where you used it\\.",
+   "أضف $1 و$2 إلى قسم المهارات في سيرتك واذكر كلًّا منها في نقطة استخدمته فيها."
+  ],
+  [
+   "Add (.+), (.+) and (.+) to your resume if you have used them, with one bullet showing where\\.",
+   "أضف $1، $2 و$3 إلى سيرتك إن كنت قد استخدمتها، مع نقطة تبيّن أين."
+  ],
+  [
+   "Add (.+) and (.+) to your resume if you have used them, with one bullet showing where\\.",
+   "أضف $1 و$2 إلى سيرتك إن كنت قد استخدمتها، مع نقطة تبيّن أين."
+  ],
+  [
+   "List (.+), (.+) and (.+) in your Skills section; your resume already shows you have used them\\.",
+   "أدرج $1، $2 و$3 في قسم المهارات؛ فسيرتك تُظهر أنك استخدمتها."
+  ],
+  [
+   "List (.+) and (.+) in your Skills section; your resume already shows you have used them\\.",
+   "أدرج $1 و$2 في قسم المهارات؛ فسيرتك تُظهر أنك استخدمتها."
+  ],
+  [
+   "Consider a recognised certification such as (.+) or (.+); list it once you have earned it\\.",
+   "فكّر في شهادة معترف بها مثل $1 أو $2؛ وأدرجها بعد حصولك عليها."
+  ],
+  [
+   "Learn (.+), then build a project: (.+)\\.",
+   "تعلّم $1، ثم ابنِ مشروعًا: $2."
+  ],
+  [
+   "Skills for (.+) on your profile but missing from your resume",
+   "مهارات لدور $1 في ملفك لكنها غائبة عن سيرتك"
+  ],
+  [
+   "On your profile, not on your resume: (.+)",
+   "في ملفك وليست في سيرتك: $1"
+  ],
+  [
+   "Add (.+) to your resume's Skills section and mention each in a bullet where you used it\\.",
+   "أضف $1 إلى قسم المهارات في سيرتك واذكر كلًّا منها في نقطة استخدمته فيها."
+  ],
+  [
+   "Recruiters for (.+) look for project evidence from early-career candidates",
+   "يبحث مسؤولو التوظيف لدور $1 عن أدلة مشاريع لدى المرشحين في بداية مسيرتهم"
+  ],
+  [
+   "No certification listed for (.+)",
+   "لا توجد شهادة مذكورة لدور $1"
+  ],
+  [
+   "Consider a recognised certification such as (.+); list it once you have earned it\\.",
+   "فكّر في شهادة معترف بها مثل $1؛ وأدرجها بعد حصولك عليها."
+  ],
+  [
+   "Add (.+) to your resume if you have used them, with one bullet showing where\\.",
+   "أضف $1 إلى سيرتك إن كنت قد استخدمتها، مع نقطة تبيّن أين."
+  ],
+  [
+   "In 2 or more of your leads: (.+)",
+   "في فرصتين أو أكثر من فرصك: $1"
+  ],
+  [
+   "List (.+) in your Skills section; your resume already shows you have used them\\.",
+   "أدرج $1 في قسم المهارات؛ فسيرتك تُظهر أنك استخدمتها."
+  ],
+  [
+   "Add a 2-3 line summary naming (.+), your years of experience and your top three skills\\.",
+   "أضف ملخصًا من 2-3 أسطر يذكر $1 وسنوات خبرتك وأهم ثلاث مهارات لديك."
+  ],
+  [
+   "(\\d+) of (\\d+) bullets include a number",
+   "$1 من $2 نقاط تتضمن رقمًا"
+  ],
+  [
+   "(\\d+) shown of (\\d+) found",
+   "عُرضت $1 من $2"
+  ],
+  [
+   "(\\d+) found, none fit your experience, role or location",
+   "وُجدت $1، ولا تناسب أيٌّ منها خبرتك أو دورك أو موقعك"
+  ],
+  [
+   "Not connected: (.+)\\. These search Indian job boards beyond LinkedIn and Naukri; connecting them needs an API key from each provider\\.",
+   "غير متصلة: $1. تبحث هذه في مواقع وظائف هندية إلى جانب LinkedIn وNaukri؛ ويتطلب ربطها مفتاح API من كل مزوّد."
   ],
   [
    "(.+) \\(opens in a new tab\\)",

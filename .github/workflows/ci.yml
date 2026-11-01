@@ -1,0 +1,58 @@
+name: CI
+
+# Every pull request and push must pass these gates before deployment:
+# unit/integration tests, the job-relevance gate, the ATS calibration gate,
+# the code-question answer-key check, and a dependency vulnerability scan.
+on:
+  push:
+    branches: [main, release_branch, "feature/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: job_agent
+          POSTGRES_PASSWORD: job_agent
+          POSTGRES_DB: job_agent_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U job_agent" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[docs,dev]" pandas pip-audit
+      - name: Unit and integration tests (SQLite)
+        run: python -m pytest -q
+      - name: Guardrail and storage tests on PostgreSQL
+        env:
+          JOB_AGENT_TEST_POSTGRES_URL: postgresql://job_agent:job_agent@localhost:5432/job_agent_test
+        run: python -m pytest -q tests/test_postgres_ops.py
+      - name: Job relevance gate (precision, recall, nDCG, no leaks)
+        run: python scripts/evaluate_job_relevance.py
+      - name: ATS calibration gate
+        run: python scripts/calibrate_ats.py --min-coverage 0.95 --max-mae 4
+      - name: Code-question answer keys match real interpreters
+        run: python scripts/verify_code_questions.py
+      - name: Dependency vulnerability scan
+        run: pip-audit --progress-spinner off --skip-editable

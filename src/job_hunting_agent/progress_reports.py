@@ -113,7 +113,18 @@ def build_report(user_email: str, *, period: str = "weekly", job_id: str = "", t
         "readiness_index": readiness,
         "readiness_label": None if readiness is None else ("Interview ready" if readiness >= 75 else "Getting there" if readiness >= 55 else "Needs focused practice"),
         "next_steps": _next_steps(test_section, interview_section, streak, period),
+        "recommendations": _recommendations(user_email, job_id),
     }
+
+
+def _recommendations(user_email: str, job_id: str) -> dict[str, Any]:
+    """Recommendation from Kairoz; never lets a data problem break the report."""
+    from .recommendations import build_recommendations
+
+    try:
+        return build_recommendations(user_email, job_id=job_id)
+    except Exception:  # pragma: no cover - defensive: the trends must still load
+        return {"gaps": [], "next_steps": [], "summary": {"high": 0, "medium": 0, "low": 0, "total": 0}, "based_on": {}, "unavailable": True}
 
 
 def _job_options(tests: list[dict[str, Any]], interviews: list[dict[str, Any]]) -> list[dict[str, Any]]:

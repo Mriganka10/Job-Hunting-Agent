@@ -4,7 +4,8 @@ Single source of truth for the language packs. Run
 
     python scripts/i18n_strings.py
 
-to regenerate src/job_hunting_agent/static/ui/i18n/{hi,ar}.js. Keys are the
+to regenerate src/job_hunting_agent/static/ui/i18n/ar.js (Hindi is kept in
+the table but not published; see ENABLED_PACKS). Keys are the
 exact English text a page shows (whitespace collapsed). Job data, resumes,
 questions and AI feedback are content, not interface, and stay in English.
 
@@ -635,6 +636,72 @@ Serif typography, black headings and generous spacing; leadership and achievemen
 You have under 2 years of experience, so education, skills and projects lead the page.	आपका अनुभव 2 वर्ष से कम है, इसलिए शिक्षा, कौशल और प्रोजेक्ट पेज पर सबसे पहले हैं।	خبرتك أقل من سنتين، لذا يتصدر التعليم والمهارات والمشاريع الصفحة.
 With 8+ years of experience, a senior layout puts leadership and achievements first.	8+ वर्ष के अनुभव के साथ, वरिष्ठ लेआउट नेतृत्व और उपलब्धियाँ पहले रखता है।	مع خبرة 8+ سنوات، يضع التخطيط القيادي القيادة والإنجازات أولًا.
 A classic layout is the safest choice for this role and parses in every ATS.	इस भूमिका के लिए क्लासिक लेआउट सबसे सुरक्षित है और हर ATS में सही पढ़ा जाता है।	التخطيط الكلاسيكي هو الخيار الأكثر أمانًا لهذا الدور ويُقرأ في كل أنظمة ATS.
+Recommendation from Kairoz	Kairoz की सिफ़ारिश	توصية من Kairoz
+Based on your mock tests, mock interviews, the ATS check of your resume, the skills for your target roles and your job leads.	आपके मॉक टेस्ट, मॉक इंटरव्यू, रिज़्यूमे की ATS जाँच, लक्षित भूमिकाओं के कौशल और जॉब लीड्स के आधार पर।	بناءً على اختباراتك ومقابلاتك التجريبية وفحص ATS لسيرتك ومهارات أدوارك المستهدفة وفرص العمل.
+Gaps	कमियाँ	الفجوات
+Next steps	अगले कदम	الخطوات التالية
+Priority	प्राथमिकता	الأولوية
+Area	क्षेत्र	المجال
+Gap	कमी	الفجوة
+What we saw	हमने क्या देखा	ما لاحظناه
+Medium	मध्यम	متوسطة
+Why:	क्यों:	السبب:
+Skills for target roles	लक्षित भूमिकाओं के कौशल	مهارات الأدوار المستهدفة
+Resume templates	रिज़्यूमे टेम्पलेट	قوالب السيرة الذاتية
+No gaps found. Your resume, job leads and practice scores look strong.	कोई कमी नहीं मिली। आपका रिज़्यूमे, जॉब लीड्स और अभ्यास स्कोर मज़बूत दिखते हैं।	لم تُعثر على فجوات. تبدو سيرتك وفرص عملك ونتائج تدريبك قوية.
+Recommendations are not available right now.	सिफ़ारिशें अभी उपलब्ध नहीं हैं।	التوصيات غير متاحة الآن.
+No gaps found in your latest resume check, job leads or practice.	आपकी पिछली रिज़्यूमे जाँच, जॉब लीड्स या अभ्यास में कोई कमी नहीं मिली।	لم تُعثر على فجوات في آخر فحص لسيرتك أو فرص عملك أو تدريبك.
+Your resume has not been checked yet	आपके रिज़्यूमे की अभी जाँच नहीं हुई है	لم تُفحص سيرتك الذاتية بعد
+ATS score is below the 80 most screening systems pass comfortably	ATS स्कोर 80 से कम है, जिसे ज़्यादातर स्क्रीनिंग सिस्टम आसानी से पास करते हैं	درجة ATS أقل من 80 التي تجتازها معظم أنظمة الفرز بسهولة
+Keywords for your target roles are missing from your resume	आपके रिज़्यूमे में लक्षित भूमिकाओं के कीवर्ड नहीं हैं	الكلمات المفتاحية لأدوارك المستهدفة غير موجودة في سيرتك
+Your resume may be filtered out by the job description's screening rules	जॉब विवरण के स्क्रीनिंग नियम आपके रिज़्यूमे को छाँट सकते हैं	قد تستبعد قواعد الفرز في الوصف الوظيفي سيرتك
+Parts of your resume are hard for an ATS to read	आपके रिज़्यूमे के कुछ हिस्से ATS के लिए पढ़ना मुश्किल है	يصعب على ATS قراءة أجزاء من سيرتك
+None of your job leads is a strong match yet	अभी आपकी कोई जॉब लीड मज़बूत मिलान नहीं है	لا توجد فرصة عمل مطابقة بقوة بعد
+Most leads do not state the experience they need	ज़्यादातर लीड्स ज़रूरी अनुभव नहीं बतातीं	معظم الفرص لا تذكر الخبرة المطلوبة
+No mock test taken yet	अभी कोई मॉक टेस्ट नहीं दिया	لم تُجرِ أي اختبار تجريبي بعد
+Weak topics in your mock tests	आपके मॉक टेस्ट के कमज़ोर विषय	مواضيع ضعيفة في اختباراتك التجريبية
+Hard questions are a weak spot	कठिन प्रश्न आपकी कमज़ोरी हैं	الأسئلة الصعبة نقطة ضعف
+Code-reading questions need work	कोड पढ़ने वाले प्रश्नों पर काम चाहिए	أسئلة قراءة الرمز تحتاج إلى تحسين
+Mock test scores are below the level for applying	मॉक टेस्ट स्कोर आवेदन के स्तर से नीचे हैं	درجات الاختبار التجريبي أقل من مستوى التقديم
+No mock interview completed yet	अभी कोई मॉक इंटरव्यू पूरा नहीं हुआ	لم تُكمل أي مقابلة تجريبية بعد
+Some question types score low	कुछ प्रकार के प्रश्नों में स्कोर कम है	بعض أنواع الأسئلة تحصل على درجات منخفضة
+Coding answers in interviews need work	इंटरव्यू में कोडिंग उत्तरों पर काम चाहिए	إجابات البرمجة في المقابلات تحتاج إلى تحسين
+Upload your resume and run the agent to get your ATS score and job leads.	ATS स्कोर और जॉब लीड्स पाने के लिए रिज़्यूमे अपलोड करें और एजेंट चलाएँ।	ارفع سيرتك وشغّل الوكيل للحصول على درجة ATS وفرص العمل.
+Follow the resume improvements, then run the agent again.	रिज़्यूमे सुधार लागू करें, फिर एजेंट दोबारा चलाएँ।	طبّق تحسينات السيرة، ثم شغّل الوكيل مجددًا.
+Add the missing keywords you genuinely have to your skills and experience bullets; never add ones you cannot show.	जो छूटे कीवर्ड आपके पास सच में हैं, उन्हें कौशल और अनुभव में जोड़ें; जिन्हें साबित न कर सकें, उन्हें कभी न जोड़ें।	أضف الكلمات المفتاحية الناقصة التي تملكها فعلًا إلى المهارات ونقاط الخبرة؛ ولا تضف أبدًا ما لا يمكنك إثباته.
+Close the listed screening risks in your resume, or target roles whose requirements you meet.	रिज़्यूमे में बताए गए स्क्रीनिंग जोखिम दूर करें, या ऐसी भूमिकाएँ चुनें जिनकी शर्तें आप पूरी करते हैं।	عالج مخاطر الفرز المذكورة في سيرتك، أو استهدف أدوارًا تستوفي متطلباتها.
+Download your resume in an ATS template from Resume & ATS and use that file to apply.	रिज़्यूमे और ATS से किसी ATS टेम्पलेट में रिज़्यूमे डाउनलोड करें और उसी फ़ाइल से आवेदन करें।	نزّل سيرتك بقالب ATS من قسم السيرة الذاتية وATS واستخدم ذلك الملف للتقديم.
+Broaden your target roles or locations (or add Remote), then run the agent again.	लक्षित भूमिकाएँ या स्थान बढ़ाएँ (या Remote जोड़ें), फिर एजेंट दोबारा चलाएँ।	وسّع الأدوار أو المواقع المستهدفة (أو أضف العمل عن بُعد)، ثم شغّل الوكيل مجددًا.
+Add the skills you already have to your profile and paste a target job description, then run again.	जो कौशल आपके पास हैं उन्हें प्रोफ़ाइल में जोड़ें और लक्षित जॉब विवरण पेस्ट करें, फिर दोबारा चलाएँ।	أضف المهارات التي تملكها إلى ملفك والصق وصفًا وظيفيًا مستهدفًا، ثم شغّل مجددًا.
+Open those postings and confirm the experience level before applying.	आवेदन से पहले उन पोस्टिंग को खोलकर अनुभव स्तर की पुष्टि करें।	افتح تلك الإعلانات وتأكد من مستوى الخبرة قبل التقديم.
+Take a Quick mock test on your top job lead to find your weak topics.	कमज़ोर विषय जानने के लिए अपनी सबसे अच्छी जॉब लीड पर त्वरित मॉक टेस्ट दें।	خذ اختبارًا تجريبيًا سريعًا على أفضل فرصة عمل لديك لتعرف مواضيعك الضعيفة.
+Practise multi-step and code-reading problems under time; choose 'Mostly hard' once a week.	समय सीमा में बहु-चरणीय और कोड पढ़ने वाली समस्याओं का अभ्यास करें; हफ़्ते में एक बार 'ज़्यादातर कठिन' चुनें।	تدرّب على المسائل متعددة الخطوات وقراءة الرمز ضمن وقت محدد؛ واختر «صعب في الغالب» مرة أسبوعيًا.
+Trace short snippets by hand (loops, indexes, mutation) before checking the answer.	उत्तर देखने से पहले छोटे कोड को हाथ से ट्रेस करें (लूप, इंडेक्स, बदलाव)।	تتبّع المقاطع القصيرة يدويًا (الحلقات والفهارس والتعديل) قبل التحقق من الإجابة.
+Review the explanations of your last test, then retake it with new questions.	पिछले टेस्ट की व्याख्याएँ देखें, फिर नए प्रश्नों के साथ दोबारा दें।	راجع شروح اختبارك الأخير، ثم أعده بأسئلة جديدة.
+Complete one mock interview to get scores for communication, accuracy, confidence and problem solving.	संवाद, सटीकता, आत्मविश्वास और समस्या समाधान के स्कोर पाने के लिए एक मॉक इंटरव्यू पूरा करें।	أكمل مقابلة تجريبية واحدة لتحصل على درجات التواصل والدقة والثقة وحل المشكلات.
+Run the sample tests, handle empty input and state time and space complexity in a comment.	सैंपल टेस्ट चलाएँ, खाली इनपुट सँभालें और कमेंट में समय व स्थान जटिलता बताएँ।	شغّل الاختبارات النموذجية، وتعامل مع المدخلات الفارغة، واذكر تعقيد الوقت والمساحة في تعليق.
+Keep your edge: retake a mock test on your top job lead and aim to beat your best score.	अपनी बढ़त बनाए रखें: सबसे अच्छी जॉब लीड पर मॉक टेस्ट दोबारा दें और अपना सबसे अच्छा स्कोर पार करें।	حافظ على تفوقك: أعد اختبارًا تجريبيًا على أفضل فرصة عمل لديك واسعَ لتجاوز أفضل درجاتك.
+Answer in 60-90 seconds with one example and a clear result.	60-90 सेकंड में एक उदाहरण और स्पष्ट परिणाम के साथ उत्तर दें।	أجب في 60-90 ثانية بمثال واحد ونتيجة واضحة.
+State the concept, the trade-off you chose and how you validated it.	अवधारणा, चुना गया ट्रेड-ऑफ़ और उसकी जाँच का तरीका बताएँ।	اذكر المفهوم والموازنة التي اخترتها وكيف تحققت منها.
+Lead with your decision and your own role ("I built...").	अपने निर्णय और अपनी भूमिका से शुरू करें ("मैंने बनाया...")।	ابدأ بقرارك ودورك أنت ("أنا بنيت...").
+Use clarify, options, decision, test, outcome.	स्पष्ट करें, विकल्प, निर्णय, परीक्षण, परिणाम का क्रम अपनाएँ।	اتبع: التوضيح، الخيارات، القرار، الاختبار، النتيجة.
+Practise this skill in your next mock interview.	अगले मॉक इंटरव्यू में इस कौशल का अभ्यास करें।	تدرّب على هذه المهارة في مقابلتك التجريبية القادمة.
+Narrow your target roles to the titles you want, then run the agent again.	लक्षित भूमिकाओं को अपनी पसंद के पदों तक सीमित करें, फिर एजेंट दोबारा चलाएँ।	ضيّق أدوارك المستهدفة إلى المسميات التي تريدها، ثم شغّل الوكيل مجددًا.
+Update your locations (add Remote if you accept it), then run again.	अपने स्थान अपडेट करें (Remote स्वीकार हो तो जोड़ें), फिर दोबारा चलाएँ।	حدّث مواقعك (وأضف العمل عن بُعد إن كنت تقبله)، ثم شغّل مجددًا.
+Check that your years of experience on Run & profile are correct.	रन और प्रोफ़ाइल में अपने अनुभव के वर्ष सही हैं, यह जाँचें।	تأكد من صحة سنوات خبرتك في التشغيل والملف الشخصي.
+List your strongest skills first on Run & profile so matching uses them.	रन और प्रोफ़ाइल में सबसे मज़बूत कौशल पहले लिखें ताकि मिलान में उनका उपयोग हो।	اكتب أقوى مهاراتك أولًا في التشغيل والملف الشخصي لتعتمد عليها المطابقة.
+Refine your target roles, skills and locations, then run again.	लक्षित भूमिकाएँ, कौशल और स्थान बेहतर करें, फिर दोबारा चलाएँ।	حسّن أدوارك ومهاراتك ومواقعك المستهدفة، ثم شغّل مجددًا.
+wrong role	गलत भूमिका	دور غير مناسب
+wrong location	गलत स्थान	موقع غير مناسب
+wrong seniority	गलत वरिष्ठता स्तर	مستوى أقدمية غير مناسب
+skills do not match	कौशल मेल नहीं खाते	المهارات غير متطابقة
+other reasons	अन्य कारण	أسباب أخرى
+high	उच्च	مرتفعة
+low	कम	منخفضة
+your target roles	आपकी लक्षित भूमिकाओं	أدوارك المستهدفة
+No agent run found	कोई एजेंट रन नहीं मिला	لم يُعثر على أي تشغيل للوكيل
+0 leads found	0 लीड्स मिलीं	لم تُعثر على فرص
+What we saw:	हमने क्या देखा:	ما لاحظناه:
 No answers captured yet.	अभी कोई उत्तर दर्ज नहीं हुआ।	لم تُسجَّل أي إجابات بعد.
 User specific	उपयोगकर्ता-विशेष	خاص بالمستخدم
 Logical Reasoning	तार्किक क्षमता	الاستدلال المنطقي
@@ -694,6 +761,39 @@ Could not save your rating.	आपकी रेटिंग सेव नही�
 This problem has no runnable entry point.	इस समस्या में चलाने योग्य शुरुआती फ़ंक्शन नहीं है।	لا تحتوي هذه المسألة على نقطة دخول قابلة للتشغيل.
 Time limit exceeded. Check for an infinite loop or a very slow approach.	समय सीमा पार हो गई। अनंत लूप या बहुत धीमा तरीका तो नहीं, जाँचें।	تم تجاوز الحد الزمني. تحقق من وجود حلقة لا نهائية أو طريقة بطيئة جدًا.
 The runner could not start. Check your internet connection.	रनर शुरू नहीं हो सका। अपना इंटरनेट कनेक्शन जाँचें।	تعذّر بدء المشغّل. تحقق من اتصالك بالإنترنت.
+Certifications	सर्टिफ़िकेशन	الشهادات
+Target role skills	लक्षित भूमिका के कौशल	مهارات الدور المستهدف
+Resume content	रिज़्यूमे की सामग्री	محتوى السيرة الذاتية
+Your resume has no Projects section	आपके रिज़्यूमे में प्रोजेक्ट्स सेक्शन नहीं है	لا يوجد قسم للمشاريع في سيرتك
+Add a Projects section with 2-3 projects (tools used and a measurable result for each).	2-3 प्रोजेक्ट्स के साथ प्रोजेक्ट्स सेक्शन जोड़ें (हर एक के लिए इस्तेमाल किए टूल और मापने योग्य परिणाम)।	أضف قسمًا للمشاريع فيه 2-3 مشاريع (الأدوات المستخدمة ونتيجة قابلة للقياس لكل منها).
+Your resume has no Certifications section	आपके रिज़्यूमे में सर्टिफ़िकेशन सेक्शन नहीं है	لا يوجد قسم للشهادات في سيرتك
+Skills on your profile that your resume does not mention	आपकी प्रोफ़ाइल के कौशल जिनका रिज़्यूमे में ज़िक्र नहीं है	مهارات في ملفك لا تذكرها سيرتك
+Skills your job leads ask for that your Skills section leaves out	जॉब लीड्स जो कौशल माँगती हैं पर आपके कौशल सेक्शन में नहीं हैं	مهارات تطلبها فرص العمل ولا يذكرها قسم المهارات لديك
+Your resume has no summary at the top	आपके रिज़्यूमे में ऊपर सारांश नहीं है	لا يوجد ملخص في أعلى سيرتك
+No Summary or Profile section found	सारांश या प्रोफ़ाइल सेक्शन नहीं मिला	لم يُعثر على قسم الملخص أو النبذة
+Few resume bullets show a measurable result	रिज़्यूमे के कम बिंदुओं में मापने योग्य परिणाम है	قليل من نقاط سيرتك يُظهر نتيجة قابلة للقياس
+Rewrite your top three bullets as action, tool and result, with a real number (time saved, users, accuracy or cost).	अपने शीर्ष तीन बिंदुओं को कदम, टूल और परिणाम के रूप में असली संख्या के साथ दोबारा लिखें (बचा समय, उपयोगकर्ता, सटीकता या लागत)।	أعد كتابة أهم ثلاث نقاط بصيغة الإجراء والأداة والنتيجة، مع رقم حقيقي (الوقت الموفَّر أو المستخدمون أو الدقة أو التكلفة).
+Where these leads came from	ये लीड्स कहाँ से आईं	مصادر هذه الفرص
+No postings for your roles	आपकी भूमिकाओं के लिए कोई पोस्टिंग नहीं	لا توجد إعلانات لأدوارك
+Did not answer this time	इस बार जवाब नहीं मिला	لم يستجب هذه المرة
+Too slow; skipped this run	बहुत धीमा; इस रन में छोड़ा गया	بطيء جدًا؛ تم تخطيه في هذا التشغيل
+a small web service with a REST API, a database and tests, deployed online with its code on GitHub	REST API, डेटाबेस और टेस्ट वाली एक छोटी वेब सेवा, ऑनलाइन डिप्लॉय और उसका कोड GitHub पर	خدمة ويب صغيرة بواجهة REST API وقاعدة بيانات واختبارات، منشورة على الإنترنت وشيفرتها على GitHub
+an end-to-end pipeline that loads a public dataset into a warehouse on a schedule, with data-quality checks	एक एंड-टू-एंड पाइपलाइन जो किसी सार्वजनिक डेटासेट को शेड्यूल पर वेयरहाउस में लोड करे, डेटा-गुणवत्ता जाँच के साथ	خط بيانات متكامل يحمّل مجموعة بيانات عامة إلى مستودع بيانات وفق جدول، مع فحوص لجودة البيانات
+a dashboard on a public dataset that answers three business questions, with a short write-up of the findings	किसी सार्वजनिक डेटासेट पर एक डैशबोर्ड जो तीन व्यावसायिक सवालों के जवाब दे, निष्कर्षों के छोटे विवरण के साथ	لوحة معلومات على مجموعة بيانات عامة تجيب عن ثلاثة أسئلة عمل، مع ملخص قصير للنتائج
+a model trained on a public dataset, evaluated with a clear metric and served behind a small API	किसी सार्वजनिक डेटासेट पर ट्रेन किया मॉडल, स्पष्ट मीट्रिक से जाँचा गया और एक छोटे API से उपलब्ध	نموذج مدرَّب على مجموعة بيانات عامة، مُقيَّم بمقياس واضح ومتاح عبر واجهة API صغيرة
+a containerised app deployed to the cloud with Terraform, a CI/CD pipeline and basic monitoring	Terraform, CI/CD पाइपलाइन और बुनियादी मॉनिटरिंग के साथ क्लाउड पर डिप्लॉय किया गया कंटेनर ऐप	تطبيق في حاوية منشور على السحابة باستخدام Terraform وخط CI/CD ومراقبة أساسية
+a written case study of one product or project: the problem, the plan, delivery and the measured result	किसी एक प्रोडक्ट या प्रोजेक्ट का लिखित केस स्टडी: समस्या, योजना, डिलीवरी और मापा गया परिणाम	دراسة حالة مكتوبة لمنتج أو مشروع واحد: المشكلة والخطة والتنفيذ والنتيجة المقاسة
+a valuation model and a one-page investment note on a listed company	किसी लिस्टेड कंपनी पर एक वैल्यूएशन मॉडल और एक पेज का निवेश नोट	نموذج تقييم ومذكرة استثمار من صفحة واحدة عن شركة مدرجة
+a sample lesson plan with learning outcomes, an activity and an assessment	सीखने के परिणाम, एक गतिविधि और एक आकलन वाली नमूना पाठ योजना	خطة درس نموذجية بنواتج تعلّم ونشاط وتقييم
+a short write-up of one hiring or onboarding improvement, with time-to-hire or retention numbers	किसी एक भर्ती या ऑनबोर्डिंग सुधार का छोटा विवरण, भर्ती समय या रिटेंशन के आँकड़ों के साथ	ملخص قصير لتحسين واحد في التوظيف أو التهيئة، مع أرقام مدة التوظيف أو الاحتفاظ
+a campaign plan or sales pipeline report with targets, channels and results	लक्ष्य, चैनल और परिणाम वाली एक कैंपेन योजना या सेल्स पाइपलाइन रिपोर्ट	خطة حملة أو تقرير مسار مبيعات بالأهداف والقنوات والنتائج
+a short case log of the procedures and patient outcomes you can discuss in an interview	उन प्रक्रियाओं और मरीज़ों के परिणामों का छोटा केस लॉग जिन पर आप इंटरव्यू में बात कर सकें	سجل حالات قصير للإجراءات ونتائج المرضى التي يمكنك مناقشتها في المقابلة
+a process-improvement write-up showing the before and after cost, time or error rate	प्रक्रिया-सुधार का विवरण जो पहले और बाद की लागत, समय या त्रुटि दर दिखाए	ملخص لتحسين عملية يبيّن التكلفة أو الوقت أو معدل الخطأ قبل التحسين وبعده
+two writing samples: a contract review memo and a research note on a recent judgment	दो लेखन नमूने: एक कॉन्ट्रैक्ट समीक्षा मेमो और किसी हाल के फ़ैसले पर शोध नोट	عيّنتا كتابة: مذكرة مراجعة عقد ومذكرة بحثية عن حكم حديث
+two portfolio case studies that show the brief, your process and the outcome	दो पोर्टफ़ोलियो केस स्टडी जो ब्रीफ़, आपकी प्रक्रिया और परिणाम दिखाएँ	دراستا حالة في ملف الأعمال تعرضان المطلوب وطريقة عملك والنتيجة
+a worked month-end close or reconciliation example you can walk an interviewer through	महीने के अंत की क्लोज़िंग या रिकंसिलिएशन का एक उदाहरण जिसे आप इंटरव्यू में समझा सकें	مثال عملي لإقفال نهاية الشهر أو تسوية حسابات يمكنك شرحه للمقابِل
+a short summary of the volume you handled and the CSAT or resolution-time results you achieved	आपके संभाले गए वॉल्यूम और हासिल किए गए CSAT या समाधान-समय परिणामों का छोटा सारांश	ملخص قصير لحجم العمل الذي تعاملت معه ونتائج رضا العملاء أو وقت الحل التي حققتها
+a design or process-improvement project with drawings and measured results	ड्रॉइंग और मापे गए परिणामों वाला एक डिज़ाइन या प्रक्रिया-सुधार प्रोजेक्ट	مشروع تصميم أو تحسين عملية مع رسومات ونتائج مقاسة
 """
 
 # (English regex, Hindi template, Arabic template). $1 = captured value,
@@ -803,6 +903,32 @@ PATTERNS = [
     (r"Preview (.+)", "$1 का प्रीव्यू", "معاينة $1"),
     (r"For (.+) roles, recruiters scan your skills and projects first\.", "$1 भूमिकाओं में रिक्रूटर पहले आपके कौशल और प्रोजेक्ट देखते हैं।", "في أدوار $1، يطّلع مسؤولو التوظيف على مهاراتك ومشاريعك أولًا."),
     (r"A clean modern layout suits (.+) roles while staying fully ATS-readable\.", "साफ़ आधुनिक लेआउट $1 भूमिकाओं के लिए सही है और पूरी तरह ATS-पठनीय रहता है।", "يناسب التخطيط الحديث البسيط أدوار $1 ويبقى مقروءًا بالكامل لأنظمة ATS."),
+    (r"(\d+) (high|medium|low) priority", "$1 $2 प्राथमिकता", "$1 بأولوية $2"),
+    (r"(.+) is below interview level", "$1 इंटरव्यू स्तर से नीचे है", "$1 أقل من مستوى المقابلة"),
+    (r"Skills employers ask for in (.+) that your profile does not show", "$1 में नियोक्ता जो कौशल माँगते हैं, वे आपकी प्रोफ़ाइल में नहीं हैं", "مهارات يطلبها أصحاب العمل في $1 ولا يُظهرها ملفك"),
+    (r"No job leads matched (.+) in your latest run", "आपके पिछले रन में $1 के लिए कोई जॉब लीड नहीं मिली", "لم تطابق أي فرصة عمل $1 في آخر تشغيل"),
+    (r"You marked (\d+) leads not relevant, mostly for (.+)", "आपने $1 लीड्स को अप्रासंगिक चिह्नित किया, ज़्यादातर $2 के कारण", "علّمت $1 فرص كغير مناسبة، غالبًا بسبب $2"),
+    (r"Apply the top fix first: (.+)", "पहले सबसे ज़रूरी सुधार करें: $1", "طبّق أهم تحسين أولًا: $1"),
+    (r"Revise (.+), then retake a Quick test on the same job\.", "$1 दोहराएँ, फिर उसी जॉब पर त्वरित टेस्ट दोबारा दें।", "راجع $1، ثم أعد اختبارًا سريعًا على الوظيفة نفسها."),
+    (r"Learn (.+) through a small project; add them to your resume only once you can show that work\.", "एक छोटे प्रोजेक्ट से $1 सीखें; काम दिखा सकें तभी उन्हें रिज़्यूमे में जोड़ें।", "تعلّم $1 عبر مشروع صغير؛ وأضفها إلى سيرتك فقط عندما تستطيع إظهار ذلك العمل."),
+    (r"Prepare two strong examples for (.+) questions using situation, action and measurable result\.", "$1 प्रश्नों के लिए स्थिति, कदम और मापने योग्य परिणाम वाले दो मज़बूत उदाहरण तैयार करें।", "حضّر مثالين قويين لأسئلة $1 باستخدام الموقف والإجراء والنتيجة القابلة للقياس."),
+    (r"Based on (\d+) mock tests, (\d+) mock interviews, your resume check on (\S+) and (\d+) job leads\.", "$1 मॉक टेस्ट, $2 मॉक इंटरव्यू, $3 की रिज़्यूमे जाँच और $4 जॉब लीड्स के आधार पर।", "بناءً على $1 اختبارات تجريبية و$2 مقابلات تجريبية وفحص سيرتك في $3 و$4 فرص عمل."),
+    (r"Based on (\d+) mock tests and (\d+) mock interviews\.", "$1 मॉक टेस्ट और $2 मॉक इंटरव्यू के आधार पर।", "بناءً على $1 اختبارات تجريبية و$2 مقابلات تجريبية."),
+    (r"Target roles: (.+)\.", "लक्षित भूमिकाएँ: $1।", "الأدوار المستهدفة: $1."),
+    (r"ATS score (\d+)/100; (\d+) fixes suggested", "ATS स्कोर $1/100; $2 सुधार सुझाए गए", "درجة ATS ‏$1/100؛ $2 تحسينات مقترحة"),
+    (r"ATS score (\d+)/100", "ATS स्कोर $1/100", "درجة ATS ‏$1/100"),
+    (r"(.+) (\d+)/100 over (\d+) interviews", "$1 $2/100 ($3 इंटरव्यू में)", "$1 ‏$2/100 (في $3 مقابلات)"),
+    (r"Coding answers average (\d+)/100", "कोडिंग उत्तरों का औसत $1/100", "متوسط إجابات البرمجة $1/100"),
+    (r"Missing: (.+)", "छूटे हुए: $1", "الناقصة: $1"),
+    (r"(\d+) leads, average match (\d+)%", "$1 लीड्स, औसत मिलान $2%", "$1 فرص، متوسط التطابق $2%"),
+    (r"(\d+) of (\d+) leads have no stated experience", "$2 में से $1 लीड्स में अनुभव नहीं बताया गया", "$1 من $2 فرص لا تذكر الخبرة"),
+    (r"Hard questions (\d+)% correct \((\d+) answered\)", "कठिन प्रश्न $1% सही ($2 उत्तर दिए)", "الأسئلة الصعبة $1% صحيحة (تمت الإجابة على $2)"),
+    (r"Code questions (\d+)% correct \((\d+) answered\)", "कोड प्रश्न $1% सही ($2 उत्तर दिए)", "أسئلة البرمجة $1% صحيحة (تمت الإجابة على $2)"),
+    (r"Average (\d+)% over (\d+) tests", "$2 टेस्ट में औसत $1%", "المتوسط $1% في $2 اختبارات"),
+    (r"(\d+) completed tests", "$1 पूरे टेस्ट", "$1 اختبارات مكتملة"),
+    (r"(\d+) completed interviews", "$1 पूरे इंटरव्यू", "$1 مقابلات مكتملة"),
+    (r"(\d+) of (\d+) rated leads not relevant", "रेट की गई $2 में से $1 लीड्स अप्रासंगिक", "$1 من $2 فرص مقيّمة غير مناسبة"),
+    (r"Layout (.+)/100, text read (\d+)%", "लेआउट $1/100, पढ़ा गया टेक्स्ट $2%", "التخطيط $1/100، النص المقروء $2%"),
     (r"Matched skills: (.+)", "मेल खाते कौशल: $1", "المهارات المطابقة: $1"),
     (r"Missing required skills: (.+)", "छूटे ज़रूरी कौशल: $1", "المهارات المطلوبة الناقصة: $1"),
     (r"(.+) female voice unavailable on this device\. Azure Speech is required for all six regional voices\.", "इस डिवाइस पर $1 महिला आवाज़ उपलब्ध नहीं। सभी छह क्षेत्रीय आवाज़ों के लिए Azure Speech ज़रूरी है।", "صوت $1 الأنثوي غير متاح على هذا الجهاز. يلزم Azure Speech لجميع الأصوات الإقليمية الستة."),
@@ -810,6 +936,31 @@ PATTERNS = [
     (r"(.+) · Sarah neural", "$1 · सारा न्यूरल", "$1 · سارة العصبية"),
     (r"Match (\d+) percent", "$1 प्रतिशत मिलान", "تطابق $1 بالمئة"),
     (r"Mark (.+) as not relevant", "$1 को अप्रासंगिक चिह्नित करें", "علّم $1 كغير مناسبة"),
+    (r"Core skills for (.+) that your resume does not show", "$1 के मुख्य कौशल जो आपका रिज़्यूमे नहीं दिखाता", "مهارات أساسية لدور $1 لا تُظهرها سيرتك"),
+    (r"Not on your resume: (.+) \((\d+) of (\d+) core skills\)", "आपके रिज़्यूमे में नहीं: $1 ($3 में से $2 मुख्य कौशल)", "غير موجودة في سيرتك: $1 ($2 من $3 مهارات أساسية)"),
+    (r"Learn (.+) and (.+), then build a project: (.+)\.", "$1 और $2 सीखें, फिर एक प्रोजेक्ट बनाएँ: $3।", "تعلّم $1 و$2، ثم ابنِ مشروعًا: $3."),
+    (r"Add (.+), (.+) and (.+) to your resume's Skills section and mention each in a bullet where you used it\.", "$1, $2 और $3 को रिज़्यूमे के कौशल सेक्शन में जोड़ें और हर एक का ज़िक्र उस बिंदु में करें जहाँ आपने उसे इस्तेमाल किया।", "أضف $1، $2 و$3 إلى قسم المهارات في سيرتك واذكر كلًّا منها في نقطة استخدمته فيها."),
+    (r"Add (.+) and (.+) to your resume's Skills section and mention each in a bullet where you used it\.", "$1 और $2 को रिज़्यूमे के कौशल सेक्शन में जोड़ें और हर एक का ज़िक्र उस बिंदु में करें जहाँ आपने उसे इस्तेमाल किया।", "أضف $1 و$2 إلى قسم المهارات في سيرتك واذكر كلًّا منها في نقطة استخدمته فيها."),
+    (r"Add (.+), (.+) and (.+) to your resume if you have used them, with one bullet showing where\.", "अगर आपने $1, $2 और $3 इस्तेमाल किए हैं तो उन्हें रिज़्यूमे में जोड़ें, एक बिंदु के साथ जो दिखाए कहाँ।", "أضف $1، $2 و$3 إلى سيرتك إن كنت قد استخدمتها، مع نقطة تبيّن أين."),
+    (r"Add (.+) and (.+) to your resume if you have used them, with one bullet showing where\.", "अगर आपने $1 और $2 इस्तेमाल किए हैं तो उन्हें रिज़्यूमे में जोड़ें, एक बिंदु के साथ जो दिखाए कहाँ।", "أضف $1 و$2 إلى سيرتك إن كنت قد استخدمتها، مع نقطة تبيّن أين."),
+    (r"List (.+), (.+) and (.+) in your Skills section; your resume already shows you have used them\.", "$1, $2 और $3 को अपने कौशल सेक्शन में लिखें; आपका रिज़्यूमे पहले से दिखाता है कि आपने इन्हें इस्तेमाल किया है।", "أدرج $1، $2 و$3 في قسم المهارات؛ فسيرتك تُظهر أنك استخدمتها."),
+    (r"List (.+) and (.+) in your Skills section; your resume already shows you have used them\.", "$1 और $2 को अपने कौशल सेक्शन में लिखें; आपका रिज़्यूमे पहले से दिखाता है कि आपने इन्हें इस्तेमाल किया है।", "أدرج $1 و$2 في قسم المهارات؛ فسيرتك تُظهر أنك استخدمتها."),
+    (r"Consider a recognised certification such as (.+) or (.+); list it once you have earned it\.", "$1 या $2 जैसे किसी मान्यता प्राप्त सर्टिफ़िकेशन पर विचार करें; मिलने के बाद ही उसे जोड़ें।", "فكّر في شهادة معترف بها مثل $1 أو $2؛ وأدرجها بعد حصولك عليها."),
+    (r"Learn (.+), then build a project: (.+)\.", "$1 सीखें, फिर एक प्रोजेक्ट बनाएँ: $2।", "تعلّم $1، ثم ابنِ مشروعًا: $2."),
+    (r"Skills for (.+) on your profile but missing from your resume", "$1 के कौशल जो आपकी प्रोफ़ाइल में हैं पर रिज़्यूमे में नहीं", "مهارات لدور $1 في ملفك لكنها غائبة عن سيرتك"),
+    (r"On your profile, not on your resume: (.+)", "प्रोफ़ाइल में है, रिज़्यूमे में नहीं: $1", "في ملفك وليست في سيرتك: $1"),
+    (r"Add (.+) to your resume's Skills section and mention each in a bullet where you used it\.", "$1 को रिज़्यूमे के कौशल सेक्शन में जोड़ें और हर एक का ज़िक्र उस बिंदु में करें जहाँ आपने उसे इस्तेमाल किया।", "أضف $1 إلى قسم المهارات في سيرتك واذكر كلًّا منها في نقطة استخدمته فيها."),
+    (r"Recruiters for (.+) look for project evidence from early-career candidates", "$1 के रिक्रूटर शुरुआती करियर वाले उम्मीदवारों से प्रोजेक्ट का प्रमाण देखते हैं", "يبحث مسؤولو التوظيف لدور $1 عن أدلة مشاريع لدى المرشحين في بداية مسيرتهم"),
+    (r"No certification listed for (.+)", "$1 के लिए कोई सर्टिफ़िकेशन नहीं दिया गया", "لا توجد شهادة مذكورة لدور $1"),
+    (r"Consider a recognised certification such as (.+); list it once you have earned it\.", "$1 जैसे किसी मान्यता प्राप्त सर्टिफ़िकेशन पर विचार करें; मिलने के बाद ही उसे जोड़ें।", "فكّر في شهادة معترف بها مثل $1؛ وأدرجها بعد حصولك عليها."),
+    (r"Add (.+) to your resume if you have used them, with one bullet showing where\.", "अगर आपने $1 इस्तेमाल किए हैं तो उन्हें रिज़्यूमे में जोड़ें, एक बिंदु के साथ जो दिखाए कहाँ।", "أضف $1 إلى سيرتك إن كنت قد استخدمتها، مع نقطة تبيّن أين."),
+    (r"In 2 or more of your leads: (.+)", "आपकी 2 या अधिक लीड्स में: $1", "في فرصتين أو أكثر من فرصك: $1"),
+    (r"List (.+) in your Skills section; your resume already shows you have used them\.", "$1 को अपने कौशल सेक्शन में लिखें; आपका रिज़्यूमे पहले से दिखाता है कि आपने इन्हें इस्तेमाल किया है।", "أدرج $1 في قسم المهارات؛ فسيرتك تُظهر أنك استخدمتها."),
+    (r"Add a 2-3 line summary naming (.+), your years of experience and your top three skills\.", "2-3 पंक्तियों का सारांश जोड़ें जिसमें $1, आपके अनुभव के वर्ष और शीर्ष तीन कौशल हों।", "أضف ملخصًا من 2-3 أسطر يذكر $1 وسنوات خبرتك وأهم ثلاث مهارات لديك."),
+    (r"(\d+) of (\d+) bullets include a number", "$2 में से $1 बिंदुओं में संख्या है", "$1 من $2 نقاط تتضمن رقمًا"),
+    (r"(\d+) shown of (\d+) found", "$2 मिलीं, $1 दिखाई गईं", "عُرضت $1 من $2"),
+    (r"(\d+) found, none fit your experience, role or location", "$1 मिलीं, कोई आपके अनुभव, भूमिका या स्थान से मेल नहीं खाती", "وُجدت $1، ولا تناسب أيٌّ منها خبرتك أو دورك أو موقعك"),
+    (r"Not connected: (.+)\. These search Indian job boards beyond LinkedIn and Naukri; connecting them needs an API key from each provider\.", "जुड़े नहीं: $1। ये LinkedIn और Naukri से आगे भारतीय जॉब बोर्ड खोजते हैं; इन्हें जोड़ने के लिए हर प्रदाता की API की चाहिए।", "غير متصلة: $1. تبحث هذه في مواقع وظائف هندية إلى جانب LinkedIn وNaukri؛ ويتطلب ربطها مفتاح API من كل مزوّد."),
     (r"(.+) \(opens in a new tab\)", "$1 (नए टैब में खुलता है)", "$1 (يفتح في علامة تبويب جديدة)"),
 ]
 
@@ -839,9 +990,17 @@ def parse_rows() -> dict[str, tuple[str, str]]:
     return rows
 
 
+# Language packs written to static/ui/i18n. Hindi is switched off for now; its
+# translations stay in the table so it can be re-enabled by adding "hi" here
+# and to LANGUAGES in src/job_hunting_agent/pages.py.
+ENABLED_PACKS = ("ar",)
+PACK_COLUMNS = {"hi": (0, ", "), "ar": (1, "، ")}
+
+
 def build(output_dir: Path) -> None:
     rows = parse_rows()
-    for index, (code, separator) in enumerate((("hi", ", "), ("ar", "، "))):
+    for code in ENABLED_PACKS:
+        index, separator = PACK_COLUMNS[code]
         pack = {
             "lang": code,
             "listSeparator": separator,
@@ -860,4 +1019,7 @@ if __name__ == "__main__":
     target = Path(__file__).resolve().parents[1] / "src" / "job_hunting_agent" / "static" / "ui" / "i18n"
     target.mkdir(parents=True, exist_ok=True)
     build(target)
-    print(f"Wrote {target / 'hi.js'} and {target / 'ar.js'} ({len(parse_rows())} strings, {len(PATTERNS)} patterns)")
+    for code in PACK_COLUMNS:
+        if code not in ENABLED_PACKS:
+            (target / f"{code}.js").unlink(missing_ok=True)  # a disabled language is not served
+    print(f"Wrote {', '.join(f'{code}.js' for code in ENABLED_PACKS)} ({len(parse_rows())} strings, {len(PATTERNS)} patterns)")

@@ -10,17 +10,19 @@ from __future__ import annotations
 
 from html import escape
 
-ASSET_VERSION = "20261031b"
-# Devanagari and Arabic faces are loaded by unicode-range, so English pages
+ASSET_VERSION = "20261101a"
+# Arabic faces are loaded by unicode-range, so English pages
 # download only the Latin files.
 FONTS_URL = (
     "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800"
-    "&family=Public+Sans:wght@400;500;600;700&family=Noto+Sans+Devanagari:wght@400;500;600;700"
+    "&family=Public+Sans:wght@400;500;600;700"
     "&family=Noto+Sans+Arabic:wght@400;500;600;700&display=swap"
 )
 
 # code: (name shown in the picker, text direction)
-LANGUAGES = {"en": ("English", "ltr"), "hi": ("हिन्दी", "ltr"), "ar": ("العربية", "rtl")}
+# Hindi translations are kept in scripts/i18n_strings.py and can be re-enabled
+# by adding "hi" here and to ENABLED_PACKS in that script.
+LANGUAGES = {"en": ("English", "ltr"), "ar": ("العربية", "rtl")}
 
 
 def normalize_lang(value: str | None) -> str:
@@ -193,14 +195,41 @@ _PAGE_STYLE = r"""<style>
   .ux .kpi small { display:block; margin-top:6px; color:var(--muted); font-size:12px; }
   .ux .up { color:var(--good); } .ux .down { color:var(--bad); }
   .ux .two { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:16px; }
+  .ux .two > * { min-width:0; overflow-x:auto; }
   .ux .controls { display:flex; gap:14px; flex-wrap:wrap; align-items:end; }
+  .ux .controls > * { min-width:0; max-width:100%; }
+  .ux .segmented { max-width:100%; flex-wrap:wrap; }
   .ux .control-label { display:block; font-size:13px; font-weight:600; color:var(--muted); margin-bottom:6px; }
   .ux .chart { width:100%; height:220px; }
   .ux .chart text { fill:var(--muted); font-size:10px; }
   .ux .legend { display:flex; gap:14px; font-size:13px; color:var(--muted); margin-top:8px; }
   .ux .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:-1px; }
-  .ux ul.steps { margin:6px 0 0; padding-left:20px; }
+  .ux ul.steps { margin:6px 0 0; padding-inline-start:20px; }
   .ux ul.steps li { margin:6px 0; }
+  .ux .rec { border-color: rgba(255,178,36,.35); background: radial-gradient(120% 140% at 0% 0%, var(--accent-soft), transparent 50%), var(--panel); }
+  .ux .rec-grid { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(0,1fr); gap:22px; align-items:start; }
+  .ux .rec h3 { margin-bottom:12px; }
+  .ux .rec-grid > section { min-width:0; }
+  .ux .gaps-table td { vertical-align:top; }
+  .ux .gaps-table td:first-child { width:1%; white-space:nowrap; }
+  .ux .rec-steps { list-style:none; counter-reset:step; margin:0; padding:0; display:grid; gap:12px; }
+  .ux .rec-steps li { counter-increment:step; position:relative; display:grid; gap:6px; padding:14px 16px 14px 50px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--panel-2); }
+  .ux .rec-steps li::before { content:counter(step); position:absolute; inset-inline-start:14px; top:14px; width:26px; height:26px; border-radius:50%; display:grid; place-items:center; background:var(--accent); color:var(--accent-ink); font:800 13px/1 var(--display); }
+  [dir="rtl"] .ux .rec-steps li { padding:14px 50px 14px 16px; }
+  .ux .rec-step-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .ux .rec-action { font-weight:600; }
+  .ux .rec-steps .btn { justify-self:start; }
+  @media (max-width: 1080px) { .ux .rec-grid { grid-template-columns:1fr; } }
+  .ux .gap-label { display:none; }
+  /* Phones: each gap becomes a small card instead of a four-column row. */
+  @media (max-width: 640px) {
+    .ux .gaps-table thead { display:none; }
+    .ux .gaps-table, .ux .gaps-table tbody, .ux .gaps-table tr, .ux .gaps-table td { display:block; width:auto; }
+    .ux .gaps-table tr { display:grid; grid-template-columns:auto 1fr; gap:4px 10px; padding:12px 14px; border-bottom:1px solid var(--line); }
+    .ux .gaps-table td, .ux .table-wrap .gaps-table td:first-child { padding:0; border:0; }
+    .ux .gaps-table td:nth-child(3), .ux .gaps-table td:nth-child(4) { grid-column:1 / -1; }
+    .ux .gap-label { display:inline; }
+  }
   .ux .bar { min-width:80px; }
   .ux .panel h2 { margin-bottom:12px; font-size:18px; }
   .ux .kpi strong { font-size:24px; }
@@ -229,12 +258,20 @@ _PROGRESS_BODY = r"""
     <div class="controls" style="margin-top:14px">
       <div><span class="control-label" id="period-label">Period</span>
         <div class="segmented" id="period" role="group" aria-labelledby="period-label"><button type="button" data-period="daily" aria-pressed="false">Daily (14 days)</button><button type="button" data-period="weekly" aria-pressed="true">Weekly (8 weeks)</button></div></div>
-      <label style="min-width:260px"><span class="control-label">Job</span><select id="job"><option value="">All practice</option></select></label>
+      <label style="flex:1 1 220px;min-width:0;max-width:420px"><span class="control-label">Job</span><select id="job"><option value="">All practice</option></select></label>
       <span class="muted" id="status" role="status"></span>
     </div>
   </section>
   <section class="kpis" id="kpis" aria-label="Summary"></section>
-  <section class="panel" id="next-steps"><h2>What to do next</h2><ul class="steps" id="steps"></ul></section>
+  <section class="panel rec" id="recommendation" aria-labelledby="rec-title">
+    <div class="panel-head"><div><h2 id="rec-title">Recommendation from Kairoz</h2>
+      <p class="muted" id="rec-basis" style="max-width:76ch">Based on your mock tests, mock interviews, the ATS check of your resume, the skills for your target roles and your job leads.</p></div>
+      <div class="chips" id="rec-summary" aria-live="polite"></div></div>
+    <div class="rec-grid">
+      <section aria-labelledby="gaps-title"><h3 id="gaps-title">Gaps</h3><div id="gaps"><div class="skeleton" style="height:140px"></div></div></section>
+      <section aria-labelledby="next-title"><h3 id="next-title">Next steps</h3><ol class="rec-steps" id="next-steps"></ol></section>
+    </div>
+  </section>
   <section class="two">
     <div class="panel"><h2>Mock Test scores</h2><div id="test-chart"></div><div class="legend"><span><i style="background:var(--info)"></i>Attempts</span><span><i style="background:var(--good)"></i>Average score %</span></div></div>
     <div class="panel"><h2>Mock Interview scores</h2><div id="interview-chart"></div><div class="legend"><span><i style="background:var(--info)"></i>Sessions</span><span><i style="background:var(--accent)"></i>Average score</span></div></div>
@@ -287,6 +324,35 @@ _PROGRESS_SCRIPT = _ESCAPE_JS + r"""
     function bar(percent, status) {
       return `<div class="bar"><i class="${escapeHtml(status || '')}" style="width:${Math.max(0, Math.min(100, Number(percent) || 0))}%"></i></div>`;
     }
+    const PRIORITY = { high: ['High', 'bad'], medium: ['Medium', 'warn'], low: ['Low', 'info'] };
+    function priorityBadge(level) {
+      const [label, kind] = PRIORITY[level] || PRIORITY.low;
+      return `<span class="badge ${kind}">${escapeHtml(label)}</span>`;
+    }
+    function renderRecommendation(rec) {
+      const gaps = rec.gaps || [];
+      const based = rec.based_on || {};
+      const summary = rec.summary || {};
+      // One fixed sentence shape per case, so it can be translated whole.
+      if (based.mock_tests !== undefined) {
+        const roles = (based.target_roles || []).length ? ` Target roles: ${based.target_roles.join(', ')}.` : '';
+        document.getElementById('rec-basis').innerHTML = (based.resume_checked_at
+          ? `<span>${escapeHtml(`Based on ${based.mock_tests} mock tests, ${based.mock_interviews} mock interviews, your resume check on ${String(based.resume_checked_at).slice(0, 10)} and ${based.job_leads || 0} job leads.`)}</span>`
+          : `<span>${escapeHtml(`Based on ${based.mock_tests} mock tests and ${based.mock_interviews} mock interviews.`)}</span>`)
+          + (roles ? ` <span>${escapeHtml(roles.trim())}</span>` : '');
+      }
+      document.getElementById('rec-summary').innerHTML = ['high', 'medium', 'low'].filter((level) => summary[level])
+        .map((level) => `<span class="badge ${PRIORITY[level][1]}">${escapeHtml(`${summary[level]} ${PRIORITY[level][0].toLowerCase()} priority`)}</span>`).join('');
+      document.getElementById('gaps').innerHTML = gaps.length
+        ? `<div class="table-wrap"><table class="gaps-table"><thead><tr><th>Priority</th><th>Area</th><th>Gap</th><th>What we saw</th></tr></thead><tbody>${gaps.map((gap) => `<tr><td>${priorityBadge(gap.priority)}</td><td><strong>${escapeHtml(gap.area)}</strong></td><td>${escapeHtml(gap.gap)}</td><td class="faint"><span class="gap-label">What we saw: </span>${escapeHtml(gap.evidence)}</td></tr>`).join('')}</tbody></table></div>`
+        : `<div class="notice good"><span>${escapeHtml(rec.unavailable ? 'Recommendations are not available right now.' : 'No gaps found. Your resume, job leads and practice scores look strong.')}</span></div>`;
+      document.getElementById('next-steps').innerHTML = (rec.next_steps || []).map((step) => `<li>
+          <div class="rec-step-head">${priorityBadge(step.priority)}<span class="faint">${escapeHtml(step.area)}</span></div>
+          <p class="rec-action">${escapeHtml(step.action)}</p>
+          <p class="faint">Why: <span>${escapeHtml(step.why)}</span></p>
+          ${step.link ? `<a class="btn btn-sm" href="${escapeHtml(step.link)}">${escapeHtml(step.link_label || 'Open')}</a>` : ''}
+        </li>`).join('');
+    }
     function render(report) {
       const t = report.mock_test, iv = report.mock_interview;
       document.getElementById('kpis').innerHTML = [
@@ -296,7 +362,7 @@ _PROGRESS_SCRIPT = _ESCAPE_JS + r"""
         kpi('Interview average', iv.summary.avg_score === null ? '-' : iv.summary.avg_score + '/100', change(iv.summary.change, ' pts')),
         kpi('Completed', `${t.summary.completed} tests, ${iv.summary.completed} interviews`, `<small>Completion: tests ${t.summary.completion_rate === null ? '-' : Math.round(t.summary.completion_rate * 100) + '%'}, interviews ${iv.summary.completion_rate === null ? '-' : Math.round(iv.summary.completion_rate * 100) + '%'}</small>`),
       ].join('');
-      document.getElementById('steps').innerHTML = report.next_steps.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
+      renderRecommendation(report.recommendations || {});
       document.getElementById('test-chart').innerHTML = chart(t.buckets, 'attempts', 'avg_percent', 'var(--good)', 100);
       document.getElementById('interview-chart').innerHTML = chart(iv.buckets, 'sessions', 'avg_score', 'var(--accent)', 100);
       document.getElementById('topics').innerHTML = t.topics.length ? `<table><thead><tr><th>Topic</th><th>Accuracy</th><th></th><th>Change</th></tr></thead><tbody>${t.topics.map((row) => `<tr><td>${escapeHtml(row.label)}<br><span class="faint">${escapeHtml(row.correct)}/${escapeHtml(row.answered)} correct</span></td><td>${escapeHtml(row.percent)}%</td><td>${bar(row.percent, row.status)}</td><td class="${row.change > 0 ? 'up' : row.change < 0 ? 'down' : ''}">${row.change === null ? '-' : (row.change > 0 ? '+' : '') + row.change}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Complete a mock test to see topic accuracy.</p>';

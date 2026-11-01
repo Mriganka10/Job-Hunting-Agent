@@ -557,7 +557,9 @@ def _localized(html: str, lang: str | None) -> HTMLResponse:
     from .pages import localize_document
 
     response = HTMLResponse(localize_document(html, lang or ""))
-    response.headers["Content-Language"] = (lang or "en") if (lang or "en") in {"en", "hi", "ar"} else "en"
+    from .pages import normalize_lang
+
+    response.headers["Content-Language"] = normalize_lang(lang)
     response.headers["Vary"] = "Cookie"
     return response
 
@@ -4372,6 +4374,7 @@ def _page(user_email: str, profile: dict) -> str:
       <label>Minimum match <span class="range-value" id="filter-score-value">0%</span><input id="filter-score" type="range" min="0" max="100" step="5" value="0"></label>
       <label>Sort<select id="filter-sort"><option value="match">Best match</option><option value="newest">Newest</option><option value="company">Company A to Z</option></select></label>
     </div>
+    <div id="source-mix"></div>
     <p class="faint" id="jobs-count" aria-live="polite"></p>
     <div id="jobs-list"></div>
     <div class="btn-row" id="jobs-more" style="justify-content:center"></div>
