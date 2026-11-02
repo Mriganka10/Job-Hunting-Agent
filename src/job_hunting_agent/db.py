@@ -500,6 +500,31 @@ def mock_interview_question_history(user_email: str, session_limit: int = 200) -
     return history
 
 
+def count_mock_interviews_since(user_email: str, since: datetime) -> int:
+    """Interview sessions this account started at or after ``since`` (weekly quota)."""
+    return _count_started_since("mock_interview_records", user_email, since)
+
+
+def count_mock_tests_since(user_email: str, since: datetime) -> int:
+    """Mock tests this account started at or after ``since`` (weekly quota)."""
+    return _count_started_since("mock_test_records", user_email, since)
+
+
+def _count_started_since(table: str, user_email: str, since: datetime) -> int:
+    if table not in {"mock_interview_records", "mock_test_records"}:
+        raise ValueError(f"Unsupported table for usage counts: {table}")
+    # Postgres compares TIMESTAMPTZ values; SQLite stores UTC ISO text in one
+    # fixed format, so string comparison against the same format is ordered.
+    boundary: Any = since.astimezone(timezone.utc) if IS_POSTGRES else _serialize_time(since)
+    with connection() as conn:
+        row = _fetchone(
+            conn,
+            f"SELECT COUNT(*) AS n FROM {table} WHERE user_email = ? AND started_at >= ?",
+            (normalize_email(user_email), boundary),
+        )
+    return int((row or {}).get("n") or 0)
+
+
 def save_user_profile(
     user_email: str,
     profile_payload: dict[str, Any],

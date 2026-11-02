@@ -5,7 +5,11 @@ environment variables so operations can tune them without a deploy:
 
     JOB_AGENT_RATE_LIMITS=off              # disable all limits (local tests only)
     JOB_AGENT_LIMIT_RUN=10/3600            # 10 agent runs per user per hour
+    JOB_AGENT_LIMIT_TAILORED_RESUME=15/3600
+    JOB_AGENT_LIMIT_SPEECH=60/3600
     JOB_AGENT_LIMIT_OTP_REQUEST_EMAIL=3/900
+
+Weekly per-account quotas (mock interviews, mock tests) are in ``quotas``.
 
 A limit is "<count>/<window seconds>".
 """
@@ -26,12 +30,14 @@ DEFAULT_LIMITS: dict[str, tuple[int, int]] = {
     "otp_verify_ip": (30, 15 * 60),
     "register_ip": (10, 60 * 60),
     # Expensive work (portal calls, LLM calls, PDF rendering)
-    "run": (10, 60 * 60),
+    "run": (10, 60 * 60),  # Run Agent: JSearch/Adzuna + LLM ATS review
     "schedule": (10, 60 * 60),
-    "tailored_resume": (60, 60 * 60),
+    "tailored_resume": (15, 60 * 60),  # tailored / template resume preparation
+    # Short burst limits only. The weekly per-account caps for mock tests and
+    # interviews live in ``quotas`` (JOB_AGENT_QUOTA_*_WEEKLY).
     "mock_test": (30, 24 * 60 * 60),
     "mock_interview": (20, 24 * 60 * 60),
-    "speech": (300, 60 * 60),
+    "speech": (60, 60 * 60),  # Azure Speech: interview questions + accent previews
     # Feedback endpoints (cheap, but stop scripted floods)
     "feedback": (600, 60 * 60),
     "account_delete": (3, 24 * 60 * 60),

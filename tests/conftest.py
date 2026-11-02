@@ -9,6 +9,7 @@ back on and tests it explicitly.
 import os
 
 os.environ.setdefault("JOB_AGENT_RATE_LIMITS", "off")
+os.environ.setdefault("JOB_AGENT_QUOTAS", "off")  # tests/test_quotas.py turns weekly quotas back on
 os.environ.setdefault("JOB_AGENT_REQUIRE_CONSENT", "false")
 os.environ.setdefault("JOB_AGENT_OUTBOX_SENDER", "off")
 os.environ.setdefault("JOB_AGENT_RETENTION", "off")
