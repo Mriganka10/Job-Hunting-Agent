@@ -255,6 +255,7 @@ _ESCAPE_JS = r"""
 _PROGRESS_BODY = r"""
   <section>
     <p class="muted" style="max-width:68ch">Daily and weekly trends for your mock tests and mock interviews, for all practice or one job.</p>
+    <div class="chips" id="quota" aria-live="polite" style="margin-top:10px"></div>
     <div class="controls" style="margin-top:14px">
       <div><span class="control-label" id="period-label">Period</span>
         <div class="segmented" id="period" role="group" aria-labelledby="period-label"><button type="button" data-period="daily" aria-pressed="false">Daily (14 days)</button><button type="button" data-period="weekly" aria-pressed="true">Weekly (8 weeks)</button></div></div>
@@ -401,6 +402,24 @@ _PROGRESS_SCRIPT = _ESCAPE_JS + r"""
     }));
     document.getElementById('job').addEventListener('change', (event) => { state.job = event.target.value; load(); });
     load();
+    async function loadQuota() {
+      // This calendar week's allowance (Mon-Sun): the reports above can only
+      // contain the sessions the weekly limits allowed.
+      try {
+        const usage = (await api('/api/usage')).usage || {};
+        document.getElementById('quota').innerHTML = ['mock_interview', 'mock_test']
+          .filter((key) => usage[key])
+          .map((key) => {
+            const item = usage[key];
+            const name = key === 'mock_interview' ? 'Mock interviews' : 'Mock tests';
+            const value = item.unlimited ? `${item.used} used (no limit)` : `${item.used} of ${item.limit} used`;
+            return `<span class="chip">${escapeHtml(name)} this week: ${escapeHtml(value)}</span>`;
+          }).join('') + (usage.mock_test ? `<span class="chip">Resets ${escapeHtml(usage.mock_test.resets_label)}</span>` : '');
+      } catch (error) {
+        document.getElementById('quota').innerHTML = '';
+      }
+    }
+    loadQuota();
 """
 
 

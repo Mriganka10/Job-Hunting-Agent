@@ -74,8 +74,9 @@ from .resume_builder import write_base_resume, write_tailored_resume
 from .resume_validation import change_summary
 from .scheduler_backend import delete_user_schedule, upsert_user_schedule, uses_eventbridge_scheduler
 from .storage import StoredObject, download_file, mirror_artifacts, presigned_download_url, upload_file
-from . import approvals, metrics, ops_db, privacy
+from . import approvals, metrics, ops_db, privacy, quotas
 from .guardrails import RateLimited, enforce as enforce_limit
+from .quotas import QuotaExceeded
 from .llm_client import start_run_budget
 from fastapi.responses import JSONResponse
 
@@ -90,6 +91,16 @@ def _rate_limited(_: Request, exc: RateLimited) -> JSONResponse:
     minutes = max(1, round(exc.retry_after / 60))
     return JSONResponse(
         {"detail": f"Too many requests. Please try again in about {minutes} minute{'s' if minutes != 1 else ''}.", "retry_after": exc.retry_after},
+        status_code=429,
+        headers={"Retry-After": str(exc.retry_after)},
+    )
+
+
+@app.exception_handler(QuotaExceeded)
+def _quota_exceeded(_: Request, exc: QuotaExceeded) -> JSONResponse:
+    metrics.emit("quota_exceeded", persist=False, limit=exc.name)
+    return JSONResponse(
+        {"detail": exc.usage["message"], "retry_after": exc.retry_after, "quota": exc.usage},
         status_code=429,
         headers={"Retry-After": str(exc.retry_after)},
     )
@@ -800,6 +811,10 @@ def start_mock_interview(
     # Keep history lookup and reservation together so two simultaneous starts in
     # this process cannot receive the same unseen set.
     with _interview_start_lock:
+        # Weekly per-account quota: checked after the request is validated so a
+        # rejected request never uses a slot, and inside the lock so two
+        # simultaneous starts cannot both take the last one.
+        quotas.check("mock_interview", user_email)
         history = mock_interview_question_history(user_email)
         if interview.get("job_fit_group"):
             questions = select_job_interview_sequence(
@@ -843,6 +858,7 @@ def start_mock_interview(
         "skills": interview["skills"],
         "job": interview.get("job"),
         "questions": questions,
+        "usage": quotas.usage("mock_interview", user_email),
         "selection": {
             "new_questions": sum(not question["previously_asked"] for question in questions),
             "reused_questions": sum(question["previously_asked"] for question in questions),
@@ -931,6 +947,8 @@ def start_mock_test(
             raise HTTPException(status_code=404, detail="Job lead not found in your recent runs.")
     profile = _profile_for_user(user_email)
     with _mock_test_start_lock:
+        # Weekly per-account quota, checked before any LLM question generation.
+        quotas.check("mock_test", user_email)
         test = build_mock_test(
             job,
             profile,
@@ -954,7 +972,7 @@ def start_mock_test(
     record = mock_test_record(user_email, test_id) or {}
     metrics.emit("mock_test_started", user_email=user_email, job_specific=bool(job), length=length, difficulty=difficulty,
                  coding_questions=sum(1 for item in test["questions"] if item.get("kind") == "code"))
-    return _mock_test_client_payload(record)
+    return {**_mock_test_client_payload(record), "usage": quotas.usage("mock_test", user_email)}
 
 
 @app.post("/api/mock-test/submit")
@@ -1199,6 +1217,13 @@ def admin_metrics_page(job_agent_session: str | None = Cookie(default=None, alia
     from .pages import admin_metrics_page as render
 
     return _localized(render(user_email), jha_lang)
+
+
+@app.get("/api/usage")
+def usage_this_week(job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    """This calendar week's mock interview and mock test usage for the signed-in account."""
+    user_email = require_user(job_agent_session)
+    return {"usage": quotas.usage_summary(user_email)}
 
 
 @app.get("/progress", response_class=HTMLResponse)
@@ -2447,10 +2472,11 @@ def preview_interviewer_accent(
     payload: Annotated[dict, Body()],
     job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> Response:
-    require_user(job_agent_session)
+    user_email = require_user(job_agent_session)
     voice = _accent_for_region(str(payload.get("region") or "India"))
     if not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
         raise HTTPException(status_code=503, detail="Regional neural speech requires Azure Speech configuration.")
+    enforce_limit("speech", user_email)  # previews call Azure too; same hourly budget
     try:
         audio = _azure_speech_audio(
             "Hello, I'm Sarah, your interviewer. Tell me about a project you are proud of and the impact of your work.", voice
@@ -3014,6 +3040,7 @@ def _mock_interview_page(user_email: str) -> str:
           <button id="start-btn" class="primary" type="button">Start Interview</button>
           <button id="stop-btn" class="danger hidden" type="button">End</button>
         </div>
+        <p id="quota-note" class="muted" role="status" style="margin:8px 0 0;font-size:13px"></p>
       </section>
       <div class="progress"><span id="progress-bar"></span></div>
       <section class="interview-grid">
@@ -3352,6 +3379,19 @@ def _mock_interview_page(user_email: str) -> str:
         </div>
       `).join('') : '<p class="muted">No completed interviews yet.</p>');
     }}
+    async function loadQuota() {{
+      const note = document.getElementById('quota-note');
+      try {{
+        const response = await fetch('/api/usage');
+        if (!response.ok) return;
+        const usage = ((await response.json()).usage || {{}}).mock_interview;
+        if (!usage) return;
+        note.textContent = usage.message;
+        if (!usage.unlimited && usage.remaining === 0) startBtn.disabled = true;
+      }} catch (error) {{
+        note.textContent = '';
+      }}
+    }}
     async function startInterview() {{
       stopAccentPreview();
       region.disabled = true;
@@ -3368,8 +3408,10 @@ def _mock_interview_page(user_email: str) -> str:
       if (!response.ok) {{
         statusText.textContent = payload.detail || 'Unable to start interview.';
         setInterviewActive(false);
+        loadQuota();
         return;
       }}
+      if (payload.usage) document.getElementById('quota-note').textContent = payload.usage.message;
       await waitForVoices();
       session = payload;
       activeIndex = 0;
@@ -3496,6 +3538,7 @@ def _mock_interview_page(user_email: str) -> str:
       }}
       renderScorecard(payload.scorecard);
       loadHistory();
+      loadQuota();
     }}
     function renderScorecard(card) {{
       scorecard.classList.remove('hidden');
@@ -3643,6 +3686,7 @@ def _mock_interview_page(user_email: str) -> str:
     renderTranscript();
     loadQuestions();
     loadHistory();
+    loadQuota();
   </script>
 </body>
 </html>"""
@@ -3814,6 +3858,7 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
               <button type="button" class="btn primary" id="start-button">Start Mock Test</button>
               <span class="muted" id="setup-status"></span>
             </div>
+            <p class="muted" id="quota-note" role="status" style="margin:8px 0 0;font-size:13px"></p>
             <div id="setup-error" class="notice error hidden" role="alert"></div>
           </div>
           <div class="card">
@@ -3995,6 +4040,20 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
         $('history').textContent = 'History is unavailable right now.';
       }
     }
+    let quotaBlocked = false;
+    function showQuota(usage) {
+      if (!usage) return;
+      $('quota-note').textContent = usage.message;
+      quotaBlocked = !usage.unlimited && usage.remaining === 0;
+      $('start-button').disabled = quotaBlocked;
+    }
+    async function loadQuota() {
+      try {
+        showQuota(((await api('/api/usage')).usage || {}).mock_test);
+      } catch (error) {
+        $('quota-note').textContent = '';
+      }
+    }
     async function startTest(setup) {
       setError('');
       $('start-button').disabled = true;
@@ -4002,11 +4061,13 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
       try {
         const test = await api('/api/mock-test/start', { method: 'POST', body: JSON.stringify(setup) });
         state.lastSetup = setup;
+        showQuota(test.usage);
         beginTest(test);
       } catch (error) {
         setError(error.message);
+        loadQuota();
       } finally {
-        $('start-button').disabled = false;
+        $('start-button').disabled = quotaBlocked;
         $('setup-status').textContent = '';
       }
     }
@@ -4242,6 +4303,7 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
     });
     window.addEventListener('beforeunload', () => { recordTime(); saveProgress(); });
     loadOptions();
+    loadQuota();
   </script>
 </body>
 </html>
