@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from html import escape
 
-ASSET_VERSION = "20261101a"
+ASSET_VERSION = "20261117a"
 # Arabic faces are loaded by unicode-range, so English pages
 # download only the Latin files.
 FONTS_URL = (

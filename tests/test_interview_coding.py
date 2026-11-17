@@ -97,7 +97,7 @@ def test_job_interview_api_includes_coding_and_level():
     client.post("/api/auth/verify", data={"email": email, "otp": otp})
     preview = client.get("/api/mock-interview/questions", params={"job_id": "naukri:55", "run_id": run_id}).json()
     assert preview["level"] == "entry" and preview["coding_slots"]["standard"] == 2
-    session = client.post("/api/mock-interview/start", json={"interview_mode": "standard", "job_id": "naukri:55", "run_id": run_id}).json()
+    session = client.post("/api/mock-interview/start", json={"proctor_ready": True, "interview_mode": "standard", "job_id": "naukri:55", "run_id": run_id}).json()
     assert session["level"] == "entry"
     coding = [item for item in session["questions"] if item.get("coding")]
     assert len(coding) == 2 and sum(item["topic"] == "job_fit" for item in session["questions"]) == 3

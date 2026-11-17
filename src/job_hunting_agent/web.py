@@ -74,13 +74,14 @@ from .resume_builder import write_base_resume, write_tailored_resume
 from .resume_validation import change_summary
 from .scheduler_backend import delete_user_schedule, upsert_user_schedule, uses_eventbridge_scheduler
 from .storage import StoredObject, download_file, mirror_artifacts, presigned_download_url, upload_file
-from . import approvals, metrics, ops_db, privacy, quotas
+from . import approvals, metrics, ops_db, privacy, proctor, quotas
 from .guardrails import RateLimited, enforce as enforce_limit
 from .quotas import QuotaExceeded
 from .llm_client import start_run_budget
 from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Job Hunting Agent")
+SCHEDULE_TIMEZONE = "Asia/Kolkata"
 ADMIN_EMAILS = {item.strip().lower() for item in os.getenv("JOB_AGENT_ADMIN_EMAILS", "").split(",") if item.strip()}
 REQUIRE_CONSENT = os.getenv("JOB_AGENT_REQUIRE_CONSENT", "true").strip().lower() not in {"false", "0", "off", "no"}
 
@@ -197,7 +198,7 @@ class DailyScheduler:
         self.created_at: str | None = None
         self.next_run_at: str | None = None
         self.daily_at: str | None = None
-        self.timezone_name: str = "UTC"
+        self.timezone_name: str = SCHEDULE_TIMEZONE
         self.resume_path: str | None = None
         self.resume_uri: str = ""
         self.config: AppConfig | None = None
@@ -211,7 +212,7 @@ class DailyScheduler:
         config: AppConfig,
         daily_at: str,
         user_email: str,
-        timezone_name: str = "UTC",
+        timezone_name: str = SCHEDULE_TIMEZONE,
         resume_uri: str = "",
         persist: bool = True,
     ) -> None:
@@ -256,6 +257,7 @@ class DailyScheduler:
         self._thread = None
         self._externally_active = False
         self.next_run_at = None
+        self.timezone_name = SCHEDULE_TIMEZONE
 
     @property
     def is_running(self) -> bool:
@@ -379,7 +381,7 @@ def restore_active_schedule() -> None:
                 _config_from_payload(saved["config_payload"]),
                 saved["daily_at"],
                 saved["user_email"],
-                timezone_name=saved.get("timezone") or "UTC",
+                timezone_name=saved.get("timezone") or SCHEDULE_TIMEZONE,
                 resume_uri=saved.get("resume_uri") or "",
                 persist=False,
             )
@@ -396,7 +398,7 @@ def _empty_scheduler_snapshot() -> dict:
     return {
         "running": False,
         "daily_at": None,
-        "timezone": "UTC",
+        "timezone": SCHEDULE_TIMEZONE,
         "next_run_at": None,
         "created_at": None,
         "last_run_at": None,
@@ -782,6 +784,48 @@ def mock_interview_questions(
     return interview
 
 
+def _proctored_record(user_email: str, kind: str, assessment_id: int) -> dict:
+    if kind == "mock_test":
+        record = mock_test_record(user_email, assessment_id)
+    elif kind == "mock_interview":
+        record = mock_interview_session(user_email, assessment_id)
+    else:
+        raise HTTPException(status_code=400, detail="Unknown assessment type.")
+    if not record:
+        raise HTTPException(status_code=404, detail="Assessment not found.")
+    return record
+
+
+@app.post("/api/proctor/heartbeat")
+def proctor_heartbeat(payload: Annotated[dict, Body()], job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    kind, assessment_id = str(payload.get("kind") or ""), int(payload.get("assessment_id") or 0)
+    _proctored_record(user_email, kind, assessment_id)
+    result = proctor.heartbeat(user_email, kind, assessment_id)
+    if not result:
+        raise HTTPException(status_code=409, detail="This assessment was not started with monitoring.")
+    return result
+
+
+@app.post("/api/proctor/event")
+def proctor_event(payload: Annotated[dict, Body()], job_agent_session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+    user_email = require_user(job_agent_session)
+    kind, assessment_id = str(payload.get("kind") or ""), int(payload.get("assessment_id") or 0)
+    _proctored_record(user_email, kind, assessment_id)
+    try:
+        confidence = payload.get("confidence")
+        result = proctor.report(user_email, kind, assessment_id,
+            event_id=str(payload.get("event_id") or ""), signal=str(payload.get("signal") or ""),
+            confidence=max(0.0, min(1.0, float(confidence))) if confidence is not None else None)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid monitoring event.") from exc
+    if not result:
+        raise HTTPException(status_code=409, detail="This assessment was not started with monitoring.")
+    if result.get("action") in {"warning", "terminated"}:
+        metrics.emit("assessment_proctor_event", user_email=user_email, kind=kind, signal=result["signal"], action=result["action"])
+    return result
+
+
 @app.post("/api/mock-interview/start")
 def start_mock_interview(
     payload: Annotated[dict, Body()],
@@ -807,6 +851,8 @@ def start_mock_interview(
     mode_limits = {"quick": 5, "standard": 8, "deep": 10}
     if interview_mode not in mode_limits:
         raise HTTPException(status_code=400, detail="Interview mode must be quick, standard, or deep.")
+    if payload.get("proctor_ready") is not True:
+        raise HTTPException(status_code=428, detail="Enable camera and microphone, pass the room check, and enter fullscreen before starting.")
     question_limit = mode_limits[interview_mode]
     # Keep history lookup and reservation together so two simultaneous starts in
     # this process cannot receive the same unseen set.
@@ -844,6 +890,7 @@ def start_mock_interview(
             job_title=str((job or {}).get("title") or ""),
             company=str((job or {}).get("company") or ""),
         )
+        proctor.start(user_email, "mock_interview", session_id)
     metrics.emit("mock_interview_started", user_email=user_email, job_specific=bool(job), mode=interview_mode,
                  coding_questions=sum(1 for item in questions if item.get("answer_mode") == "code"))
     return {
@@ -882,6 +929,10 @@ def complete_mock_interview(
     session = mock_interview_session(user_email, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Interview session not found.")
+    try:
+        proctor.require_active(user_email, "mock_interview", session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     session_questions = session.get("questions") or []
     scorecard = _score_mock_interview(
         answers,
@@ -897,6 +948,7 @@ def complete_mock_interview(
         score=scorecard["score"],
         feedback=scorecard,
     )
+    proctor.finish(user_email, "mock_interview", session_id)
     metrics.emit(
         "mock_interview_completed", user_email=user_email, value=float(scorecard.get("score") or 0),
         job_specific=bool(session.get("job_id")), answered=int(scorecard.get("answered") or 0),
@@ -945,6 +997,8 @@ def start_mock_test(
         job = _mock_test_job(user_email, job_id, run_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Job lead not found in your recent runs.")
+    if payload.get("proctor_ready") is not True:
+        raise HTTPException(status_code=428, detail="Enable camera and microphone, pass the room check, and enter fullscreen before starting.")
     profile = _profile_for_user(user_email)
     with _mock_test_start_lock:
         # Weekly per-account quota, checked before any LLM question generation.
@@ -969,6 +1023,7 @@ def start_mock_test(
             questions=test["questions"],
             time_limit_seconds=test["time_limit_seconds"],
         )
+        proctor.start(user_email, "mock_test", test_id)
     record = mock_test_record(user_email, test_id) or {}
     metrics.emit("mock_test_started", user_email=user_email, job_specific=bool(job), length=length, difficulty=difficulty,
                  coding_questions=sum(1 for item in test["questions"] if item.get("kind") == "code"))
@@ -990,6 +1045,10 @@ def submit_mock_test(
     if record.get("status") == "completed":
         # A test is graded once; resubmitting returns the original scorecard.
         return {**_mock_test_client_payload(record), "already_submitted": True}
+    try:
+        proctor.require_active(user_email, "mock_test", test_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     answers = payload.get("answers") or {}
     if not isinstance(answers, (dict, list)):
         raise HTTPException(status_code=400, detail="Answers must be an object of question id to option index.")
@@ -1010,6 +1069,7 @@ def submit_mock_test(
     )
     stored_answers = {item["id"]: item["selected_index"] for item in scorecard["review"]}
     saved = complete_mock_test(user_email, test_id, answers=stored_answers, scorecard=scorecard) or record
+    proctor.finish(user_email, "mock_test", test_id)
     metrics.emit("mock_test_completed", user_email=user_email, value=float(scorecard.get("percent") or 0),
                  job_specific=bool(record.get("job_id")), questions=int(scorecard.get("total") or 0),
                  timed_out=bool((scorecard.get("time") or {}).get("submitted_after_time_limit")))
@@ -1279,7 +1339,7 @@ async def run_now(
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
-    daily_timezone: Annotated[str, Form()] = "UTC",
+    daily_timezone: Annotated[str, Form()] = SCHEDULE_TIMEZONE,
     start_daily: Annotated[bool, Form()] = False,
     consent: Annotated[bool, Form()] = False,
 ) -> dict:
@@ -1326,10 +1386,10 @@ async def run_now(
             config,
             daily_at,
             user_email,
-            daily_timezone,
+            SCHEDULE_TIMEZONE,
             stored_resume.uri,
         )
-        result["scheduler"] = {"running": True, "daily_at": daily_at, "timezone": daily_timezone}
+        result["scheduler"] = {"running": True, "daily_at": daily_at, "timezone": SCHEDULE_TIMEZONE}
     return result
 
 
@@ -1350,7 +1410,7 @@ async def start_scheduler(
     application_mode: Annotated[str, Form()] = "draft",
     max_jobs_per_portal: Annotated[int, Form()] = 10,
     daily_at: Annotated[str, Form()] = "",
-    daily_timezone: Annotated[str, Form()] = "UTC",
+    daily_timezone: Annotated[str, Form()] = SCHEDULE_TIMEZONE,
     consent: Annotated[bool, Form()] = False,
 ) -> dict:
     user_email = require_user(job_agent_session)
@@ -1382,7 +1442,7 @@ async def start_scheduler(
         config,
         daily_at,
         user_email,
-        timezone_name=daily_timezone,
+        timezone_name=SCHEDULE_TIMEZONE,
         resume_uri=stored_resume.uri,
     )
     return {"status": "scheduled", "scheduler": scheduler.snapshot()}
@@ -1508,7 +1568,7 @@ def run_scheduled_user(user_email: str) -> dict:
         update_schedule_status(user_email, last_error=str(exc))
         raise
     hour, minute = _parse_hhmm(saved["daily_at"])
-    next_run = _next_run_time(hour, minute, _timezone(saved.get("timezone") or "UTC"))
+    next_run = _next_run_time(hour, minute, _timezone(saved.get("timezone") or SCHEDULE_TIMEZONE))
     update_schedule_status(
         user_email,
         next_run_at=next_run.isoformat(timespec="minutes"),
@@ -2182,7 +2242,7 @@ def _persisted_scheduler_snapshot(user_email: str) -> dict:
     return {
         "running": bool(saved.get("active")),
         "daily_at": saved.get("daily_at"),
-        "timezone": saved.get("timezone") or "UTC",
+        "timezone": (saved.get("timezone") if saved.get("active") else SCHEDULE_TIMEZONE) or SCHEDULE_TIMEZONE,
         "next_run_at": saved.get("next_run_at"),
         "created_at": saved.get("created_at"),
         "last_run_at": saved.get("last_run_at"),
@@ -2293,9 +2353,11 @@ def _mock_test_job_summary(job: dict, run_id: int) -> dict:
 def _mock_test_client_payload(record: dict) -> dict:
     """Shape a stored test for the browser; the key is included only after grading."""
     completed = record.get("status") == "completed"
+    monitoring = proctor.state(str(record.get("user_email") or ""), "mock_test", int(record.get("id") or 0))
+    terminated = bool(monitoring and monitoring["status"] == "terminated")
     payload = {
         "test_id": record.get("id"),
-        "status": record.get("status"),
+        "status": "terminated" if terminated else record.get("status"),
         "job_id": record.get("job_id") or "",
         "run_id": record.get("run_id"),
         "job_title": record.get("job_title") or "General practice",
@@ -2306,7 +2368,8 @@ def _mock_test_client_payload(record: dict) -> dict:
         "time_limit_seconds": int(record.get("time_limit_seconds") or 0),
         "started_at": record.get("started_at"),
         "completed_at": record.get("completed_at"),
-        "questions": public_questions(record.get("questions") or []),
+        "questions": [] if terminated else public_questions(record.get("questions") or []),
+        "monitoring": monitoring,
         "difficulty_mix": {
             name: sum(1 for item in record.get("questions") or [] if item.get("difficulty") == name) for name in ("easy", "medium", "hard")
         },
@@ -2644,7 +2707,7 @@ def _parse_hhmm(value: str) -> tuple[int, int]:
 
 
 def _next_run_time(hour: int, minute: int, zone: ZoneInfo | None = None) -> datetime:
-    zone = zone or _timezone("UTC")
+    zone = zone or _timezone(SCHEDULE_TIMEZONE)
     now = datetime.now(zone)
     next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if next_run <= now:
@@ -2654,9 +2717,9 @@ def _next_run_time(hour: int, minute: int, zone: ZoneInfo | None = None) -> date
 
 def _timezone(timezone_name: str) -> ZoneInfo:
     try:
-        return ZoneInfo(timezone_name or "UTC")
+        return ZoneInfo(timezone_name or SCHEDULE_TIMEZONE)
     except ZoneInfoNotFoundError:
-        return ZoneInfo("UTC")
+        return ZoneInfo(SCHEDULE_TIMEZONE)
 
 
 def _config_payload(config: AppConfig) -> dict:
@@ -2899,6 +2962,7 @@ def _mock_interview_page(user_email: str) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Virtual Mock Interview - Job Hunting Agent</title>
+  <link rel="stylesheet" href="/static/ui/assessment_proctor.css?v=1">
   <style>
     :root {{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#142033; --muted:#8ca0bd; --blue:#2563eb; --line:#29405f; --green:#22c55e; --gold:#f59e0b; --panel:rgba(13, 25, 43, .92); --panel2:rgba(17, 31, 52, .96); }}
     * {{ box-sizing: border-box; }}
@@ -3036,10 +3100,12 @@ def _mock_interview_page(user_email: str) -> str:
           </select>
         </div>
         <div class="setup-actions">
-          <button id="camera-btn" class="ghost" type="button">Enable Camera</button>
+          <button id="camera-btn" class="ghost" type="button">Check Camera &amp; Microphone</button>
           <button id="start-btn" class="primary" type="button">Start Interview</button>
           <button id="stop-btn" class="danger hidden" type="button">End</button>
+          <p id="camera-check-status" class="muted" role="status" aria-live="polite" style="flex-basis:100%;margin:0">Check your camera and microphone before starting.</p>
         </div>
+        <p class="muted">Starting requires camera, microphone, one visible face, adequate lighting, and fullscreen. Two warnings are allowed; a third confirmed violation stops the interview. Camera checks run locally; event names and warning counts are saved, not video or audio.</p>
         <p id="quota-note" class="muted" role="status" style="margin:8px 0 0;font-size:13px"></p>
       </section>
       <div class="progress"><span id="progress-bar"></span></div>
@@ -3065,7 +3131,7 @@ def _mock_interview_page(user_email: str) -> str:
         <aside class="right-stack">
           <section class="room-panel camera-card">
             <video id="camera-preview" autoplay muted playsinline></video>
-            <div id="camera-placeholder" class="camera-placeholder">Camera preview appears here after permission is granted.</div>
+            <div id="camera-placeholder" class="camera-placeholder">Camera and microphone checks are required before starting.</div>
             <span class="camera-label">Your video</span>
           </section>
           <section class="room-panel answer-area">
@@ -3118,6 +3184,7 @@ def _mock_interview_page(user_email: str) -> str:
   </main>
   <script src="/static/code_runner.js"></script>
   <script src="/static/interview_coding.js"></script>
+  <script src="/static/ui/assessment_proctor.js?v=2"></script>
   <script>
     const startBtn = document.getElementById('start-btn');
     const stopBtn = document.getElementById('stop-btn');
@@ -3156,6 +3223,7 @@ def _mock_interview_page(user_email: str) -> str:
     const recordingState = document.getElementById('recording-state');
     const cameraPreview = document.getElementById('camera-preview');
     const cameraPlaceholder = document.getElementById('camera-placeholder');
+    const cameraCheckStatus = document.getElementById('camera-check-status');
     let session = null;
     let activeIndex = 0;
     let answers = [];
@@ -3165,7 +3233,16 @@ def _mock_interview_page(user_email: str) -> str:
     let recognitionActive = false;
     let recognitionBase = '';
     let recognitionRestartTimer = null;
-    let mediaStream = null;
+    const proctored = new AssessmentProctor(cameraPreview, (message) => {{
+      if (message === 'terminated') {{
+        session = null;
+        setInterviewActive(false);
+        startBtn.disabled = true;
+        statusText.textContent = 'Assessment stopped after the third warning. This attempt cannot continue.';
+      }} else statusText.textContent = message;
+      if (!session && message !== 'terminated') cameraCheckStatus.textContent = message;
+    }}, () => cameraPlaceholder.classList.add('hidden'));
+    let cameraReady = false;
     let interviewerAudio = null;
     function escapeHtml(value) {{
       return String(value).replace(/[&<>"']/g, (char) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}}[char]));
@@ -3180,32 +3257,36 @@ def _mock_interview_page(user_email: str) -> str:
       timer.textContent = formatTime(Math.floor((Date.now() - startedAt) / 1000));
     }}
     function stopCamera() {{
-      if (mediaStream) {{
-        mediaStream.getTracks().forEach((track) => track.stop());
-      }}
-      mediaStream = null;
-      cameraPreview.srcObject = null;
-      cameraPlaceholder.textContent = 'Camera preview appears here after permission is granted.';
+      proctored.stop();
+      cameraReady = false;
+      cameraPlaceholder.textContent = 'Camera and microphone checks are required before starting.';
       cameraPlaceholder.classList.remove('hidden');
-      cameraBtn.textContent = 'Enable Camera';
+      cameraBtn.textContent = 'Check Camera & Microphone';
+      cameraCheckStatus.textContent = 'Check your camera and microphone before starting.';
     }}
     async function enableCamera() {{
-      if (mediaStream) {{
-        stopCamera();
-        return;
-      }}
+      cameraBtn.disabled = true;
+      cameraReady = false;
+      cameraCheckStatus.textContent = 'Connecting to camera and microphone...';
       try {{
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
-          cameraPlaceholder.textContent = 'Camera preview is not available in this browser. Interview can continue without video.';
-          return;
-        }}
-        mediaStream = await navigator.mediaDevices.getUserMedia({{ video: true, audio: false }});
-        cameraPreview.srcObject = mediaStream;
+        await proctored.enable();
+        cameraReady = true;
         cameraPlaceholder.classList.add('hidden');
-        cameraBtn.textContent = 'Turn Camera Off';
+        cameraBtn.textContent = 'Recheck Devices';
       }} catch (error) {{
-        cameraPlaceholder.textContent = 'Camera permission was not granted. Interview can continue without video.';
+        cameraReady = false;
+        const message = error.message || 'Camera and microphone check failed.';
+        cameraCheckStatus.textContent = message;
+        statusText.textContent = message;
+        if (proctored.stream?.getVideoTracks().some(track => track.readyState === 'live')) {{
+          cameraPlaceholder.classList.add('hidden');
+          cameraBtn.textContent = 'Recheck Devices';
+        }} else {{
+          cameraPlaceholder.textContent = message;
+          cameraPlaceholder.classList.remove('hidden');
+        }}
       }}
+      finally {{ cameraBtn.disabled = false; }}
     }}
     function preferredVoice(voiceProfile) {{
       const voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
@@ -3311,6 +3392,7 @@ def _mock_interview_page(user_email: str) -> str:
     }}
     function setInterviewActive(active) {{
       startBtn.disabled = active;
+      cameraBtn.disabled = active;
       region.disabled = active;
       jobSelect.disabled = active;
       previewAccent.disabled = active || !accentCatalog;
@@ -3393,6 +3475,14 @@ def _mock_interview_page(user_email: str) -> str:
       }}
     }}
     async function startInterview() {{
+      if (!cameraReady) {{
+        const message = 'Complete the camera and microphone room check first. If it failed, adjust your setup and click Recheck Devices.';
+        cameraCheckStatus.textContent = message;
+        statusText.textContent = message;
+        return;
+      }}
+      try {{ await proctored.enterFullscreen(); }}
+      catch (error) {{ statusText.textContent = error.message || 'Fullscreen is required.'; return; }}
       stopAccentPreview();
       region.disabled = true;
       jobSelect.disabled = true;
@@ -3402,18 +3492,20 @@ def _mock_interview_page(user_email: str) -> str:
       const response = await fetch('/api/mock-interview/start', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{region: region.value, interview_mode: questionLimit.value, job_id: selectedInterviewJob()?.job_id || '', run_id: selectedInterviewJob()?.run_id || 0}})
+        body: JSON.stringify({{region: region.value, interview_mode: questionLimit.value, job_id: selectedInterviewJob()?.job_id || '', run_id: selectedInterviewJob()?.run_id || 0, proctor_ready: true}})
       }});
       const payload = await response.json();
       if (!response.ok) {{
         statusText.textContent = payload.detail || 'Unable to start interview.';
         setInterviewActive(false);
         loadQuota();
+        if (document.fullscreenElement) await document.exitFullscreen();
         return;
       }}
       if (payload.usage) document.getElementById('quota-note').textContent = payload.usage.message;
       await waitForVoices();
       session = payload;
+      proctored.activate('mock_interview', session.session_id);
       activeIndex = 0;
       answers = [];
       startedAt = Date.now();
@@ -3428,6 +3520,7 @@ def _mock_interview_page(user_email: str) -> str:
       }} catch (error) {{
         statusText.textContent = 'Unable to start interview. Please retry.';
         setInterviewActive(false);
+        if (document.fullscreenElement) await document.exitFullscreen();
       }}
     }}
     function setupRecognition() {{
@@ -3537,6 +3630,7 @@ def _mock_interview_page(user_email: str) -> str:
         return;
       }}
       renderScorecard(payload.scorecard);
+      stopCamera();
       loadHistory();
       loadQuota();
     }}
@@ -3704,6 +3798,7 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mock Test - Job Hunting Agent</title>
+  <link rel="stylesheet" href="/static/ui/assessment_proctor.css">
   <style>
     :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --blue:#2563eb; --green:#22c55e; --red:#ef4444; --amber:#f59e0b; --line:rgba(148,163,184,.3); --panel:rgba(13,25,43,.92); --muted:#9fb1cc; }
     * { box-sizing: border-box; }
@@ -3855,9 +3950,12 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
               <option value="hard">Mostly hard</option>
             </select>
             <div class="actions">
+              <button type="button" class="btn ghost" id="test-camera-check">Check Camera &amp; Microphone</button>
               <button type="button" class="btn primary" id="start-button">Start Mock Test</button>
               <span class="muted" id="setup-status"></span>
             </div>
+            <div id="test-camera-slot"><video class="assessment-camera" id="test-camera" autoplay muted playsinline></video></div>
+            <p class="muted">Camera, microphone, one visible face, adequate lighting, and fullscreen are required. Two warnings are allowed; a third confirmed violation stops the assessment. By starting, you agree to local camera checks; event names and warning counts are saved, not video or audio.</p>
             <p class="muted" id="quota-note" role="status" style="margin:8px 0 0;font-size:13px"></p>
             <div id="setup-error" class="notice error hidden" role="alert"></div>
           </div>
@@ -3867,7 +3965,7 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
               <li>One correct answer per question; no negative marking.</li>
               <li>The timer runs on the server. The test auto-submits when time is up.</li>
               <li>Move between questions freely and mark any for review.</li>
-              <li>Your answers are saved in this browser if the page reloads.</li>
+              <li>Your answers are saved in this browser; a stopped attempt cannot resume.</li>
               <li>Answers and explanations are shown only after you submit.</li>
               <li>Each retake prefers questions you have not seen before.</li>
               <li>Technical jobs include code questions: predict the output, spot the bug, estimate complexity. Every code answer is verified by running it.</li>
@@ -3898,6 +3996,7 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
           <aside class="card">
             <h3 id="test-title">Questions</h3>
             <p class="muted" id="test-subtitle" style="margin:4px 0 0; font-size:13px"></p>
+            <div id="test-camera-active-slot"></div>
             <div class="palette" id="palette"></div>
             <div class="legend"><span class="l-answered">Answered</span><span>Not answered</span><span class="l-marked">Marked for review</span></div>
             <div class="actions"><button type="button" class="btn success" id="submit-button" style="width:100%">Submit Test</button></div>
@@ -3951,10 +4050,22 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
       </section>
     </section>
   </main>
+  <script src="/static/ui/assessment_proctor.js"></script>
   <script>
     const LETTERS = ['A', 'B', 'C', 'D'];
     const state = { options: null, length: 'standard', test: null, current: 0, answers: {}, marked: {}, seconds: {}, enteredAt: 0, deadline: 0, timerId: 0, submitting: false, filter: 'all', lastSetup: null };
     const $ = (id) => document.getElementById(id);
+    let cameraReady = false;
+    const proctored = new AssessmentProctor($('test-camera'), (message) => {
+      if (message === 'terminated') {
+        if (state.test) clearProgress(state.test.test_id);
+        state.test = null;
+        cameraReady = false;
+        clearInterval(state.timerId);
+        $('test-view').querySelectorAll('button').forEach(button => button.disabled = true);
+        $('setup-status').textContent = 'Assessment stopped after the third warning. This attempt cannot continue.';
+      } else $('setup-status').textContent = message;
+    });
     function escapeHtml(value) {
       return String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[ch]));
     }
@@ -4055,16 +4166,21 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
       }
     }
     async function startTest(setup) {
+      if (!cameraReady) { setError('Check camera and microphone first.'); return; }
+      try { await proctored.enterFullscreen(); }
+      catch (error) { setError(error.message || 'Fullscreen is required.'); return; }
       setError('');
       $('start-button').disabled = true;
       $('setup-status').textContent = 'Building your test…';
       try {
-        const test = await api('/api/mock-test/start', { method: 'POST', body: JSON.stringify(setup) });
+        const test = await api('/api/mock-test/start', { method: 'POST', body: JSON.stringify({...setup, proctor_ready: true}) });
         state.lastSetup = setup;
         showQuota(test.usage);
+        proctored.activate('mock_test', test.test_id);
         beginTest(test);
       } catch (error) {
         setError(error.message);
+        if (document.fullscreenElement) await document.exitFullscreen();
         loadQuota();
       } finally {
         $('start-button').disabled = quotaBlocked;
@@ -4075,7 +4191,8 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
       try {
         const test = await api(`/api/mock-test/${encodeURIComponent(testId)}`);
         if (test.status === 'completed') renderResult(test);
-        else beginTest(test);
+        else if (test.status === 'terminated') setError('This assessment was stopped and cannot resume. Start a new test after resolving the monitoring issue.');
+        else setError('An active assessment cannot resume after reloading. Start a new test with camera, microphone, and fullscreen.');
       } catch (error) {
         setError(error.message);
       }
@@ -4084,6 +4201,7 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
     // ---------- test runner ----------
     function beginTest(test) {
       state.test = test;
+      $('test-camera-active-slot').appendChild($('test-camera'));
       state.submitting = false;
       const saved = loadProgress(test.test_id) || {};
       state.answers = saved.answers || {};
@@ -4173,6 +4291,9 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
       try {
         const result = await api('/api/mock-test/submit', { method: 'POST', body: JSON.stringify({ test_id: state.test.test_id, answers: state.answers, question_seconds: state.seconds }) });
         clearProgress(state.test.test_id);
+        proctored.stop();
+        cameraReady = false;
+        $('test-camera-slot').appendChild($('test-camera'));
         renderResult(result);
         loadHistory();
       } catch (error) {
@@ -4268,6 +4389,17 @@ _MOCK_TEST_PAGE = r"""<!doctype html>
     $('start-button').addEventListener('click', () => {
       const job = selectedJob();
       startTest({ job_id: job ? job.job_id : '', run_id: job ? job.run_id : 0, length: state.length, difficulty: $('difficulty-select').value });
+    });
+    $('test-camera-check').addEventListener('click', async () => {
+      $('test-camera-check').disabled = true;
+      try {
+        await proctored.enable();
+        cameraReady = true;
+        setError('');
+      } catch (error) {
+        cameraReady = false;
+        setError(error.message || 'Camera and microphone check failed.');
+      } finally { $('test-camera-check').disabled = false; }
     });
     $('prev-button').addEventListener('click', () => goTo(state.current - 1));
     $('next-button').addEventListener('click', () => {
@@ -4400,10 +4532,10 @@ def _page(user_email: str, profile: dict) -> str:
         <fieldset>
           <legend>Daily automation</legend>
           <div class="grid-2">
-            <label class="field" for="daily_at"><span class="field-label">Daily time <span class="req" aria-hidden="true">*</span></span> <span class="field-hint">Needed for Schedule Daily Run</span><input id="daily_at" name="daily_at" type="time" data-label="Daily time" value="__DAILY_AT__"></label>
-            <p class="faint" style="align-self:end">Schedule Daily Run saves this resume and runs the agent every day at this time in your browser's timezone. Schedules survive server restarts.</p>
+            <label class="field" for="daily_at"><span class="field-label">Daily time (IST) <span class="req" aria-hidden="true">*</span></span> <span class="field-hint">Needed for Schedule Daily Run</span><input id="daily_at" name="daily_at" type="time" data-label="Daily time" value="__DAILY_AT__"></label>
+            <p class="faint" style="align-self:end">Schedule Daily Run saves this resume and runs the agent every day at this time in India Standard Time (IST, Asia/Kolkata). Schedules survive server restarts.</p>
           </div>
-          <input id="daily_timezone" name="daily_timezone" type="hidden" value="UTC">
+          <input id="daily_timezone" name="daily_timezone" type="hidden" value="Asia/Kolkata">
         </fieldset>
         <label class="check"><input type="checkbox" id="consent" name="consent" value="true" data-label="Privacy notice consent" __CONSENT_CHECKED__> <span data-i18n="consent">I agree to the <a href="/privacy">privacy notice</a>. My resume is used only to score it, find jobs, tailor resumes and prepare drafts. Recruiter emails are sent only after I approve each one.</span> <span class="req" aria-hidden="true">*</span></label>
         <div class="form-actions">

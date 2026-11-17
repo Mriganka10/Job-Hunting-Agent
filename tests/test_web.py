@@ -93,8 +93,8 @@ def test_mock_interview_question_history_is_user_scoped_and_persistent() -> None
     other_email = f"question-history-{uuid4().hex}@example.com"
     client = authenticated_client(email)
 
-    first = client.post("/api/mock-interview/start", json={"region": "India", "interview_mode": "standard"}).json()
-    second = client.post("/api/mock-interview/start", json={"region": "India", "interview_mode": "standard"}).json()
+    first = client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "India", "interview_mode": "standard"}).json()
+    second = client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "India", "interview_mode": "standard"}).json()
 
     assert first["selection"]["new_questions"] == 8
     assert second["selection"]["new_questions"] == 8
@@ -337,7 +337,9 @@ def test_home_page_contains_resume_and_profile_inputs() -> None:
     assert "[Company Name]" in response.text
     assert "copy-draft" in response.text
     assert 'name="daily_timezone"' in response.text
-    assert "Intl.DateTimeFormat().resolvedOptions().timeZone" in response.text
+    assert 'value="Asia/Kolkata"' in response.text
+    assert "Daily time (IST)" in response.text
+    assert "timezoneInput.value = SCHEDULE_TIMEZONE" in response.text
     assert "Application and Email Audit" not in response.text
     assert "https://www.linkedin.com/in/mriganka-das-b2ba3186/" not in response.text
     assert "Python Developer, Machine Learning Engineer, Data Engineer" not in response.text
@@ -394,8 +396,8 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert page.status_code == 200
     assert "Mock Interview Agent" in page.text
     assert "Virtual Interview Studio" in page.text
-    assert "Enable Camera" in page.text
-    assert "Turn Camera Off" in page.text
+    assert "Check Camera &amp; Microphone" in page.text
+    assert "Recheck Devices" in page.text
     assert "Camera On" not in page.text
     assert "camera-preview" in page.text
     assert 'id="code-editor"' in page.text
@@ -409,7 +411,7 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert "Weaknesses" in page.text
     assert "Your video" in page.text
     assert "function stopCamera()" in page.text
-    assert "mediaStream.getTracks().forEach((track) => track.stop())" in page.text
+    assert "proctored.stop()" in page.text
     assert "/static/ai-interviewer-sarah.png" in page.text
     assert "const history =" not in page.text
     assert "historyPanel" in page.text
@@ -438,7 +440,7 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
 
     start = client.post(
         "/api/mock-interview/start",
-        json={"region": "United Kingdom", "question_limit": 5},
+        json={"proctor_ready": True, "region": "United Kingdom", "question_limit": 5},
     )
     assert start.status_code == 200
     interview = start.json()
@@ -549,8 +551,8 @@ def test_accent_preview_missing_configuration_is_explicit(monkeypatch) -> None:
 
 def test_interview_rejects_unknown_country_and_ignores_spoofed_accent() -> None:
     client = authenticated_client()
-    assert client.post("/api/mock-interview/start", json={"region": "unsupported"}).status_code == 400
-    response = client.post("/api/mock-interview/start", json={"region": "Canada", "accent": "British English"})
+    assert client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "unsupported"}).status_code == 400
+    response = client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "Canada", "accent": "British English"})
     assert response.status_code == 200
     assert response.json()["accent"] == "Canadian English"
     page = client.get("/mock-interview").text
@@ -565,7 +567,7 @@ def test_mock_interview_requires_authenticated_user() -> None:
 
     assert client.get("/mock-interview", follow_redirects=False).status_code == 303
     assert client.get("/api/mock-interview/questions").status_code == 401
-    assert client.post("/api/mock-interview/start", json={}).status_code == 401
+    assert client.post("/api/mock-interview/start", json={"proctor_ready": True}).status_code == 401
     assert client.post("/api/mock-interview/complete", json={}).status_code == 401
     assert client.get("/api/mock-interview/history").status_code == 401
 
@@ -870,12 +872,13 @@ def test_scheduler_start_endpoint_starts_without_immediate_run() -> None:
     user_email = f"scheduler-{uuid4().hex}@example.com"
     client = authenticated_client(user_email)
     assert client.post("/api/scheduler/stop").status_code == 200
+    assert client.get("/api/dashboard").json()["scheduler"]["timezone"] == "Asia/Kolkata"
 
     response = client.post(
         "/api/scheduler/start",
         data={
             "daily_at": "23:59",
-            "daily_timezone": "Asia/Kolkata",
+            "daily_timezone": "UTC",  # An old browser must not override the fixed IST schedule.
             "application_mode": "draft",
             "name": "Scheduler User",
             "phone": "+91 98765 43210",
@@ -894,7 +897,7 @@ def test_scheduler_start_endpoint_starts_without_immediate_run() -> None:
     assert payload["scheduler"]["daily_at"] == "23:59"
     assert payload["scheduler"]["timezone"] == "Asia/Kolkata"
     assert payload["scheduler"]["last_run_at"] is None
-    assert payload["scheduler"]["next_run_at"]
+    assert payload["scheduler"]["next_run_at"].endswith("+05:30")
 
     assert client.post("/api/scheduler/stop").status_code == 200
 
