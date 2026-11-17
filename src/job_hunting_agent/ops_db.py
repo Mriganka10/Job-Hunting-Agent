@@ -132,6 +132,17 @@ def init_ops_db() -> None:
               reason TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open',
               ts {real} NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_content_reports_item ON content_reports(kind, item_id)",
+        f"""CREATE TABLE IF NOT EXISTS assessment_proctor (
+              user_email TEXT NOT NULL, kind TEXT NOT NULL, assessment_id INTEGER NOT NULL,
+              status TEXT NOT NULL DEFAULT 'active', warnings INTEGER NOT NULL DEFAULT 0,
+              last_seen {real} NOT NULL, reason TEXT NOT NULL DEFAULT '',
+              PRIMARY KEY (user_email, kind, assessment_id))""",
+        f"""CREATE TABLE IF NOT EXISTS assessment_proctor_events (
+              id {pk}, user_email TEXT NOT NULL, kind TEXT NOT NULL, assessment_id INTEGER NOT NULL,
+              event_id TEXT NOT NULL, signal TEXT NOT NULL, confidence {real},
+              action TEXT NOT NULL, ts {real} NOT NULL,
+              UNIQUE (user_email, kind, assessment_id, event_id))""",
+        "CREATE INDEX IF NOT EXISTS idx_proctor_events_user ON assessment_proctor_events(user_email, kind, assessment_id)",
     ]
     with db.connection() as conn:
         if db.IS_POSTGRES:
@@ -456,6 +467,7 @@ USER_TABLES = (
     ("user_profiles", "user_email"), ("run_records", "user_email"), ("application_records", "user_email"),
     ("scheduler_records", "user_email"), ("mock_interview_records", "user_email"), ("mock_test_records", "user_email"),
     ("application_outbox", "user_email"), ("lead_feedback", "user_email"), ("content_reports", "user_email"),
+    ("assessment_proctor", "user_email"), ("assessment_proctor_events", "user_email"),
     ("otp_codes", "email"), ("email_verifications", "email"),
 )
 

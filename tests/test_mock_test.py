@@ -146,7 +146,7 @@ def test_mock_test_web_flow_is_graded_server_side_once_and_user_scoped() -> None
     job_id = options["jobs"][0]["job_id"]
     assert job_id == "linkedin:123"
 
-    started = client.post("/api/mock-test/start", json={"job_id": job_id, "run_id": run_id, "length": "quick", "difficulty": "mixed"})
+    started = client.post("/api/mock-test/start", json={"proctor_ready": True, "job_id": job_id, "run_id": run_id, "length": "quick", "difficulty": "mixed"})
     assert started.status_code == 200
     test = started.json()
     assert test["status"] == "in_progress" and len(test["questions"]) == 10
@@ -174,8 +174,26 @@ def test_mock_test_rejects_bad_input_and_requires_login() -> None:
     assert TestClient(app).get("/api/mock-test/options").status_code == 401
     assert TestClient(app).get("/mock-test", follow_redirects=False).status_code == 303
     client = authenticated_client(f"bad-{uuid4().hex}@example.com")
-    assert client.post("/api/mock-test/start", json={"length": "forever"}).status_code == 400
-    assert client.post("/api/mock-test/start", json={"difficulty": "impossible"}).status_code == 400
-    assert client.post("/api/mock-test/start", json={"job_id": "linkedin:missing"}).status_code == 404
-    general = client.post("/api/mock-test/start", json={"length": "quick"})
+    assert client.post("/api/mock-test/start", json={"length": "quick"}).status_code == 428
+    assert client.post("/api/mock-test/start", json={"proctor_ready": True, "length": "forever"}).status_code == 400
+    assert client.post("/api/mock-test/start", json={"proctor_ready": True, "difficulty": "impossible"}).status_code == 400
+    assert client.post("/api/mock-test/start", json={"proctor_ready": True, "job_id": "linkedin:missing"}).status_code == 404
+    general = client.post("/api/mock-test/start", json={"proctor_ready": True, "length": "quick"})
     assert general.status_code == 200 and general.json()["job_title"] == "General practice"
+
+
+def test_third_proctor_event_stops_test_and_blocks_submission() -> None:
+    client = authenticated_client(f"proctor-{uuid4().hex}@example.com")
+    started = client.post("/api/mock-test/start", json={"proctor_ready": True, "length": "quick"})
+    assert started.status_code == 200
+    test_id = started.json()["test_id"]
+    for index, signal in enumerate(("tab_hidden", "multiple_faces", "device_visible"), start=1):
+        event = client.post("/api/proctor/event", json={
+            "kind": "mock_test", "assessment_id": test_id, "event_id": str(index), "signal": signal,
+        })
+        assert event.status_code == 200
+        assert event.json()["warnings"] == index
+    assert event.json()["status"] == "terminated"
+    assert client.post("/api/mock-test/submit", json={"test_id": test_id, "answers": {}}).status_code == 409
+    detail = client.get(f"/api/mock-test/{test_id}").json()
+    assert detail["status"] == "terminated" and detail["questions"] == []

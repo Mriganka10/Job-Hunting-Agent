@@ -8,6 +8,7 @@
   const escapeHtml = (value) => UI.escape(value);
   const form = $('agent-form');
   const timezoneInput = $('daily_timezone');
+  const SCHEDULE_TIMEZONE = 'Asia/Kolkata';
   const VIEWS = { overview: 'Overview', run: 'Run & profile', jobs: 'Job leads', resume: 'Resume & ATS', approvals: 'Approvals' };
   const PORTAL_LABELS = { linkedin: 'LinkedIn', naukri: 'Naukri', himalayas: 'Himalayas', remotive: 'Remotive', arbeitnow: 'Arbeitnow', jobicy: 'Jobicy', remoteok: 'Remote OK', adzuna: 'Adzuna', careerjet: 'Careerjet', jooble: 'Jooble', jsearch: 'Google for Jobs', indeed: 'Indeed', foundit: 'Foundit', workindia: 'WorkIndia', shine: 'Shine', glassdoor: 'Glassdoor', timesjobs: 'TimesJobs', apna: 'apna', instahyre: 'Instahyre', cutshort: 'Cutshort', wellfound: 'Wellfound', internshala: 'Internshala', freshersworld: 'Freshersworld', hirist: 'Hirist', iimjobs: 'iimjobs', ziprecruiter: 'ZipRecruiter' };
   const FEEDBACK_REASONS = [['role', 'Wrong role'], ['location', 'Wrong location'], ['seniority', 'Wrong seniority'], ['skills', 'Skills do not match'], ['salary', 'Salary'], ['company', 'Company'], ['duplicate', 'Duplicate'], ['expired', 'Expired / closed'], ['other', 'Other']];
@@ -51,6 +52,16 @@
     if (Number.isNaN(date.getTime())) return String(value);
     return date.toLocaleString(UI.locale, { dateStyle: 'medium', timeStyle: 'short' });
   }
+  function scheduleTime(value, zone = SCHEDULE_TIMEZONE) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    try {
+      const formatted = date.toLocaleString(UI.locale, { dateStyle: 'medium', timeStyle: 'short', timeZone: zone });
+      return `${formatted} ${zone === SCHEDULE_TIMEZONE ? 'IST' : zone}`;
+    } catch (_) { return when(value); }
+  }
+  function scheduleZoneLabel(zone) { return zone === SCHEDULE_TIMEZONE ? 'IST (Asia/Kolkata)' : zone; }
   function ago(value) {
     const date = new Date(value);
     if (!value || Number.isNaN(date.getTime())) return '';
@@ -63,7 +74,7 @@
     return `${days} day${days === 1 ? '' : 's'} ago`;
   }
   function enrichFormData() {
-    timezoneInput.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    timezoneInput.value = SCHEDULE_TIMEZONE;
     const data = new FormData(form);
     data.set('daily_timezone', timezoneInput.value);
     return data;
@@ -291,14 +302,15 @@
   function renderScheduler(snapshot) {
     scheduler = snapshot || null;
     const isRunning = scheduler && scheduler.running;
+    const scheduleZone = isRunning ? (scheduler.timezone || SCHEDULE_TIMEZONE) : SCHEDULE_TIMEZONE;
     const error = scheduler && scheduler.last_error;
     const pill = $('scheduler-pill');
     pill.className = `badge ${error ? 'bad' : isRunning ? 'good' : ''}`;
     pill.textContent = error ? 'Last run failed' : isRunning ? 'Scheduled' : 'Off';
     const rows = [
       ['Daily time', scheduler?.daily_at || 'Not set'],
-      ['Timezone', scheduler?.timezone || timezoneInput.value || 'UTC'],
-      ['Next run', when(scheduler?.next_run_at) || 'Not scheduled'],
+      ['Timezone', scheduleZoneLabel(scheduleZone)],
+      ['Next run', scheduleTime(scheduler?.next_run_at, scheduleZone) || 'Not scheduled'],
       ['Last run', when(scheduler?.last_run_at) || 'No run yet'],
     ];
     let html = `<dl class="kv">${rows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd></div>`).join('')}</dl>`;
@@ -391,7 +403,7 @@
       : `<div class="empty"><strong>No leads yet</strong><p class="muted">Run the agent to see your best matches here.</p><a class="btn btn-primary btn-sm" href="#run">Start a run</a></div>`;
 
     $('overview-schedule').innerHTML = scheduler?.running
-      ? `<p><span class="badge good">Scheduled</span></p><p style="margin-top:10px">${escapeHtml(`Runs daily at ${scheduler.daily_at} (${scheduler.timezone || 'UTC'}).`)}</p><p class="faint" style="margin-top:4px">Next run ${escapeHtml(when(scheduler.next_run_at) || 'soon')}</p>`
+      ? `<p><span class="badge good">Scheduled</span></p><p style="margin-top:10px">${escapeHtml(`Runs daily at ${scheduler.daily_at} (${scheduleZoneLabel(scheduler.timezone || SCHEDULE_TIMEZONE)}).`)}</p><p class="faint" style="margin-top:4px">Next run ${escapeHtml(scheduleTime(scheduler.next_run_at, scheduler.timezone || SCHEDULE_TIMEZONE) || 'soon')}</p>`
       : `<p><span class="badge">Off</span></p><p class="muted" style="margin-top:10px">Set a daily time on Run &amp; profile to get fresh leads every day.</p>`;
   }
 
@@ -1043,7 +1055,7 @@
   });
 
   // --------------------------------------------------------------- boot
-  timezoneInput.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  timezoneInput.value = SCHEDULE_TIMEZONE;
   $('filter-score-value').textContent = '0%';
   showView(false);
   renderOverview(null);

@@ -128,8 +128,9 @@ Job description	जॉब विवरण	الوصف الوظيفي
 Optional. Paste one to check keywords, required skills and screening risks.	वैकल्पिक। कीवर्ड, ज़रूरी कौशल और स्क्रीनिंग जोखिम जाँचने के लिए एक पेस्ट करें।	اختياري. الصق وصفًا لفحص الكلمات المفتاحية والمهارات المطلوبة ومخاطر الفرز.
 Paste the target job description	लक्षित जॉब विवरण पेस्ट करें	الصق الوصف الوظيفي المستهدف
 Daily time	दैनिक समय	الوقت اليومي
+Daily time (IST)	दैनिक समय (IST)	الوقت اليومي (بتوقيت الهند)
 Needed for Schedule Daily Run	दैनिक रन शेड्यूल करने के लिए ज़रूरी	مطلوب لجدولة التشغيل اليومي
-Schedule Daily Run saves this resume and runs the agent every day at this time in your browser's timezone. Schedules survive server restarts.	दैनिक रन शेड्यूल करने पर यह रिज़्यूमे सेव होता है और एजेंट हर दिन इस समय आपके ब्राउज़र के टाइमज़ोन में चलता है। सर्वर रीस्टार्ट होने पर भी शेड्यूल बना रहता है।	تحفظ جدولة التشغيل اليومي هذه السيرة الذاتية وتشغّل الوكيل كل يوم في هذا الوقت حسب المنطقة الزمنية لمتصفحك. وتبقى الجداول بعد إعادة تشغيل الخادم.
+Schedule Daily Run saves this resume and runs the agent every day at this time in India Standard Time (IST, Asia/Kolkata). Schedules survive server restarts.	दैनिक रन शेड्यूल करने पर यह रिज़्यूमे सेव होता है और एजेंट हर दिन इस समय भारतीय मानक समय (IST, Asia/Kolkata) के अनुसार चलता है। सर्वर रीस्टार्ट होने पर भी शेड्यूल बना रहता है।	تحفظ جدولة التشغيل اليومي هذه السيرة الذاتية وتشغّل الوكيل كل يوم في هذا الوقت بتوقيت الهند القياسي (Asia/Kolkata). وتبقى الجداول بعد إعادة تشغيل الخادم.
 Schedule Daily Run	दैनिक रन शेड्यूल करें	جدولة التشغيل اليومي
 Stop Daily Run	दैनिक रन रोकें	إيقاف التشغيل اليومي
 Run progress	रन की प्रगति	تقدّم التشغيل

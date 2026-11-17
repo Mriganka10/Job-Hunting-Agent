@@ -93,8 +93,8 @@ def test_mock_interview_question_history_is_user_scoped_and_persistent() -> None
     other_email = f"question-history-{uuid4().hex}@example.com"
     client = authenticated_client(email)
 
-    first = client.post("/api/mock-interview/start", json={"region": "India", "interview_mode": "standard"}).json()
-    second = client.post("/api/mock-interview/start", json={"region": "India", "interview_mode": "standard"}).json()
+    first = client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "India", "interview_mode": "standard"}).json()
+    second = client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "India", "interview_mode": "standard"}).json()
 
     assert first["selection"]["new_questions"] == 8
     assert second["selection"]["new_questions"] == 8
@@ -394,8 +394,8 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert page.status_code == 200
     assert "Mock Interview Agent" in page.text
     assert "Virtual Interview Studio" in page.text
-    assert "Enable Camera" in page.text
-    assert "Turn Camera Off" in page.text
+    assert "Check Camera &amp; Microphone" in page.text
+    assert "Recheck Devices" in page.text
     assert "Camera On" not in page.text
     assert "camera-preview" in page.text
     assert 'id="code-editor"' in page.text
@@ -409,7 +409,7 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
     assert "Weaknesses" in page.text
     assert "Your video" in page.text
     assert "function stopCamera()" in page.text
-    assert "mediaStream.getTracks().forEach((track) => track.stop())" in page.text
+    assert "proctored.stop()" in page.text
     assert "/static/ai-interviewer-sarah.png" in page.text
     assert "const history =" not in page.text
     assert "historyPanel" in page.text
@@ -438,7 +438,7 @@ def test_mock_interview_page_and_api_are_personalized() -> None:
 
     start = client.post(
         "/api/mock-interview/start",
-        json={"region": "United Kingdom", "question_limit": 5},
+        json={"proctor_ready": True, "region": "United Kingdom", "question_limit": 5},
     )
     assert start.status_code == 200
     interview = start.json()
@@ -549,8 +549,8 @@ def test_accent_preview_missing_configuration_is_explicit(monkeypatch) -> None:
 
 def test_interview_rejects_unknown_country_and_ignores_spoofed_accent() -> None:
     client = authenticated_client()
-    assert client.post("/api/mock-interview/start", json={"region": "unsupported"}).status_code == 400
-    response = client.post("/api/mock-interview/start", json={"region": "Canada", "accent": "British English"})
+    assert client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "unsupported"}).status_code == 400
+    response = client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "Canada", "accent": "British English"})
     assert response.status_code == 200
     assert response.json()["accent"] == "Canadian English"
     page = client.get("/mock-interview").text
@@ -565,7 +565,7 @@ def test_mock_interview_requires_authenticated_user() -> None:
 
     assert client.get("/mock-interview", follow_redirects=False).status_code == 303
     assert client.get("/api/mock-interview/questions").status_code == 401
-    assert client.post("/api/mock-interview/start", json={}).status_code == 401
+    assert client.post("/api/mock-interview/start", json={"proctor_ready": True}).status_code == 401
     assert client.post("/api/mock-interview/complete", json={}).status_code == 401
     assert client.get("/api/mock-interview/history").status_code == 401
 

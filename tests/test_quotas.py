@@ -29,11 +29,11 @@ def _client(email: str) -> TestClient:
 
 
 def _start_interview(client: TestClient):
-    return client.post("/api/mock-interview/start", json={"region": "India", "interview_mode": "quick"})
+    return client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "India", "interview_mode": "quick"})
 
 
 def _start_test(client: TestClient):
-    return client.post("/api/mock-test/start", json={"length": "quick", "difficulty": "mixed"})
+    return client.post("/api/mock-test/start", json={"proctor_ready": True, "length": "quick", "difficulty": "mixed"})
 
 
 def test_week_is_monday_to_sunday_in_ist(quotas_on):
@@ -59,7 +59,7 @@ def test_three_interviews_per_week_then_blocked(quotas_on):
     email = f"quota-int-{uuid4().hex}@example.com"
     client = _client(email)
     # A rejected request (bad mode) must not use a slot.
-    assert client.post("/api/mock-interview/start", json={"interview_mode": "forever"}).status_code == 400
+    assert client.post("/api/mock-interview/start", json={"proctor_ready": True, "interview_mode": "forever"}).status_code == 400
     for expected_left in (2, 1, 0):
         started = _start_interview(client)
         assert started.status_code == 200
@@ -75,7 +75,7 @@ def test_three_interviews_per_week_then_blocked(quotas_on):
 
 def test_five_tests_per_week_then_blocked(quotas_on):
     client = _client(f"quota-test-{uuid4().hex}@example.com")
-    assert client.post("/api/mock-test/start", json={"length": "forever"}).status_code == 400
+    assert client.post("/api/mock-test/start", json={"proctor_ready": True, "length": "forever"}).status_code == 400
     for _ in range(5):
         assert _start_test(client).status_code == 200
     blocked = _start_test(client)

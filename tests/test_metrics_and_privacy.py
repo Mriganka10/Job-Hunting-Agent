@@ -111,12 +111,12 @@ def test_item_analysis_flags_suspicious_questions(isolated_db):
 
 def test_interview_feedback_rating_and_question_reports(signed_in):
     email, client, _ = signed_in
-    session = client.post("/api/mock-interview/start", json={"region": "India", "interview_mode": "quick"}).json()
+    session = client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "India", "interview_mode": "quick"}).json()
     assert client.post(f"/api/mock-interview/{session['session_id']}/rating", json={"rating": 6}).status_code == 400
     saved = client.post(f"/api/mock-interview/{session['session_id']}/rating", json={"rating": 2, "unfair": True, "comment": "score too low"})
     assert saved.status_code == 200
     assert ops_db.content_reports_since(time.time() - 60, "interview_feedback")
-    test = client.post("/api/mock-test/start", json={"length": "quick"}).json()
+    test = client.post("/api/mock-test/start", json={"proctor_ready": True, "length": "quick"}).json()
     question_id = test["questions"][0]["id"]
     assert client.post("/api/mock-test/report-question", json={"test_id": test["test_id"], "question_id": question_id}).status_code == 200
     assert client.post("/api/mock-test/report-question", json={"test_id": test["test_id"], "question_id": "nope"}).status_code == 404

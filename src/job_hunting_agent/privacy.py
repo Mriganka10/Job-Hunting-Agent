@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import db, ops_db
+from . import db, ops_db, proctor
 from .metrics import emit
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,8 @@ CONSENT_VERSION = os.getenv("JOB_AGENT_CONSENT_VERSION", "2026-10")
 PURPOSE = (
     "We use your resume and profile only to score ATS readiness, find matching jobs, prepare tailored resumes and "
     "application drafts, and run practice tests and interviews for you. Recruiter emails are sent only after you approve "
-    "each one. You can download or delete your data at any time."
+    "each one. Proctored practice uses your camera and microphone locally and stores monitoring events and warnings, "
+    "not video or audio. You can download or delete your data at any time."
 )
 
 
@@ -74,6 +75,7 @@ def export_user_data(user_email: str) -> dict[str, Any]:
         "runs": runs,
         "mock_tests": db.latest_mock_tests(email, limit=200, completed_only=False),
         "mock_interviews": db.latest_mock_interviews(email, limit=200),
+        "assessment_monitoring_events": proctor.events(email),
         "application_outbox": ops_db.outbox_items(email, limit=500),
         "audit_log": ops_db.audit_entries(email, limit=1000),
         "schedule": db.schedule_for_user(email),

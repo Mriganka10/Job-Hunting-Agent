@@ -1,0 +1,8 @@
+.assessment-proctor-dialog[hidden] { display: none !important; }
+.assessment-proctor-dialog { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; padding: 24px; background: rgba(2, 6, 23, .88); color: #fff; }
+.assessment-proctor-dialog section { width: min(520px, 100%); padding: 28px; border: 2px solid #f59e0b; border-radius: 12px; background: #0f172a; box-shadow: 0 25px 70px #0009; }
+.assessment-proctor-dialog h2 { margin: 0 0 10px; color: #fde68a; }
+.assessment-proctor-dialog p { line-height: 1.55; }
+.assessment-proctor-dialog button, .assessment-proctor-dialog a { display: inline-flex; align-items: center; margin-top: 10px; min-height: 42px; padding: 8px 18px; border: 0; border-radius: 7px; background: #f59e0b; color: #111827; font: inherit; font-weight: 800; text-decoration: none; cursor: pointer; }
+.assessment-proctor-dialog button[hidden], .assessment-proctor-dialog a[hidden] { display: none; }
+.assessment-camera { display: block; width: 100%; max-height: 210px; object-fit: cover; background: #020617; border: 1px solid #64748b; border-radius: 8px; margin: 10px 0; }

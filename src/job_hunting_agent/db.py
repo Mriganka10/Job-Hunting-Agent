@@ -4,7 +4,7 @@ import json
 import os
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -36,10 +36,10 @@ def connection() -> Iterator[Any]:
             conn.commit()
     else:
         db_path = DATABASE_URL.replace("sqlite:///", "", 1)
-        with sqlite3.connect(db_path) as conn:
+        with closing(sqlite3.connect(db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            yield conn
-            conn.commit()
+            with conn:
+                yield conn
 
 
 def init_db() -> None:
@@ -123,7 +123,7 @@ def init_db() -> None:
               user_email VARCHAR(320) UNIQUE NOT NULL,
               active BOOLEAN NOT NULL DEFAULT TRUE,
               daily_at VARCHAR(5) NOT NULL,
-              timezone VARCHAR(80) NOT NULL DEFAULT 'UTC',
+              timezone VARCHAR(80) NOT NULL DEFAULT 'Asia/Kolkata',
               resume_path TEXT NOT NULL,
               resume_uri TEXT NOT NULL DEFAULT '',
               config_payload JSONB NOT NULL,
@@ -266,7 +266,7 @@ def init_db() -> None:
               user_email TEXT UNIQUE NOT NULL,
               active INTEGER NOT NULL DEFAULT 1,
               daily_at TEXT NOT NULL,
-              timezone TEXT NOT NULL DEFAULT 'UTC',
+              timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata',
               resume_path TEXT NOT NULL,
               resume_uri TEXT NOT NULL DEFAULT '',
               config_payload TEXT NOT NULL,
@@ -337,7 +337,7 @@ def init_db() -> None:
             conn.execute("SELECT pg_advisory_xact_lock(4815162342)")
         for statement in statements:
             conn.execute(statement)
-        _ensure_column(conn, "scheduler_records", "timezone", "TEXT NOT NULL DEFAULT 'UTC'")
+        _ensure_column(conn, "scheduler_records", "timezone", "TEXT NOT NULL DEFAULT 'Asia/Kolkata'")
         _ensure_column(conn, "scheduler_records", "resume_uri", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "scheduler_records", "next_run_at", "TEXT")
         _ensure_column(conn, "scheduler_records", "last_run_at", "TEXT")

@@ -94,7 +94,7 @@ def test_job_specific_interview_web_flow_and_persistence():
     focused = client.get("/api/mock-interview/questions", params={"job_id": "linkedin:777", "run_id": run_id}).json()
     assert focused["roles"] == ["Data Engineer"] and focused["job"]["company"] == "Acme Data"
 
-    started = client.post("/api/mock-interview/start", json={"region": "India", "interview_mode": "standard", "job_id": "linkedin:777", "run_id": run_id})
+    started = client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "India", "interview_mode": "standard", "job_id": "linkedin:777", "run_id": run_id})
     assert started.status_code == 200
     session = started.json()
     assert session["job"]["title"] == "Data Engineer"
@@ -113,9 +113,9 @@ def test_job_specific_interview_web_flow_and_persistence():
 
 def test_general_interview_is_unchanged_and_unknown_job_is_rejected():
     client = authenticated_client(f"general-{uuid4().hex}@example.com")
-    general = client.post("/api/mock-interview/start", json={"region": "India", "interview_mode": "quick"})
+    general = client.post("/api/mock-interview/start", json={"proctor_ready": True, "region": "India", "interview_mode": "quick"})
     assert general.status_code == 200
     assert general.json()["job"] is None
     assert all(item["topic"] != "job_fit" for item in general.json()["questions"])
-    assert client.post("/api/mock-interview/start", json={"interview_mode": "quick", "job_id": "linkedin:missing"}).status_code == 404
+    assert client.post("/api/mock-interview/start", json={"proctor_ready": True, "interview_mode": "quick", "job_id": "linkedin:missing"}).status_code == 404
     assert client.get("/api/mock-interview/questions", params={"job_id": "linkedin:missing"}).status_code == 404
