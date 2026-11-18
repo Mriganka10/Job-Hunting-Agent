@@ -561,14 +561,12 @@
     document.querySelectorAll('#layout-toggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.layout === filters.layout)));
   }
 
-  const KEYED_SOURCES = ['adzuna', 'careerjet', 'jooble', 'jsearch'];
   const SOURCE_STATUS = { empty: 'No postings for your roles', failed: 'Did not answer this time', timeout: 'Too slow; skipped this run' };
   function sourceMixHtml(payload) {
     const sources = payload?.timings?.sources;
     if (!sources || typeof sources !== 'object') return '';
     const active = Object.entries(sources).filter(([, info]) => info && info.status !== 'disabled');
-    const offline = Object.entries(sources).filter(([name, info]) => info && info.status === 'disabled' && KEYED_SOURCES.includes(name)).map(([name]) => portalName(name));
-    if (!active.length && !offline.length) return '';
+    if (!active.length) return '';
     active.sort((a, b) => (b[1].shown || 0) - (a[1].shown || 0) || (b[1].leads || 0) - (a[1].leads || 0));
     const rows = active.map(([name, info]) => {
       const found = Number(info.leads) || 0;
@@ -578,10 +576,7 @@
         : (SOURCE_STATUS[info.status] || 'No postings for your roles');
       return `<li><strong>${escapeHtml(portalName(name))}</strong><span class="muted">${escapeHtml(detail)}</span></li>`;
     }).join('');
-    const note = offline.length
-      ? `<p class="muted source-note">Not connected: ${escapeHtml(offline.join(', '))}. These search Indian job boards beyond LinkedIn and Naukri; connecting them needs an API key from each provider.</p>`
-      : '';
-    return `<details class="panel source-mix"><summary>Where these leads came from</summary><ul class="source-list">${rows}</ul>${note}</details>`;
+    return `<details class="panel source-mix"><summary>Where these leads came from</summary><ul class="source-list">${rows}</ul></details>`;
   }
 
   function portalLinksHtml() {

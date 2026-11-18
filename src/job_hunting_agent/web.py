@@ -2846,7 +2846,7 @@ def _login_page() -> str:
         <h2>Email OTP Sign In</h2>
         <p class="muted">Enter your email and we will send a one-time sign-in code. No password needed.</p>
         <form id="request-form" novalidate>
-          <label class="field" for="email">Email <span class="req" aria-hidden="true">*</span><input id="email" name="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" pattern="^[^\s@]+@[^\s@]+\.[^\s@]{2,}$" required autofocus></label>
+          <label class="field" for="email"><span class="field-label">Email <span class="req" aria-hidden="true">*</span></span><input id="email" name="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" pattern="^[^\s@]+@[^\s@]+\.[^\s@]{2,}$" required autofocus></label>
           <button class="btn btn-primary" id="send-otp" type="submit">Send OTP</button>
         </form>
         <form id="verify-form" class="hidden" method="post" action="/api/auth/verify">
@@ -2912,7 +2912,7 @@ def _register_page() -> str:
         <h2>New User Registration</h2>
         <p class="muted">Enter your email address. AWS will send a verification email with a link that approves this address for sign-in codes.</p>
         <form id="register-form" novalidate>
-          <label class="field" for="email">Email <span class="req" aria-hidden="true">*</span><input id="email" name="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" pattern="^[^\s@]+@[^\s@]+\.[^\s@]{2,}$" required autofocus></label>
+          <label class="field" for="email"><span class="field-label">Email <span class="req" aria-hidden="true">*</span></span><input id="email" name="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" pattern="^[^\s@]+@[^\s@]+\.[^\s@]{2,}$" required autofocus></label>
           <button class="btn btn-primary" id="register-submit" type="submit">Send Verification Link</button>
         </form>
         <p id="status" class="auth-status" role="status" aria-live="polite"></p>
